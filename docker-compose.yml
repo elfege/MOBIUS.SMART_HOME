@@ -171,6 +171,28 @@ services:
     networks:
       - smarthome-net
 
+  # ---------------------------------------------------------------------------
+  # Matter Server - Direct Matter protocol device control
+  # Provides WebSocket API for commissioning, commanding, and monitoring
+  # Matter-compatible devices without going through Hubitat.
+  # MUST use host networking for mDNS device discovery.
+  # ---------------------------------------------------------------------------
+  matter-server:
+    image: ghcr.io/home-assistant-libs/python-matter-server:stable
+    container_name: smarthome-matter-server
+    restart: unless-stopped
+    network_mode: host
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - matter_data:/data/
+      - /run/dbus:/run/dbus:ro
+    environment:
+      MATTER_SERVER__INSTANCE_NAME: "0_SMART_HOME"
+      MATTER_SERVER__PORT: "${MATTER_PORT:-5580}"
+      MATTER_SERVER__VENDORID: "65521"
+      MATTER_SERVER__FABRICID: "1"
+
 # =============================================================================
 # Networks
 # =============================================================================
@@ -183,4 +205,6 @@ networks:
 # =============================================================================
 volumes:
   postgres_data:
+    driver: local
+  matter_data:
     driver: local

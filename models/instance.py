@@ -66,6 +66,7 @@ class RuntimeInstanceState:
     functional_sensors: Dict[str, bool] = field(default_factory=dict)
     timeout_job_id: Optional[str] = None
     health_check_job_id: Optional[str] = None
+    auto_resume_job_id: Optional[str] = None
 
     def is_motion_recent(self, threshold_seconds: int) -> bool:
         """Check if motion was detected within threshold."""

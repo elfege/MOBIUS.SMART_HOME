@@ -50,6 +50,7 @@ class AdvancedMotionLightingApp(BaseApp):
         illuminance_sensor: Optional lux sensor
         pause_buttons: Optional buttons for pause/resume
         contacts: Optional contact sensors
+        pause_switches: Switches to control on pause/resume (can overlap with switches)
     """
 
     TYPE_NAME = "advanced_motion_lighting"
@@ -73,15 +74,20 @@ class AdvancedMotionLightingApp(BaseApp):
 
     def __init__(self, instance_data: Dict[str, Any], instance_manager):
         super().__init__(instance_data, instance_manager)
-
-        # Initialize memoization maps if not present
-        if 'switch_state' not in self._memoization:
-            self._memoization['switch_state'] = {}
-        if 'dim_level' not in self._memoization:
-            self._memoization['dim_level'] = {}
+        self._init_memoization_keys()
 
         # Track functional sensors
         self._functional_sensors: Dict[str, bool] = {}
+
+    def _init_memoization_keys(self) -> None:
+        """Ensure memoization dict has required keys for this app type."""
+        self._memoization.setdefault('switch_state', {})
+        self._memoization.setdefault('dim_level', {})
+
+    def _reset_memoization(self) -> None:
+        """Reset memoization and reinitialize required keys."""
+        super()._reset_memoization()
+        self._init_memoization_keys()
 
     # =========================================================================
     # Lifecycle
@@ -90,6 +96,11 @@ class AdvancedMotionLightingApp(BaseApp):
     def initialize(self) -> None:
         """Set up the instance on startup."""
         self.logger.info(f"Initializing: {self.label}")
+
+        # Seed functional sensors from config so _is_motion_active() knows
+        # sensors exist even before the first event arrives
+        for sensor_id in self.get_devices('motion_sensors'):
+            self._functional_sensors.setdefault(sensor_id, True)
 
         # Schedule health check
         from services.scheduler_service import get_scheduler
@@ -172,7 +183,7 @@ class AdvancedMotionLightingApp(BaseApp):
         Handle button event (pause/resume toggle).
 
         Triggers on pushed, held, or doubleTapped based on buttonEventType setting.
-        Also controls pause indicator lights if configured.
+        Also controls pause switches if configured.
         """
         self.logger.info(f"Button {event.event_type}: {event.device_name}")
 
@@ -180,51 +191,67 @@ class AdvancedMotionLightingApp(BaseApp):
         if self.get_setting('pauseDurationUnit', 'Minutes') == 'Hours':
             pause_duration *= 60
 
-        # Toggle pause state
+        # Toggle pause state — only control pause switches if operation succeeds
         if self.is_paused:
-            self.instance_manager.resume_instance(self.instance_id)
-            self._control_pause_lights(resuming=True)
+            try:
+                success = self.instance_manager.resume_instance(self.instance_id)
+                if success:
+                    self._control_pause_switches(resuming=True)
+                else:
+                    self.logger.error("Resume returned False, pause switches unchanged")
+            except Exception as e:
+                self.logger.error(f"Resume failed: {e}")
         else:
-            self.instance_manager.pause_instance(
-                self.instance_id,
-                duration_minutes=pause_duration,
-                reason='Button press'
-            )
-            self._control_pause_lights(resuming=False)
+            try:
+                success = self.instance_manager.pause_instance(
+                    self.instance_id,
+                    duration_minutes=pause_duration,
+                    reason='Button press'
+                )
+                if success:
+                    self._control_pause_switches(resuming=False)
+                else:
+                    self.logger.error("Pause returned False, pause switches unchanged")
+            except Exception as e:
+                self.logger.error(f"Pause failed: {e}")
 
-    def _control_pause_lights(self, resuming: bool) -> None:
+    def _control_pause_switches(self, resuming: bool) -> None:
         """
-        Control pause indicator lights when pausing/resuming.
+        Control pause switches when pausing/resuming.
 
-        These are separate devices (not the main controlled lights) that
-        provide visual feedback when the automation is paused.
+        These switches get actuated on pause/resume events. They can overlap
+        with motion-controlled switches. Each device is handled independently
+        so one failure doesn't block the rest.
 
         Args:
             resuming: True if resuming (un-pausing), False if pausing
         """
-        indicator_ids = self.get_devices('pause_switches')
-        if not indicator_ids:
+        switch_ids = self.get_devices('pause_switches')
+        if not switch_ids:
             return
 
         action = self.get_setting('pauseSwitchAction', 'toggle')
 
-        for device_id in indicator_ids:
-            if action == 'toggle':
-                # Toggle: read current state and invert
-                device = self.get_device_state(device_id)
-                if device:
-                    current = device.get('attributes', {}).get('switch', 'off')
-                    cmd = 'off' if current == 'on' else 'on'
-                else:
-                    # Can't read state — default: on when pausing, off when resuming
-                    cmd = 'off' if resuming else 'on'
-                self.send_command(device_id, cmd)
-            elif action == 'on':
-                # "on" means: turn ON when pausing, OFF when resuming
-                self.send_command(device_id, 'off' if resuming else 'on')
-            elif action == 'off':
-                # "off" means: turn OFF when pausing, ON when resuming
-                self.send_command(device_id, 'on' if resuming else 'off')
+        for device_id in switch_ids:
+            try:
+                if action == 'toggle':
+                    # Toggle: read current state and invert
+                    device = self.get_device_state(device_id)
+                    if device:
+                        current = device.get('attributes', {}).get('switch', 'off')
+                        cmd = 'off' if current == 'on' else 'on'
+                    else:
+                        # Can't read state — default: on when pausing, off when resuming
+                        cmd = 'off' if resuming else 'on'
+                    self.send_command(device_id, cmd)
+                elif action == 'on':
+                    # "on" means: turn ON when pausing, OFF when resuming
+                    self.send_command(device_id, 'off' if resuming else 'on')
+                elif action == 'off':
+                    # "off" means: turn OFF when pausing, ON when resuming
+                    self.send_command(device_id, 'on' if resuming else 'off')
+            except Exception as e:
+                self.logger.error(f"Failed to control pause switch {device_id}: {e}")
 
     def _handle_contact(self, event: DeviceEvent) -> None:
         """Handle contact sensor (door open → lights on)."""
@@ -324,6 +351,7 @@ class AdvancedMotionLightingApp(BaseApp):
             action: 'on' or 'off'
         """
         switch_ids = self.get_devices('switches')
+        memo_dirty = False
 
         for device_id in switch_ids:
             device = self.get_device_state(device_id)
@@ -335,9 +363,16 @@ class AdvancedMotionLightingApp(BaseApp):
 
             # Send command (checks actual device state before sending)
             if action == 'on':
-                self._turn_on_switch(device_id, device_name, device)
+                changed = self._turn_on_switch(device_id, device_name, device)
             else:
-                self._turn_off_switch(device_id, device_name, device)
+                changed = self._turn_off_switch(device_id, device_name, device)
+
+            if changed:
+                memo_dirty = True
+
+        # Batch save: one DB write for all devices instead of per-device
+        if memo_dirty:
+            self._save_memoization()
 
     def _device_has_capability(
         self, device: Optional[Dict[str, Any]], capability: str
@@ -360,20 +395,24 @@ class AdvancedMotionLightingApp(BaseApp):
     def _turn_on_switch(
         self, device_id: str, device_name: str,
         device: Optional[Dict[str, Any]] = None
-    ) -> None:
+    ) -> bool:
         """
         Turn on a switch with appropriate level/color.
 
         Checks actual device state first. If device is already on,
         skips command AND does not update memo (preserves override detection).
         Only sends setLevel/setColorTemperature if device has the capability.
+        Only updates memo if the command succeeds (send_command returns True).
+
+        Returns:
+            True if memo was updated (caller should batch-save), False otherwise.
         """
         # Check actual device state — if already on, skip to preserve memo
         if device:
             actual_state = device.get('attributes', {}).get('switch')
             if actual_state == 'on':
                 self.logger.debug(f"Skip ON for {device_name}: already on")
-                return
+                return False
 
         self.logger.info(f"Turning on: {device_name}")
 
@@ -382,43 +421,55 @@ class AdvancedMotionLightingApp(BaseApp):
 
         if use_dim and has_level:
             level = self._get_current_dim_level()
-            self.send_command(device_id, 'setLevel', [level])
+            ok = self.send_command(device_id, 'setLevel', [level])
         else:
-            self.send_command(device_id, 'on')
+            ok = self.send_command(device_id, 'on')
 
-        # Set color only if device supports it
+        if not ok:
+            self.logger.warning(f"Command failed for {device_name}, skipping memo update")
+            return False
+
+        # Set color only if device supports it (best-effort, doesn't affect memo)
         if self.get_setting('useColor', False):
             self._set_color(device_id, device)
 
-        # Update memo ONLY when app actually sends a command
-        self._memoization.setdefault('switch_state', {})[device_name] = 'on'
+        # Update memo ONLY on successful command
+        self._memoization['switch_state'][device_name] = 'on'
         if use_dim and has_level:
-            self._memoization.setdefault('dim_level', {})[device_name] = level
-        self._save_memoization()
+            self._memoization['dim_level'][device_name] = level
+        return True
 
     def _turn_off_switch(
         self, device_id: str, device_name: str,
         device: Optional[Dict[str, Any]] = None
-    ) -> None:
+    ) -> bool:
         """
         Turn off a switch.
 
         Checks actual device state first. If device is already off,
         skips command AND does not update memo (preserves override detection).
+        Only updates memo if the command succeeds.
+
+        Returns:
+            True if memo was updated (caller should batch-save), False otherwise.
         """
         # Check actual device state — if already off, skip to preserve memo
         if device:
             actual_state = device.get('attributes', {}).get('switch')
             if actual_state == 'off':
                 self.logger.debug(f"Skip OFF for {device_name}: already off")
-                return
+                return False
 
         self.logger.info(f"Turning off: {device_name}")
-        self.send_command(device_id, 'off')
+        ok = self.send_command(device_id, 'off')
 
-        # Update memo ONLY when app actually sends a command
-        self._memoization.setdefault('switch_state', {})[device_name] = 'off'
-        self._save_memoization()
+        if not ok:
+            self.logger.warning(f"Command failed for {device_name}, skipping memo update")
+            return False
+
+        # Update memo ONLY on successful command
+        self._memoization['switch_state'][device_name] = 'off'
+        return True
 
     def _should_skip_due_to_memo(self, device_name: str, action: str) -> bool:
         """Check if we should skip this device due to memoization."""

@@ -61,9 +61,28 @@ if [ -z "$HUBITAT_API_TOKEN_4" ]; then
 fi
 echo -e "${GREEN:-}OK: Hubitat tokens loaded${NC:-}"
 
-# Derived / convenience vars
-export MAIN_HUB_IP="${HUBITAT_HUB_IP_4:-<LAN_IP>}"
-export MAIN_HUB_APP="${HUBITAT_API_NUMBER_4:-268}"
+# -------------------------------------------------------------------------
+# Map AWS variable names → app-standardized names
+# AWS uses numbered hubs (HUBITAT_*_1 through _4) matching personal config.
+# The app uses generic names so it doesn't depend on hub numbering.
+# -------------------------------------------------------------------------
+export HUBITAT_API_TOKEN_MAIN="${HUBITAT_API_TOKEN_4}"
+export HUBITAT_HUB_IP_MAIN="${HUBITAT_HUB_IP_4:-<LAN_IP>}"
+export HUBITAT_API_NUMBER_MAIN="${HUBITAT_API_NUMBER_4:-268}"
+
+export HUBITAT_API_TOKEN_OTHER_HUB_1="${HUBITAT_API_TOKEN_1:-}"
+export HUBITAT_HUB_IP_OTHER_HUB_1="${HUBITAT_HUB_IP_1:-}"
+export HUBITAT_API_NUMBER_OTHER_HUB_1="${HUBITAT_API_NUMBER_1:-}"
+
+export HUBITAT_API_TOKEN_OTHER_HUB_2="${HUBITAT_API_TOKEN_2:-}"
+export HUBITAT_HUB_IP_OTHER_HUB_2="${HUBITAT_HUB_IP_2:-}"
+export HUBITAT_API_NUMBER_OTHER_HUB_2="${HUBITAT_API_NUMBER_2:-}"
+
+export HUBITAT_API_TOKEN_OTHER_HUB_3="${HUBITAT_API_TOKEN_3:-}"
+export HUBITAT_HUB_IP_OTHER_HUB_3="${HUBITAT_HUB_IP_3:-}"
+export HUBITAT_API_NUMBER_OTHER_HUB_3="${HUBITAT_API_NUMBER_3:-}"
+
+# Derived vars
 export WEBHOOK_TARGETS="${WEBHOOK_TARGETS:-http://smarthome-app:${APP_INTERNAL_PORT:-5000}/api/webhook/event,http://host.docker.internal:80/api/webhook/event}"
 
 set +a
@@ -71,17 +90,18 @@ set +a
 # Display loaded configuration (tokens truncated)
 echo ""
 echo "Configuration:"
-echo "  APP_EXTERNAL_PORT:  ${APP_EXTERNAL_PORT}"
-echo "  APP_INTERNAL_PORT:  ${APP_INTERNAL_PORT}"
-echo "  NGINX_HTTPS_PORT:   ${NGINX_HTTPS_PORT}"
-echo "  POSTGRES_PORT:      ${POSTGRES_EXTERNAL_PORT} -> ${POSTGRES_INTERNAL_PORT}"
-echo "  POSTGREST_PORT:     ${POSTGREST_EXTERNAL_PORT} -> ${POSTGREST_INTERNAL_PORT}"
-echo "  WEBHOOK_PORT:       ${WEBHOOK_PORT}"
-echo "  SERVER_IP:          ${SERVER_IP}"
-echo "  MAIN_HUB_IP:        ${MAIN_HUB_IP}"
-echo "  APP_API_TOKEN:      ${APP_API_TOKEN:0:4}... (hidden)"
-echo "  POSTGRES_PASSWORD:  **** (hidden)"
-echo "  HUBITAT_API_TOKEN_4: ${HUBITAT_API_TOKEN_4:0:4}... (hidden)"
+echo "  APP_EXTERNAL_PORT:        ${APP_EXTERNAL_PORT}"
+echo "  APP_INTERNAL_PORT:        ${APP_INTERNAL_PORT}"
+echo "  NGINX_HTTPS_PORT:         ${NGINX_HTTPS_PORT}"
+echo "  POSTGRES_PORT:            ${POSTGRES_EXTERNAL_PORT} -> ${POSTGRES_INTERNAL_PORT}"
+echo "  POSTGREST_PORT:           ${POSTGREST_EXTERNAL_PORT} -> ${POSTGREST_INTERNAL_PORT}"
+echo "  WEBHOOK_PORT:             ${WEBHOOK_PORT}"
+echo "  SERVER_IP:                ${SERVER_IP}"
+echo "  HUBITAT_HUB_IP_MAIN:      ${HUBITAT_HUB_IP_MAIN}"
+echo "  HUBITAT_API_NUMBER_MAIN:   ${HUBITAT_API_NUMBER_MAIN}"
+echo "  APP_API_TOKEN:            ${APP_API_TOKEN:0:4}... (hidden)"
+echo "  POSTGRES_PASSWORD:        **** (hidden)"
+echo "  HUBITAT_API_TOKEN_MAIN:    ${HUBITAT_API_TOKEN_MAIN:0:4}... (hidden)"
 
 # -------------------------------------------------------------------------
 # SSL certificates (self-signed, for HTTPS via nginx)

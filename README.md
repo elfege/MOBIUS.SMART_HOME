@@ -100,7 +100,7 @@ Edit `config/settings.json`:
         "primary": {
             "hub_ip": "<LAN_IP>",
             "app_number": "268",
-            "token_env": "TOKEN_HUB_4"
+            "token_env": "HUBITAT_API_TOKEN_MAIN"
         }
     }
 }
@@ -108,8 +108,10 @@ Edit `config/settings.json`:
 
 ### AWS Secrets
 
-Tokens stored in AWS Secrets Manager under secret name `HUBITAT`:
-- `TOKEN_HUB_4` - Primary hub token
+Tokens stored in AWS Secrets Manager under secret name `HUBITAT`.
+`start.sh` maps AWS names → app-standardized names:
+- `HUBITAT_API_TOKEN_MAIN` - Primary hub token (from `HUBITAT_API_TOKEN_4`)
+- `HUBITAT_API_TOKEN_OTHER_HUB_1-3` - Other hubs (from `HUBITAT_API_TOKEN_1-3`)
 
 ## Development
 
@@ -124,11 +126,11 @@ source venv/bin/activate
 pip install -r requirements.txt
 
 # Set environment variables
-export TOKEN_HUB_4="your-token"
+export HUBITAT_API_TOKEN_MAIN="your-token"
 export POSTGREST_URL="http://localhost:3001"
 
-# Run Flask
-python app.py
+# Run FastAPI
+uvicorn app:app --host 0.0.0.0 --port 5000 --reload
 ```
 
 ### Adding New App Types

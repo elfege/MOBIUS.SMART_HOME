@@ -464,23 +464,23 @@ def get_default_client() -> HubitatClient:
     Create a HubitatClient with configuration from environment variables.
 
     Expected env vars:
-    - MAIN_HUB_IP or defaults to <LAN_IP>
-    - MAIN_HUB_APP or defaults to 268
-    - TOKEN_HUB_4 (required)
+    - HUBITAT_HUB_IP_MAIN (defaults to <LAN_IP>)
+    - HUBITAT_API_NUMBER_MAIN (defaults to 268)
+    - HUBITAT_API_TOKEN_MAIN (required)
 
     Returns:
         Configured HubitatClient instance
 
     Raises:
-        ValueError: If TOKEN_HUB_4 is not set
+        ValueError: If HUBITAT_API_TOKEN_MAIN is not set
     """
-    token = os.environ.get('TOKEN_HUB_4')
+    token = os.environ.get('HUBITAT_API_TOKEN_MAIN')
     if not token:
-        raise ValueError("TOKEN_HUB_4 environment variable is required")
+        raise ValueError("HUBITAT_API_TOKEN_MAIN environment variable is required")
 
     config = HubitatConfig(
-        hub_ip=os.environ.get('MAIN_HUB_IP', '<LAN_IP>'),
-        app_number=os.environ.get('MAIN_HUB_APP', '268'),
+        hub_ip=os.environ.get('HUBITAT_HUB_IP_MAIN', '<LAN_IP>'),
+        app_number=os.environ.get('HUBITAT_API_NUMBER_MAIN', '268'),
         token=token,
         name='primary'
     )

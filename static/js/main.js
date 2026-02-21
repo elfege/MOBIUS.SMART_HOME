@@ -1,5 +1,5 @@
 /**
- * 0_SMART_HOME Main JavaScript
+ * MOBIUS.HOME Main JavaScript
  *
  * Entry point for the frontend application.
  * Uses ES6 modules with jQuery for DOM manipulation.
@@ -92,10 +92,47 @@ export const utils = {
         } else {
             console.log(message);
         }
+    },
+
+    /**
+     * Copy text to clipboard with visual feedback on the trigger element.
+     *
+     * Uses the modern Clipboard API with a fallback for older browsers.
+     * Briefly changes the trigger's text to "Copied!" then restores it.
+     *
+     * @param {string} text - The text to copy
+     * @param {HTMLElement} [triggerEl] - Button/element that triggered the copy (for feedback)
+     * @param {string} [originalLabel] - Label to restore after feedback (default: element's current text)
+     */
+    async copyToClipboard(text, triggerEl, originalLabel) {
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch {
+            // Fallback: hidden textarea
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+        }
+
+        // Visual feedback on trigger element
+        if (triggerEl) {
+            const saved = originalLabel || triggerEl.textContent;
+            triggerEl.textContent = 'Copied!';
+            triggerEl.classList.add('copy-flash');
+            setTimeout(() => {
+                triggerEl.textContent = saved;
+                triggerEl.classList.remove('copy-flash');
+            }, 1200);
+        }
     }
 };
 
 // Initialize on DOM ready
 $(document).ready(function() {
-    console.log('0_SMART_HOME initialized');
+    console.log('MOBIUS.HOME initialized');
 });

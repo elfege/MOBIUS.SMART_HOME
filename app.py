@@ -111,8 +111,8 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="0_SMART_HOME",
-    description="Hubitat automation system with multi-instance support",
+    title="MOBIUS.HOME",
+    description="Hubitat home automation platform with multi-instance support",
     lifespan=lifespan,
 )
 
@@ -1093,6 +1093,171 @@ async def matter_auto_commission_all():
         "failed": failed,
         "results": results
     }
+
+
+# =============================================================================
+# E2E Testing
+# =============================================================================
+
+
+@app.get("/api/e2e/events/stream", tags=["e2e-testing"])
+async def e2e_event_stream(instance_id: int = Query(...)):
+    """
+    SSE endpoint for E2E test events.
+
+    Streams test execution progress (step start/complete, scenario summaries)
+    for a specific instance. The frontend connects with:
+        new EventSource('/api/e2e/events/stream?instance_id=2')
+
+    Note: Live device state comes from a direct WebSocket to Hub4's
+    EventSocket, not from this SSE stream. This stream is only for
+    test runner progress.
+    """
+    from fastapi.responses import StreamingResponse
+    from services.e2e_events import get_e2e_broadcaster
+    import json
+
+    broadcaster = get_e2e_broadcaster()
+
+    async def generate():
+        # Initial keepalive comment (SSE spec: lines starting with ':')
+        yield ": connected\n\n"
+
+        async for event in broadcaster.subscribe(instance_id):
+            if event is None:
+                yield ": keepalive\n\n"
+            else:
+                yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering for SSE
+        }
+    )
+
+
+@app.get("/api/e2e/test/{instance_id}/scenarios", tags=["e2e-testing"])
+async def get_test_scenarios(instance_id: int):
+    """
+    Get available test scenarios for an instance.
+
+    Scenarios are built dynamically from the instance's device_selections
+    and settings. Only scenarios relevant to the configured devices are
+    returned (e.g., no dim level test if useDim is disabled).
+    """
+    from services.e2e_test_runner import E2ETestRunner
+
+    runner = E2ETestRunner(instance_id)
+    await runner.initialize()
+    return runner.get_scenarios()
+
+
+@app.get("/api/e2e/test/{instance_id}/devices", tags=["e2e-testing"])
+async def get_test_devices(instance_id: int):
+    """
+    Get all devices for an instance with their current states.
+
+    Returns devices grouped by category (motion_sensors, switches,
+    pause_buttons, pause_switches), with live attribute data fetched
+    directly from Hubitat Maker API (not from cache).
+
+    The Maker API token is used server-side only — never exposed
+    to the browser.
+    """
+    from services.instance_manager import get_instance_manager
+    from services.hubitat_client import get_default_client
+
+    manager = get_instance_manager()
+    instance = manager.get_instance(instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    client = get_default_client()
+    device_selections = instance.get("device_selections", {})
+
+    result = {}
+    for category, device_ids in device_selections.items():
+        devices = []
+        for did in device_ids:
+            device = client.get_device(str(did))
+            if device:
+                devices.append(device)
+            else:
+                devices.append({
+                    "id": did,
+                    "label": f"Device {did}",
+                    "error": "not found in Maker API"
+                })
+        result[category] = devices
+
+    return {
+        "instance_id": instance_id,
+        "label": instance.get("label"),
+        "settings": instance.get("settings", {}),
+        "device_categories": result
+    }
+
+
+@app.post("/api/e2e/test/{instance_id}/run/{scenario_id}", tags=["e2e-testing"])
+async def run_test_scenario(instance_id: int, scenario_id: str):
+    """
+    Run a specific test scenario.
+
+    Executes the scenario steps asynchronously in a background task.
+    Progress is streamed via the SSE endpoint. The HTTP response
+    returns immediately with a confirmation.
+    """
+    from services.e2e_test_runner import E2ETestRunner
+    import asyncio
+
+    runner = E2ETestRunner(instance_id)
+    await runner.initialize()
+
+    async def run_in_background():
+        """Run scenario in background task so HTTP response returns fast."""
+        try:
+            await runner.run_scenario(scenario_id)
+        except Exception as e:
+            logger.error(f"E2E scenario '{scenario_id}' failed: {e}", exc_info=True)
+
+    asyncio.create_task(run_in_background())
+    return {
+        "message": f"Scenario '{scenario_id}' started",
+        "instance_id": instance_id
+    }
+
+
+@app.post("/api/e2e/test/{instance_id}/run-all", tags=["e2e-testing"])
+async def run_all_test_scenarios(instance_id: int):
+    """
+    Run all test scenarios for an instance sequentially.
+
+    Scenarios execute one after another in a background task.
+    Progress is streamed via the SSE endpoint.
+    """
+    from services.e2e_test_runner import E2ETestRunner
+    import asyncio
+
+    runner = E2ETestRunner(instance_id)
+    await runner.initialize()
+
+    async def run_all():
+        """Run all scenarios sequentially."""
+        for scenario in runner.get_scenarios():
+            try:
+                await runner.run_scenario(scenario["id"])
+            except Exception as e:
+                logger.error(
+                    f"E2E scenario '{scenario['id']}' failed: {e}",
+                    exc_info=True
+                )
+
+    asyncio.create_task(run_all())
+    return {"message": "All scenarios started", "instance_id": instance_id}
 
 
 @app.get("/api/modes", tags=["modes"])

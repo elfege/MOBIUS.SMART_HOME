@@ -6,6 +6,7 @@
  */
 
 import { api, utils } from '../main.js';
+import { openDeviceTileModal } from '../components/device-tile-modal.js';
 
 export class InstanceWizardController {
     /**
@@ -241,6 +242,16 @@ export class InstanceWizardController {
         for (const category of categories) {
             this._updateCategoryTags(category.key);
         }
+
+        // Delegated click handler: clicking a device tag name opens tile modal
+        $(container).off('click.dtm').on('click.dtm', '.device-tag-name', function (e) {
+            e.stopPropagation();
+            const deviceId = $(this).data('device-id');
+            const deviceName = $(this).data('device-name');
+            if (deviceId) {
+                openDeviceTileModal(String(deviceId), deviceName);
+            }
+        });
     }
 
     /**
@@ -345,7 +356,7 @@ export class InstanceWizardController {
                 tagsEl.innerHTML = selected.map(id => {
                     const dev = devices.find(d => String(d.id) === String(id));
                     const name = dev ? (dev.label || dev.name) : id;
-                    return `<span class="device-tag">${utils.escapeHtml(name)}<span class="device-tag-remove" onclick="event.stopPropagation(); wizard.removeDevice('${categoryKey}', '${id}')">&times;</span></span>`;
+                    return `<span class="device-tag"><span class="device-tag-name" data-device-id="${id}" data-device-name="${utils.escapeHtml(name)}">${utils.escapeHtml(name)}</span><span class="device-tag-remove" onclick="event.stopPropagation(); wizard.removeDevice('${categoryKey}', '${id}')">&times;</span></span>`;
                 }).join('');
             }
         }

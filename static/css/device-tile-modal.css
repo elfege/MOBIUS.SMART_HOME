@@ -1,0 +1,422 @@
+/* =============================================================================
+   Device Tile Modal - HomeKit-style tile control
+   Cherry-picked from 0_TILES visual design, self-contained.
+   Prefix: dtm- (device-tile-modal) to avoid collisions.
+   ============================================================================= */
+
+/* === Scoped CSS Variables (not dependent on 0_TILES :root) === */
+.dtm-backdrop {
+    --dtm-tile-rgb: 58, 58, 60;
+    --dtm-tile-hover-rgb: 70, 70, 72;
+    --dtm-tile-opacity: 0.90;
+    --dtm-orange: #E5A84F;
+    --dtm-orange-light: #F5C563;
+    --dtm-on-bg: rgba(229, 168, 79, 0.2);
+    --dtm-on-border: rgba(229, 168, 79, 0.6);
+    --dtm-text: rgba(255, 255, 255, 0.9);
+    --dtm-text-dim: rgba(255, 255, 255, 0.6);
+    --dtm-modal-bg: rgba(44, 44, 46, 0.95);
+    --dtm-dark-bg: #3a3a3c;
+}
+
+/* === Modal Backdrop === */
+.dtm-backdrop {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.dtm-backdrop.show {
+    opacity: 1;
+}
+
+/* === Modal Container === */
+.dtm-modal {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+    padding: 30px;
+    min-width: 200px;
+}
+
+/* === Close Button === */
+.dtm-close {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: none;
+    border: none;
+    font-size: 28px;
+    color: var(--dtm-text-dim);
+    cursor: pointer;
+    line-height: 1;
+    padding: 0;
+    width: 36px;
+    height: 36px;
+    transition: color 0.2s;
+    z-index: 10;
+}
+
+.dtm-close:hover {
+    color: rgba(255, 255, 255, 1);
+}
+
+/* === Device Tile (matching 0_TILES design) === */
+.dtm-tile {
+    position: relative;
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
+    width: 140px;
+    height: 180px;
+    padding: 16px 10px;
+    background-color: rgba(var(--dtm-tile-rgb), var(--dtm-tile-opacity));
+    border-radius: 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: transform 0.2s, background-color 0.3s;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.dtm-tile:hover {
+    transform: scale(1.05);
+    background-color: rgba(var(--dtm-tile-hover-rgb), calc(var(--dtm-tile-opacity) + 0.05));
+}
+
+.dtm-tile:active {
+    transform: scale(0.97);
+}
+
+/* Tile ON state */
+.dtm-tile-on {
+    background-color: var(--dtm-on-bg) !important;
+    border: 2px solid var(--dtm-on-border);
+}
+
+/* Tile OFF state */
+.dtm-tile-off {
+    background-color: rgba(var(--dtm-tile-rgb), var(--dtm-tile-opacity));
+    border: 2px solid transparent;
+}
+
+/* === Tile Icon === */
+.dtm-tile-icon {
+    font-size: 44px;
+    margin-bottom: 8px;
+    color: white;
+    flex-shrink: 0;
+    transition: color 0.3s;
+}
+
+.dtm-tile-on .dtm-tile-icon {
+    color: #ffd700;
+}
+
+/* === Tile State Text === */
+.dtm-tile-state {
+    font-size: 20px;
+    font-weight: 700;
+    color: white;
+    margin-bottom: 6px;
+    flex-shrink: 0;
+}
+
+/* === Tile Name === */
+.dtm-tile-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--dtm-text);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    line-height: 1.2;
+    max-height: 34px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    width: 100%;
+    margin-top: auto;
+    flex-shrink: 0;
+}
+
+/* === Long-press hint === */
+.dtm-hint {
+    font-size: 11px;
+    color: var(--dtm-text-dim);
+    text-align: center;
+    margin-top: 4px;
+}
+
+/* =============================================================================
+   Dimmer Slider Panel (HomeKit style vertical slider)
+   ============================================================================= */
+
+.dtm-dimmer-panel {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 15px;
+    background: var(--dtm-modal-bg);
+    border-radius: 30px;
+    padding: 30px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* Dimmer header (device name) */
+.dtm-dimmer-header {
+    font-size: 18px;
+    font-weight: 700;
+    color: white;
+    text-align: center;
+}
+
+/* Slider container */
+.dtm-slider-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+}
+
+/* Slider track (pill-shaped) */
+.dtm-slider-track {
+    position: relative;
+    width: 160px;
+    height: 360px;
+    background-color: var(--dtm-dark-bg);
+    border-radius: 80px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    touch-action: none;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: pointer;
+}
+
+/* Fill (bottom-up) */
+.dtm-slider-fill {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    background: linear-gradient(to top, var(--dtm-orange), var(--dtm-orange-light));
+    border-radius: 80px;
+    transition: height 0.15s ease;
+    pointer-events: none;
+}
+
+/* Percentage text overlay */
+.dtm-slider-pct {
+    position: relative;
+    z-index: 10;
+    font-size: 56px;
+    font-weight: 700;
+    color: white;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+    pointer-events: none;
+}
+
+/* Plus/Minus buttons */
+.dtm-slider-btn {
+    display: flex;
+    width: 50px;
+    height: 50px;
+    border-radius: 50%;
+    background-color: rgba(255, 255, 255, 0.15);
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    color: white;
+    font-size: 26px;
+    font-weight: 400;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.dtm-slider-btn:hover {
+    background-color: rgba(255, 255, 255, 0.25);
+    border-color: rgba(255, 255, 255, 0.6);
+    transform: scale(1.08);
+}
+
+.dtm-slider-btn:active {
+    transform: scale(0.95);
+    background-color: rgba(255, 255, 255, 0.35);
+}
+
+/* === Dimmer bottom controls row === */
+.dtm-dimmer-controls {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    margin-top: 5px;
+}
+
+/* =============================================================================
+   Color Picker Panel
+   ============================================================================= */
+
+.dtm-color-btn {
+    width: 50px;
+    height: 50px;
+    border-radius: 50%;
+    background: conic-gradient(red, yellow, lime, aqua, blue, magenta, red);
+    border: 3px solid rgba(255, 255, 255, 0.5);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.dtm-color-btn:hover {
+    transform: scale(1.1);
+    border-color: rgba(255, 255, 255, 0.8);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+/* Color picker panel (slides in below tile) */
+.dtm-color-panel {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    background: rgba(30, 30, 35, 0.98);
+    border-radius: 20px;
+    padding: 20px;
+    opacity: 0;
+    max-height: 0;
+    overflow: hidden;
+    transition: all 0.3s ease;
+}
+
+.dtm-color-panel.show {
+    opacity: 1;
+    max-height: 400px;
+    margin-top: 10px;
+}
+
+.dtm-color-panel-header {
+    color: var(--dtm-text);
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+/* Color wheel canvas */
+.dtm-color-wheel {
+    border-radius: 50%;
+    cursor: crosshair;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+    touch-action: none;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* Color preview swatch */
+.dtm-color-preview {
+    width: 50px;
+    height: 30px;
+    border-radius: 8px;
+    background-color: #ff0000;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+}
+
+/* Color preset chips */
+.dtm-color-presets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: center;
+    padding: 4px;
+}
+
+.dtm-color-chip {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.dtm-color-chip:hover {
+    transform: scale(1.15);
+    border-color: rgba(255, 255, 255, 0.8);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* =============================================================================
+   Error / Loading States
+   ============================================================================= */
+
+.dtm-loading {
+    color: var(--dtm-text-dim);
+    font-size: 14px;
+    text-align: center;
+    padding: 40px 20px;
+}
+
+.dtm-error {
+    color: #f38ba8;
+    font-size: 14px;
+    text-align: center;
+    padding: 20px;
+}
+
+/* =============================================================================
+   Responsive
+   ============================================================================= */
+
+@media (max-width: 768px) {
+    .dtm-tile {
+        width: 120px;
+        height: 150px;
+        padding: 12px 8px;
+    }
+
+    .dtm-tile-icon {
+        font-size: 36px;
+    }
+
+    .dtm-tile-state {
+        font-size: 16px;
+    }
+
+    .dtm-tile-name {
+        font-size: 11px;
+    }
+
+    .dtm-slider-track {
+        width: 140px;
+        height: 300px;
+    }
+
+    .dtm-slider-pct {
+        font-size: 44px;
+    }
+
+    .dtm-dimmer-panel {
+        padding: 20px;
+        min-width: auto;
+    }
+}

@@ -3,7 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Smart Home{% endblock %} - 0_SMART_HOME</title>
+    <title>{% block title %}Home{% endblock %} - MOBIUS.HOME</title>
+    <link rel="icon" type="image/png" href="/static/img/mobius.png">
+    <link rel="apple-touch-icon" href="/static/img/mobius.png">
+    <meta name="apple-mobile-web-app-title" content="MOBIUS.HOME">
 
     <!-- jQuery -->
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
@@ -16,13 +19,19 @@
 <body>
     <header class="app-header">
         <div class="header-content">
-            <h1 class="logo">
-                <a href="/">0_SMART_HOME</a>
-            </h1>
+            <div class="logo">
+                <a href="/">
+                    <img src="/static/img/mobius.png" alt="MOBIUS.HOME" class="logo-img">
+                    <span class="logo-text">MOBIUS<span class="logo-dot">.</span>HOME</span>
+                </a>
+            </div>
             <nav class="main-nav">
                 <a href="/" class="nav-link">Dashboard</a>
                 <a href="/matter" class="nav-link">Matter</a>
-                <a href="/instance/new" class="nav-link btn-add">+ Add Automation</a>
+                <a href="/instance/new" class="nav-link btn-add">+ Add</a>
+                <span class="nav-sep"></span>
+                <a href="https://<LAN_IP>:443" class="nav-link nav-app">TILES</a>
+                <a href="https://<LAN_IP>:8443" class="nav-link nav-app">NVR</a>
             </nav>
         </div>
     </header>
@@ -32,7 +41,7 @@
     </main>
 
     <footer class="app-footer">
-        <p>Hubitat Automation Manager</p>
+        <p>MOBIUS.HOME</p>
     </footer>
 
     <!-- Main JS -->

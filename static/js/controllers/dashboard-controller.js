@@ -126,6 +126,9 @@ export class DashboardController {
                     <button class="btn btn-secondary btn-small" onclick="dashboard.toggleDebug(${inst.id})">
                         Debug
                     </button>
+                    <button class="btn btn-secondary btn-small" onclick="dashboard.openTest(${inst.id}, '${utils.escapeHtml(inst.label).replace(/'/g, "\\'")}')">
+                        Test
+                    </button>
                     <button class="btn btn-danger btn-small" onclick="dashboard.deleteInstance(${inst.id})">
                         Delete
                     </button>
@@ -133,7 +136,10 @@ export class DashboardController {
                 <div class="debug-panel" id="debug-${inst.id}" style="display:none;">
                     <div class="debug-toolbar">
                         <span class="debug-title">Event Log</span>
-                        <button class="btn btn-secondary btn-small" onclick="dashboard.refreshDebug(${inst.id})">Refresh</button>
+                        <div class="debug-toolbar-actions">
+                            <button class="btn btn-secondary btn-small btn-copy" onclick="dashboard.copyDebug(${inst.id}, this)">Copy</button>
+                            <button class="btn btn-secondary btn-small" onclick="dashboard.refreshDebug(${inst.id})">Refresh</button>
+                        </div>
                     </div>
                     <div class="debug-output" id="debug-output-${inst.id}"></div>
                 </div>
@@ -293,6 +299,37 @@ export class DashboardController {
             output.scrollTop = output.scrollHeight;
         } catch (error) {
             output.innerHTML = `<span class="debug-error">Error: ${error.message}</span>`;
+        }
+    }
+
+    /**
+     * Copy the debug panel's text content to clipboard.
+     * @param {number} instanceId - Instance ID
+     * @param {HTMLElement} btn - The copy button (for visual feedback)
+     */
+    copyDebug(instanceId, btn) {
+        const output = document.getElementById(`debug-output-${instanceId}`);
+        if (!output) return;
+        utils.copyToClipboard(output.innerText, btn, 'Copy');
+    }
+
+    /**
+     * Open the E2E test modal for an instance.
+     *
+     * Lazy-loads the E2ETestModal class on first use so the dashboard
+     * doesn't pay the cost of the test controller until it's needed.
+     *
+     * @param {number} instanceId - Instance ID
+     * @param {string} instanceLabel - Instance display label
+     */
+    async openTest(instanceId, instanceLabel) {
+        try {
+            const { E2ETestModal } = await import('./e2e-test-controller.js');
+            const modal = new E2ETestModal(instanceId, instanceLabel);
+            modal.open();
+        } catch (error) {
+            console.error('Failed to load E2E test module:', error);
+            utils.notify('Failed to open test suite: ' + error.message, 'error');
         }
     }
 

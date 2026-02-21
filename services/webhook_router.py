@@ -144,6 +144,33 @@ class WebhookRouter:
         # Log event
         self._log_event(event, routed_to, webhook_payload)
 
+        # Broadcast to E2E test SSE subscribers (if any are listening).
+        # This lets the E2E terminal log show live webhook traffic.
+        # Best-effort: failures here must never affect event routing.
+        try:
+            from services.e2e_events import get_e2e_broadcaster
+            import asyncio
+
+            broadcaster = get_e2e_broadcaster()
+            if broadcaster.subscriber_count > 0:
+                e2e_event = {
+                    "type": "device_event",
+                    "device_id": device_id,
+                    "device_name": display_name,
+                    "event_name": event_name,
+                    "event_value": event_value
+                }
+                try:
+                    loop = asyncio.get_running_loop()
+                    for inst_id in routed_to:
+                        loop.create_task(
+                            broadcaster.broadcast(inst_id, e2e_event)
+                        )
+                except RuntimeError:
+                    pass  # No event loop (shouldn't happen in FastAPI)
+        except Exception:
+            pass  # E2E broadcast failure must never affect routing
+
         if routed_to:
             self.logger.debug(
                 f"Routed event to {len(routed_to)} instances: {routed_to}"

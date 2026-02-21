@@ -631,6 +631,327 @@ async def matter_delete_mapping(hubitat_device_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/matter/discover", tags=["matter"])
+async def matter_discover():
+    """
+    Discover Matter devices from all configured Hubitat hubs.
+
+    Queries each hub's /hub/matterDetails/json endpoint, deduplicates
+    by unique_id, and stores results in hubitat_matter_devices table.
+    """
+    import requests as req
+
+    postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+
+    # Collect hub IPs to scan
+    hubs = []
+    main_ip = os.environ.get('HUBITAT_HUB_IP_MAIN')
+    if main_ip:
+        hubs.append({"ip": main_ip, "name": "main"})
+    for i in range(1, 4):
+        ip = os.environ.get(f'HUBITAT_HUB_IP_OTHER_HUB_{i}')
+        if ip:
+            hubs.append({"ip": ip, "name": f"other_hub_{i}"})
+
+    # First, get all Maker API devices for name matching
+    from services.hubitat_client import get_default_client
+    maker_devices = []
+    try:
+        client = get_default_client()
+        maker_devices = client.get_all_devices() or []
+    except Exception as e:
+        logger.warning(f"Could not load Maker API devices for matching: {e}")
+
+    # Build name-lookup index (lowercase name → device)
+    maker_by_name = {}
+    for d in maker_devices:
+        name = (d.get('label') or d.get('name') or '').strip().lower()
+        if name:
+            maker_by_name[name] = d
+
+    discovered = []
+    errors = []
+
+    for hub in hubs:
+        try:
+            resp = req.get(
+                f"http://{hub['ip']}/hub/matterDetails/json",
+                timeout=10
+            )
+            if not resp.ok:
+                errors.append(f"{hub['name']} ({hub['ip']}): HTTP {resp.status_code}")
+                continue
+
+            data = resp.json()
+            if not data.get('enabled'):
+                continue
+
+            for device in data.get('devices', []):
+                unique_id = device.get('uniqueId', '')
+                if not unique_id:
+                    continue
+
+                matter_name = (device.get('name') or '').strip()
+
+                # Try to match against Maker API devices by name
+                maker_match = None
+                match_confidence = 'none'
+                name_lower = matter_name.lower()
+
+                # Exact match
+                if name_lower in maker_by_name:
+                    maker_match = maker_by_name[name_lower]
+                    match_confidence = 'exact'
+                else:
+                    # Fuzzy: check if Matter name is contained in or contains a Maker name
+                    for mk_name, mk_dev in maker_by_name.items():
+                        if name_lower in mk_name or mk_name in name_lower:
+                            maker_match = mk_dev
+                            match_confidence = 'fuzzy'
+                            break
+
+                row = {
+                    "unique_id": unique_id,
+                    "device_name": matter_name,
+                    "manufacturer": device.get('manufacturer', ''),
+                    "model": device.get('model', ''),
+                    "ip_address": device.get('ipAddress', ''),
+                    "is_online": device.get('online', False),
+                    "hub_ip": hub['ip'],
+                    "hub_name": hub['name'],
+                    "hubitat_node_id": device.get('nodeId', 0),
+                    "hubitat_device_id": str(device.get('id', '')),
+                    "hubitat_dni": device.get('dni', ''),
+                }
+
+                if maker_match:
+                    row["maker_api_device_id"] = str(maker_match.get('id', ''))
+                    row["maker_api_device_name"] = maker_match.get('label') or maker_match.get('name', '')
+                    row["match_confidence"] = match_confidence
+
+                discovered.append(row)
+
+                # Upsert into database (dedup by unique_id)
+                req.post(
+                    f"{postgrest_url}/hubitat_matter_devices",
+                    json=row,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Prefer": "resolution=merge-duplicates"
+                    },
+                    timeout=5
+                )
+
+        except Exception as e:
+            errors.append(f"{hub['name']} ({hub['ip']}): {str(e)}")
+
+    matched = sum(1 for d in discovered if d.get('match_confidence', 'none') != 'none')
+    return {
+        "discovered": len(discovered),
+        "matched": matched,
+        "hubs_scanned": len(hubs),
+        "errors": errors
+    }
+
+
+@app.get("/api/matter/hubitat-devices", tags=["matter"])
+async def matter_hubitat_devices():
+    """Get all discovered Hubitat Matter devices from database."""
+    import requests as req
+
+    postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    try:
+        resp = req.get(
+            f"{postgrest_url}/hubitat_matter_devices",
+            params={"order": "device_name.asc"},
+            headers={"Accept": "application/json"},
+            timeout=5
+        )
+        if resp.ok:
+            return resp.json()
+        return []
+    except Exception as e:
+        logger.error(f"Failed to get hubitat matter devices: {e}")
+        return []
+
+
+class UpdateMatterDeviceMatchRequest(BaseModel):
+    """Request body for manually correcting a Matter-to-Maker API match."""
+    unique_id: str
+    maker_api_device_id: str
+
+
+@app.patch("/api/matter/hubitat-devices/match", tags=["matter"])
+async def matter_update_match(body: UpdateMatterDeviceMatchRequest):
+    """
+    Manually correct the Maker API device match for a Hubitat Matter device.
+
+    Used when auto-matching by name got it wrong. The user selects the
+    correct Maker API device from a dropdown.
+    """
+    import requests as req
+
+    postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+
+    # Get the Maker API device name for display
+    maker_name = ''
+    try:
+        from services.hubitat_client import get_default_client
+        client = get_default_client()
+        device = client.get_device(body.maker_api_device_id)
+        if device:
+            maker_name = device.get('label') or device.get('name', '')
+    except Exception:
+        pass
+
+    try:
+        resp = req.patch(
+            f"{postgrest_url}/hubitat_matter_devices",
+            params={"unique_id": f"eq.{body.unique_id}"},
+            json={
+                "maker_api_device_id": body.maker_api_device_id,
+                "maker_api_device_name": maker_name,
+                "match_confidence": "manual"
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=5
+        )
+        if resp.ok:
+            return {"message": "Match updated", "maker_api_device_name": maker_name}
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class AutoCommissionRequest(BaseModel):
+    """Request body for auto-commissioning a Hubitat Matter device."""
+    unique_id: str
+
+
+@app.post("/api/matter/auto-commission", tags=["matter"])
+async def matter_auto_commission(body: AutoCommissionRequest):
+    """
+    Auto-commission a Hubitat Matter device into our matter-server.
+
+    Steps:
+    1. Look up device in hubitat_matter_devices by unique_id
+    2. Call Hubitat's openPairingWindow to get a setup code
+    3. Commission into our matter-server using that code
+    4. Create the device_matter_map entry
+    5. Update hubitat_matter_devices with our_node_id
+
+    This is the one-click commission flow.
+    """
+    import requests as req
+    from services.matter_client import get_matter_client
+
+    postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+
+    # Step 1: Look up device
+    resp = req.get(
+        f"{postgrest_url}/hubitat_matter_devices",
+        params={"unique_id": f"eq.{body.unique_id}"},
+        headers={"Accept": "application/json"},
+        timeout=5
+    )
+    if not resp.ok or not resp.json():
+        raise HTTPException(status_code=404, detail="Device not found in discovery table")
+
+    device = resp.json()[0]
+
+    if not device.get('is_online'):
+        raise HTTPException(status_code=400, detail=f"Device '{device['device_name']}' is offline")
+
+    # Step 2: Open pairing window on Hubitat hub
+    hub_ip = device['hub_ip']
+    hubitat_node = device['hubitat_node_id']
+
+    try:
+        pair_resp = req.get(
+            f"http://{hub_ip}/hub/matter/openPairingWindow",
+            params={"node": hubitat_node},
+            timeout=30
+        )
+        if not pair_resp.ok:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Hubitat returned {pair_resp.status_code} opening pairing window"
+            )
+        pair_data = pair_resp.json()
+        setup_code = pair_data.get('setupCode') or pair_data.get('code') or pair_data.get('pairingCode')
+        if not setup_code:
+            # Maybe the response IS the code as a string
+            if isinstance(pair_data, str):
+                setup_code = pair_data
+            else:
+                logger.warning(f"Pairing window response: {pair_data}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"No setup code in Hubitat response: {pair_data}"
+                )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to open pairing window on Hubitat: {e}"
+        )
+
+    # Step 3: Commission into our matter-server
+    client = get_matter_client()
+    if not client.is_connected:
+        connected = await client.connect()
+        if not connected:
+            raise HTTPException(status_code=503, detail="Cannot connect to matter-server")
+
+    try:
+        result = await client.commission_with_code(str(setup_code))
+        our_node_id = result.get('node_id') if isinstance(result, dict) else None
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"matter-server commission failed: {e}"
+        )
+
+    # Step 4: Create device_matter_map entry
+    if our_node_id is not None:
+        req.post(
+            f"{postgrest_url}/device_matter_map",
+            json={
+                "hubitat_device_id": device['hubitat_device_id'],
+                "matter_node_id": our_node_id,
+                "matter_endpoint_id": 1,
+                "device_name": device['device_name']
+            },
+            headers={
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates"
+            },
+            timeout=5
+        )
+
+    # Step 5: Update hubitat_matter_devices with our node ID
+    req.patch(
+        f"{postgrest_url}/hubitat_matter_devices",
+        params={"unique_id": f"eq.{body.unique_id}"},
+        json={
+            "our_node_id": our_node_id,
+            "is_commissioned": True
+        },
+        headers={"Content-Type": "application/json"},
+        timeout=5
+    )
+
+    return {
+        "message": f"Commissioned '{device['device_name']}'",
+        "our_node_id": our_node_id,
+        "hubitat_device_id": device['hubitat_device_id'],
+        "setup_code_used": setup_code[:8] + "..." if setup_code else None
+    }
+
+
 @app.get("/api/modes", tags=["modes"])
 async def get_modes():
     """Get available location modes."""

@@ -252,7 +252,7 @@ CREATE TABLE IF NOT EXISTS hub_config (
     -- Maker API credentials
     maker_api_app_number VARCHAR(20) NOT NULL,
     -- Token stored in env var, reference here
-    maker_api_token_env VARCHAR(50) NOT NULL,     -- e.g., 'TOKEN_HUB_4'
+    maker_api_token_env VARCHAR(50) NOT NULL,     -- e.g., 'HUBITAT_API_TOKEN_MAIN'
 
     -- Status
     is_primary BOOLEAN DEFAULT false,
@@ -313,7 +313,7 @@ CREATE TRIGGER update_app_instances_updated_at
 -- =============================================================================
 
 INSERT INTO hub_config (hub_name, hub_ip, maker_api_app_number, maker_api_token_env, is_primary)
-VALUES ('hub4', '<LAN_IP>', '268', 'TOKEN_HUB_4', true)
+VALUES ('main', '<LAN_IP>', '268', 'HUBITAT_API_TOKEN_MAIN', true)
 ON CONFLICT (hub_name) DO NOTHING;
 
 -- =============================================================================

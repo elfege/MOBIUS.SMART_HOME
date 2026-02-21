@@ -370,9 +370,9 @@ class AdvancedMotionLightingApp(BaseApp):
             self._set_color(device_id)
 
         # Update memo ONLY when app actually sends a command
-        self._memoization['switch_state'][device_name] = 'on'
+        self._memoization.setdefault('switch_state', {})[device_name] = 'on'
         if use_dim:
-            self._memoization['dim_level'][device_name] = level
+            self._memoization.setdefault('dim_level', {})[device_name] = level
         self._save_memoization()
 
     def _turn_off_switch(
@@ -396,7 +396,7 @@ class AdvancedMotionLightingApp(BaseApp):
         self.send_command(device_id, 'off')
 
         # Update memo ONLY when app actually sends a command
-        self._memoization['switch_state'][device_name] = 'off'
+        self._memoization.setdefault('switch_state', {})[device_name] = 'off'
         self._save_memoization()
 
     def _should_skip_due_to_memo(self, device_name: str, action: str) -> bool:
@@ -404,7 +404,7 @@ class AdvancedMotionLightingApp(BaseApp):
         if not self.get_setting('memoize', False):
             return False
 
-        memo_state = self._memoization['switch_state'].get(device_name)
+        memo_state = self._memoization.get('switch_state', {}).get(device_name)
         if memo_state == action:
             # Already in desired state per our memo
             self.logger.debug(f"Skipping {device_name}: memoized as {action}")

@@ -467,6 +467,170 @@ async def handle_mode_webhook(request: Request):
 # =============================================================================
 
 
+# =============================================================================
+# Matter Protocol
+# =============================================================================
+
+
+class MatterCommissionRequest(BaseModel):
+    """Request body for commissioning a new Matter device."""
+    code: str  # QR code string (MT:...) or manual pairing code
+
+
+class MatterMapRequest(BaseModel):
+    """Request body for mapping a Hubitat device to a Matter node."""
+    hubitat_device_id: str
+    matter_node_id: int
+    matter_endpoint_id: int = 1
+    device_name: Optional[str] = None
+
+
+@app.get("/api/matter/status", tags=["matter"])
+async def matter_status():
+    """
+    Get matter-server connection status.
+
+    Returns connection state and server info if connected.
+    """
+    from services.matter_client import get_matter_client
+
+    client = get_matter_client()
+    status = {"connected": client.is_connected, "url": client.url}
+
+    if client.is_connected:
+        try:
+            info = await client.get_server_info()
+            status["server_info"] = info
+        except Exception as e:
+            status["server_info_error"] = str(e)
+
+    return status
+
+
+@app.get("/api/matter/nodes", tags=["matter"])
+async def matter_nodes():
+    """
+    List all commissioned Matter nodes.
+
+    Connects to matter-server if not already connected.
+    """
+    from services.matter_client import get_matter_client
+
+    client = get_matter_client()
+    if not client.is_connected:
+        connected = await client.connect()
+        if not connected:
+            raise HTTPException(
+                status_code=503,
+                detail="Cannot connect to matter-server"
+            )
+
+    try:
+        nodes = await client.get_nodes()
+        return nodes
+    except Exception as e:
+        logger.error(f"Failed to get Matter nodes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/matter/commission", tags=["matter"])
+async def matter_commission(body: MatterCommissionRequest):
+    """
+    Commission a new Matter device using a pairing code.
+
+    The code can be a QR code string (MT:...) or a manual numeric
+    pairing code. A USB Bluetooth adapter is required on the server
+    for BLE-based commissioning of new devices. Devices already
+    paired to another controller (e.g., Hubitat) can be commissioned
+    via on-network commissioning without BLE.
+
+    Args:
+        body: Contains the pairing code
+    """
+    from services.matter_client import get_matter_client
+
+    client = get_matter_client()
+    if not client.is_connected:
+        connected = await client.connect()
+        if not connected:
+            raise HTTPException(
+                status_code=503,
+                detail="Cannot connect to matter-server"
+            )
+
+    try:
+        result = await client.commission_with_code(body.code)
+        return {"message": "Device commissioned", "node": result}
+    except Exception as e:
+        logger.error(f"Matter commissioning failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/matter/map", tags=["matter"])
+async def matter_mappings():
+    """Get all Hubitat-to-Matter device mappings."""
+    from services.matter_client import get_all_matter_mappings
+    return get_all_matter_mappings()
+
+
+@app.post("/api/matter/map", tags=["matter"])
+async def matter_create_mapping(body: MatterMapRequest):
+    """
+    Map a Hubitat device to a Matter node.
+
+    After mapping, commands sent to this Hubitat device will also be
+    sent via the Matter protocol for faster local control.
+    """
+    import requests as req
+
+    postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    try:
+        resp = req.post(
+            f"{postgrest_url}/device_matter_map",
+            json={
+                "hubitat_device_id": body.hubitat_device_id,
+                "matter_node_id": body.matter_node_id,
+                "matter_endpoint_id": body.matter_endpoint_id,
+                "device_name": body.device_name
+            },
+            headers={
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates"
+            },
+            timeout=5
+        )
+        if resp.ok:
+            return {"message": "Mapping created"}
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create Matter mapping: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/matter/map/{hubitat_device_id}", tags=["matter"])
+async def matter_delete_mapping(hubitat_device_id: str):
+    """Remove a Hubitat-to-Matter device mapping."""
+    import requests as req
+
+    postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    try:
+        resp = req.delete(
+            f"{postgrest_url}/device_matter_map",
+            params={"hubitat_device_id": f"eq.{hubitat_device_id}"},
+            timeout=5
+        )
+        if resp.ok:
+            return {"message": "Mapping deleted"}
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete Matter mapping: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/modes", tags=["modes"])
 async def get_modes():
     """Get available location modes."""
@@ -550,6 +714,12 @@ async def stream_instance_events(instance_id: int):
     except Exception as e:
         logger.error(f"Failed to get instance events: {e}")
         return []
+
+
+@app.get("/matter", response_class=HTMLResponse, include_in_schema=False)
+async def matter_page(request: Request):
+    """Matter device management page."""
+    return templates.TemplateResponse(request, "matter.html")
 
 
 @app.get("/instance/{instance_id}", response_class=HTMLResponse, include_in_schema=False)

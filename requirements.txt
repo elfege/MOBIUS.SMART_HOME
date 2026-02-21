@@ -22,6 +22,9 @@ urllib3==2.1.0
 # Background Tasks
 APScheduler==3.10.4
 
+# WebSocket Client (for Matter protocol server)
+websockets==12.0
+
 # Utilities
 python-dotenv==1.0.0
 python-dateutil==2.8.2

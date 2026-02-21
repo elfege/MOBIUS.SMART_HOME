@@ -1,0 +1,258 @@
+/* =============================================================================
+   Matter Device Management Page
+   ============================================================================= */
+
+.matter-page {
+    max-width: 1000px;
+    margin: 0 auto;
+}
+
+.matter-header {
+    margin-bottom: 2rem;
+}
+
+.matter-header h2 {
+    margin: 0;
+}
+
+/* Sections */
+.matter-section {
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+    box-shadow: var(--shadow);
+}
+
+.matter-section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.matter-section-header h3 {
+    margin: 0;
+    font-size: 1.1rem;
+}
+
+/* Status Panel */
+.matter-status-panel {
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+}
+
+.status-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+}
+
+.status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.status-dot.connected {
+    background: var(--color-success);
+    box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
+}
+
+.status-dot.disconnected {
+    background: var(--color-danger);
+}
+
+.status-label {
+    color: var(--color-text-muted);
+}
+
+.status-value {
+    font-weight: 600;
+}
+
+/* Commission Form */
+.commission-form {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+}
+
+.commission-input {
+    flex: 1;
+    padding: 0.75rem 1rem;
+    font-size: 0.95rem;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+}
+
+.commission-input:focus {
+    outline: none;
+    border-color: var(--color-primary);
+}
+
+.commission-result {
+    margin-top: 1rem;
+    padding: 0.75rem 1rem;
+    border-radius: var(--radius);
+    font-size: 0.9rem;
+}
+
+.commission-result.success {
+    background: #dcfce7;
+    color: #166534;
+    border: 1px solid #bbf7d0;
+}
+
+.commission-result.error {
+    background: #fef2f2;
+    color: #991b1b;
+    border: 1px solid #fecaca;
+}
+
+.commission-result.loading {
+    background: #eff6ff;
+    color: #1e40af;
+    border: 1px solid #bfdbfe;
+}
+
+/* Nodes Grid */
+.nodes-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1rem;
+}
+
+.node-card {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 1rem;
+}
+
+.node-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 0.75rem;
+}
+
+.node-id {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    background: var(--color-card);
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    border: 1px solid var(--color-border);
+}
+
+.node-name {
+    font-weight: 600;
+    font-size: 1rem;
+    margin: 0;
+}
+
+.node-details {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    margin-bottom: 0.75rem;
+}
+
+.node-details span {
+    display: block;
+    margin-bottom: 0.2rem;
+}
+
+.node-actions {
+    display: flex;
+    gap: 0.5rem;
+    border-top: 1px solid var(--color-border);
+    padding-top: 0.75rem;
+}
+
+.node-actions button {
+    flex: 1;
+}
+
+.node-mapped {
+    font-size: 0.75rem;
+    color: var(--color-success);
+    font-weight: 600;
+    margin-top: 0.5rem;
+}
+
+/* Mapping Table */
+.mappings-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+}
+
+.mappings-table th {
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    background: var(--color-bg);
+    border-bottom: 2px solid var(--color-border);
+    color: var(--color-text-muted);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+}
+
+.mappings-table td {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.mappings-table tr:last-child td {
+    border-bottom: none;
+}
+
+.mapping-form {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--color-border);
+}
+
+.mapping-select {
+    flex: 1;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+}
+
+.mapping-select:focus {
+    outline: none;
+    border-color: var(--color-primary);
+}
+
+/* Empty states */
+.matter-empty {
+    text-align: center;
+    padding: 2rem;
+    color: var(--color-text-muted);
+    font-style: italic;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .commission-form {
+        flex-direction: column;
+    }
+
+    .mapping-form {
+        flex-direction: column;
+    }
+
+    .nodes-grid {
+        grid-template-columns: 1fr;
+    }
+}

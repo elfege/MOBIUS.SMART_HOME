@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Smart Home{% endblock %} - 0_SMART_HOME</title>
+
+    <!-- jQuery -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+
+    <!-- Main CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', path='css/main.css') }}">
+
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+    <header class="app-header">
+        <div class="header-content">
+            <h1 class="logo">
+                <a href="/">0_SMART_HOME</a>
+            </h1>
+            <nav class="main-nav">
+                <a href="/" class="nav-link">Dashboard</a>
+                <a href="/instance/new" class="nav-link btn-add">+ Add Automation</a>
+            </nav>
+        </div>
+    </header>
+
+    <main class="app-main">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="app-footer">
+        <p>Hubitat Automation Manager</p>
+    </footer>
+
+    <!-- Main JS -->
+    <script type="module" src="{{ url_for('static', path='js/main.js') }}"></script>
+
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

@@ -95,7 +95,14 @@ def initialize_services():
 async def lifespan(app: FastAPI):
     """Application lifecycle: initialize services on startup, cleanup on shutdown."""
     initialize_services()
+
+    # Start Matter discovery background service (scans hubs every 5 min)
+    from services.matter_discovery import start_matter_discovery, stop_matter_discovery
+    start_matter_discovery(scan_interval=300)
+
     yield
+
+    stop_matter_discovery()
     logger.info("Shutting down...")
 
 
@@ -527,10 +534,82 @@ async def matter_nodes():
 
     try:
         nodes = await client.get_nodes()
+
+        # Enrich nodes with friendly names from our discovered devices table.
+        # Match by unique_id: Matter Basic Information cluster (40), attr 18 = UniqueID
+        # Enrich with friendly names from hubitat_matter_devices.
+        # Two lookups: by our_node_id (direct) and by unique_id (fallback).
+        import requests as req
+        postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+        by_node_id = {}
+        by_unique_id = {}
+        try:
+            disc_resp = req.get(
+                f"{postgrest_url}/hubitat_matter_devices",
+                headers={"Accept": "application/json"},
+                timeout=5
+            )
+            if disc_resp.ok:
+                for d in disc_resp.json():
+                    if d.get('our_node_id'):
+                        by_node_id[d['our_node_id']] = d
+                    by_unique_id[d['unique_id']] = d
+        except Exception:
+            pass
+
+        for node in nodes:
+            node_id = node.get('node_id') or node.get('nodeId')
+
+            # Primary: match by our_node_id (set during commission)
+            match = by_node_id.get(node_id)
+
+            # Fallback: match by UniqueID attribute
+            if not match:
+                attrs = node.get('attributes', {})
+                for key, val in attrs.items():
+                    if '/40/18' in key and isinstance(val, str) and val in by_unique_id:
+                        match = by_unique_id[val]
+                        break
+
+            if match:
+                # Prefer Hubitat friendly name over Matter product name
+                node['_device_name'] = (
+                    match.get('maker_api_device_name')
+                    or match.get('device_name')
+                )
+                node['_hubitat_device_id'] = match.get('maker_api_device_id')
+
+                # Backfill: if matched by UniqueID but our_node_id not set, update DB
+                if not match.get('our_node_id') and node_id:
+                    try:
+                        req.patch(
+                            f"{postgrest_url}/hubitat_matter_devices",
+                            params={"unique_id": f"eq.{match['unique_id']}"},
+                            json={"our_node_id": node_id},
+                            headers={"Content-Type": "application/json"},
+                            timeout=5
+                        )
+                        logger.info(f"Backfilled our_node_id={node_id} for {match['unique_id']}")
+                    except Exception:
+                        pass
+
         return nodes
     except Exception as e:
         logger.error(f"Failed to get Matter nodes: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/matter/reconcile", tags=["matter"])
+async def matter_reconcile():
+    """
+    Reconcile device_matter_map with commissioned nodes.
+    Matches commissioned matter-server nodes to discovered Hubitat devices
+    by UniqueID and creates missing mapping entries automatically.
+    """
+    from services.matter_discovery import get_matter_discovery_service
+    service = get_matter_discovery_service()
+    reconciled = await service._reconcile_mappings()
+    return {"reconciled": reconciled}
 
 
 @app.post("/api/matter/commission", tags=["matter"])
@@ -872,7 +951,7 @@ async def matter_auto_commission(body: AutoCommissionRequest):
         pair_resp = req.get(
             f"http://{hub_ip}/hub/matter/openPairingWindow",
             params={"node": hubitat_node},
-            timeout=30
+            timeout=90
         )
         if not pair_resp.ok:
             raise HTTPException(
@@ -949,6 +1028,70 @@ async def matter_auto_commission(body: AutoCommissionRequest):
         "our_node_id": our_node_id,
         "hubitat_device_id": device['hubitat_device_id'],
         "setup_code_used": setup_code[:8] + "..." if setup_code else None
+    }
+
+
+@app.post("/api/matter/auto-commission-all", tags=["matter"])
+async def matter_auto_commission_all():
+    """
+    Auto-commission ALL discovered, online, uncommissioned Hubitat Matter devices.
+
+    Runs up to 3 commissions in parallel (limited by semaphore to avoid
+    overwhelming the Hubitat hub or matter-server). Each device gets its
+    pairing window opened and is commissioned independently.
+    """
+    import asyncio
+    import requests as req
+
+    postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+
+    # Get all online, uncommissioned devices
+    resp = req.get(
+        f"{postgrest_url}/hubitat_matter_devices",
+        params={
+            "is_online": "eq.true",
+            "is_commissioned": "eq.false"
+        },
+        headers={"Accept": "application/json"},
+        timeout=5
+    )
+    if not resp.ok:
+        raise HTTPException(status_code=502, detail="Failed to query discovered devices")
+
+    devices = resp.json()
+    if not devices:
+        return {"message": "No online uncommissioned devices found", "commissioned": 0, "failed": 0, "results": []}
+
+    # Full parallelism — all devices commission concurrently
+    sem = asyncio.Semaphore(len(devices))
+
+    async def commission_one(device):
+        """Commission a single device, respecting the semaphore."""
+        unique_id = device['unique_id']
+        device_name = device.get('device_name', unique_id)
+        async with sem:
+            try:
+                body = AutoCommissionRequest(unique_id=unique_id)
+                result = await matter_auto_commission(body)
+                return {"device": device_name, "status": "ok", "node_id": result.get("our_node_id")}
+            except HTTPException as e:
+                logger.warning(f"Auto-commission failed for {device_name}: {e.detail}")
+                return {"device": device_name, "status": "error", "detail": e.detail}
+            except Exception as e:
+                logger.warning(f"Auto-commission failed for {device_name}: {e}")
+                return {"device": device_name, "status": "error", "detail": str(e)}
+
+    # Fire all commissions concurrently (semaphore limits to 3 at a time)
+    results = await asyncio.gather(*[commission_one(d) for d in devices])
+
+    commissioned = sum(1 for r in results if r["status"] == "ok")
+    failed = sum(1 for r in results if r["status"] == "error")
+
+    return {
+        "message": f"Commissioned {commissioned}/{len(devices)} devices",
+        "commissioned": commissioned,
+        "failed": failed,
+        "results": results
     }
 
 

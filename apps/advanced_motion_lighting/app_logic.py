@@ -339,6 +339,24 @@ class AdvancedMotionLightingApp(BaseApp):
             else:
                 self._turn_off_switch(device_id, device_name, device)
 
+    def _device_has_capability(
+        self, device: Optional[Dict[str, Any]], capability: str
+    ) -> bool:
+        """
+        Check if a device supports a given capability.
+
+        Args:
+            device: Device dict from cache (includes 'capabilities' list)
+            capability: Capability name (e.g. 'SwitchLevel', 'ColorTemperature')
+
+        Returns:
+            True if device has the capability, False otherwise
+        """
+        if not device:
+            return False
+        capabilities = device.get('capabilities', [])
+        return capability in capabilities
+
     def _turn_on_switch(
         self, device_id: str, device_name: str,
         device: Optional[Dict[str, Any]] = None
@@ -348,6 +366,7 @@ class AdvancedMotionLightingApp(BaseApp):
 
         Checks actual device state first. If device is already on,
         skips command AND does not update memo (preserves override detection).
+        Only sends setLevel/setColorTemperature if device has the capability.
         """
         # Check actual device state — if already on, skip to preserve memo
         if device:
@@ -359,19 +378,21 @@ class AdvancedMotionLightingApp(BaseApp):
         self.logger.info(f"Turning on: {device_name}")
 
         use_dim = self.get_setting('useDim', False)
-        if use_dim:
+        has_level = self._device_has_capability(device, 'SwitchLevel')
+
+        if use_dim and has_level:
             level = self._get_current_dim_level()
             self.send_command(device_id, 'setLevel', [level])
         else:
             self.send_command(device_id, 'on')
 
-        # Set color if enabled
+        # Set color only if device supports it
         if self.get_setting('useColor', False):
-            self._set_color(device_id)
+            self._set_color(device_id, device)
 
         # Update memo ONLY when app actually sends a command
         self._memoization.setdefault('switch_state', {})[device_name] = 'on'
-        if use_dim:
+        if use_dim and has_level:
             self._memoization.setdefault('dim_level', {})[device_name] = level
         self._save_memoization()
 
@@ -417,20 +438,29 @@ class AdvancedMotionLightingApp(BaseApp):
         # TODO: Add mode-specific dim levels
         return self.get_setting('defaultDimLevel', 50)
 
-    def _set_color(self, device_id: str) -> None:
-        """Set color on a device."""
+    def _set_color(
+        self, device_id: str, device: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Set color on a device, only if it has the required capability.
+
+        Checks for ColorTemperature or ColorControl capability before sending.
+        """
         preset_name = self.get_setting('colorPreset', 'Warm White')
+        has_ct = self._device_has_capability(device, 'ColorTemperature')
+        has_color = self._device_has_capability(device, 'ColorControl')
 
         if preset_name == 'Custom':
-            temp = self.get_setting('customColorTemperature', 2700)
-            self.send_command(device_id, 'setColorTemperature', [temp])
+            if has_ct:
+                temp = self.get_setting('customColorTemperature', 2700)
+                self.send_command(device_id, 'setColorTemperature', [temp])
         elif preset_name in self.COLOR_PRESETS:
             preset = self.COLOR_PRESETS[preset_name]
-            if 'temperature' in preset:
+            if 'temperature' in preset and has_ct:
                 self.send_command(
                     device_id, 'setColorTemperature', [preset['temperature']]
                 )
-            elif 'hue' in preset:
+            elif 'hue' in preset and has_color:
                 self.send_command(
                     device_id, 'setColor',
                     [f"{{'hue':{preset['hue']},'saturation':{preset['saturation']}}}"]

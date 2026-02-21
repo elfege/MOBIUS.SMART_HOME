@@ -279,6 +279,37 @@ CREATE TABLE IF NOT EXISTS location_modes (
 );
 
 -- =============================================================================
+-- DEVICE MATTER MAP TABLE
+-- =============================================================================
+-- Maps Hubitat devices to their Matter protocol counterparts.
+-- When a Hubitat device has a row here, commands are sent to BOTH
+-- Hubitat (via Maker API) and Matter (via matter-server WebSocket).
+
+CREATE TABLE IF NOT EXISTS device_matter_map (
+    -- Hubitat device ID (foreign reference, not enforced since device_cache may not have all devices)
+    hubitat_device_id VARCHAR(50) NOT NULL,
+
+    -- Matter node ID assigned by matter-server during commissioning
+    matter_node_id INTEGER NOT NULL,
+
+    -- Matter endpoint (usually 1 for single-endpoint devices like bulbs)
+    matter_endpoint_id INTEGER NOT NULL DEFAULT 1,
+
+    -- Human-readable label for identification
+    device_name VARCHAR(255),
+
+    -- Tracking
+    commissioned_at TIMESTAMPTZ DEFAULT NOW(),
+
+    -- One Hubitat device maps to one Matter node
+    PRIMARY KEY (hubitat_device_id)
+);
+
+-- Index for reverse lookup (Matter node → Hubitat device)
+CREATE INDEX IF NOT EXISTS idx_device_matter_map_node
+    ON device_matter_map(matter_node_id);
+
+-- =============================================================================
 -- GRANT PERMISSIONS TO ANONYMOUS ROLE (for PostgREST)
 -- =============================================================================
 
@@ -328,3 +359,4 @@ COMMENT ON TABLE event_log IS 'Audit log of all processed events';
 COMMENT ON TABLE scheduled_jobs IS 'Persistent scheduled tasks (timeouts, health checks)';
 COMMENT ON TABLE hub_config IS 'Hubitat hub connection configuration';
 COMMENT ON TABLE location_modes IS 'Cached Hubitat location modes';
+COMMENT ON TABLE device_matter_map IS 'Maps Hubitat devices to Matter protocol nodes for dual-command control';

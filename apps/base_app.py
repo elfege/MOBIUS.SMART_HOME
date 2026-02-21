@@ -371,17 +371,53 @@ class BaseApp(ABC):
         args: List = None
     ) -> bool:
         """
-        Send a command to a Hubitat device.
+        Send a command to a device via Hubitat AND Matter (if mapped).
+
+        Hubitat is always the primary path. If the device has a row in
+        device_matter_map, the same command is also translated and sent
+        via the Matter protocol for faster local control.
 
         Args:
-            device_id: Device ID
-            command: Command name
+            device_id: Hubitat device ID
+            command: Command name (e.g., 'on', 'off', 'setLevel')
             args: Optional command arguments
 
         Returns:
-            True if command succeeded
+            True if Hubitat command succeeded (Matter is best-effort)
         """
-        return self.hubitat.send_command(device_id, command, args)
+        # Primary: send via Hubitat Maker API
+        hubitat_ok = self.hubitat.send_command(device_id, command, args)
+
+        # Secondary: also send via Matter if device is mapped
+        try:
+            from services.matter_client import get_matter_mapping, get_matter_client
+            mapping = get_matter_mapping(device_id)
+            if mapping:
+                import asyncio
+                client = get_matter_client()
+                # Fire-and-forget: don't block Hubitat flow on Matter
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(
+                        client.send_hubitat_command(
+                            node_id=mapping['matter_node_id'],
+                            endpoint_id=mapping['matter_endpoint_id'],
+                            hubitat_command=command,
+                            hubitat_args=args
+                        )
+                    )
+                    self.logger.debug(
+                        f"Matter command queued: node={mapping['matter_node_id']} "
+                        f"cmd={command}"
+                    )
+                except RuntimeError:
+                    # No running event loop (shouldn't happen in FastAPI)
+                    self.logger.debug("No event loop for Matter command")
+        except Exception as e:
+            # Matter failures must never break Hubitat command flow
+            self.logger.warning(f"Matter dual-command failed for device {device_id}: {e}")
+
+        return hubitat_ok
 
     def get_device_state(self, device_id: str) -> Optional[Dict[str, Any]]:
         """

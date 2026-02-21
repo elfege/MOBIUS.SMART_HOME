@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block title %}Matter Devices{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="/static/css/matter.css">
+{% endblock %}
+
+{% block content %}
+<div class="matter-page">
+    <div class="matter-header">
+        <div class="wizard-title-row">
+            <a href="/" class="back-link">&larr; Dashboard</a>
+            <h2>Matter Device Management</h2>
+        </div>
+        <p class="status-summary">Commission, map, and test Matter-compatible devices</p>
+    </div>
+
+    <!-- Status Panel -->
+    <div class="matter-section">
+        <div class="matter-section-header">
+            <h3>Server Status</h3>
+            <button class="btn btn-small btn-secondary" id="btn-refresh-status">Refresh</button>
+        </div>
+        <div class="matter-status-panel" id="status-panel">
+            <div class="loading-placeholder">Checking matter-server...</div>
+        </div>
+    </div>
+
+    <!-- Commission New Device -->
+    <div class="matter-section">
+        <div class="matter-section-header">
+            <h3>Commission New Device</h3>
+        </div>
+        <div class="matter-commission-panel">
+            <p class="help-text">
+                Enter the device's pairing code (QR string like MT:... or numeric code).
+                For devices already paired to Hubitat, open a commissioning window from Hubitat first.
+            </p>
+            <div class="commission-form">
+                <input type="text" id="pairing-code" placeholder="MT:Y3.13OTB00KA0648G00 or numeric code"
+                       class="commission-input">
+                <button class="btn btn-primary" id="btn-commission">Commission</button>
+            </div>
+            <div id="commission-result" class="commission-result" style="display:none;"></div>
+        </div>
+    </div>
+
+    <!-- Commissioned Nodes -->
+    <div class="matter-section">
+        <div class="matter-section-header">
+            <h3>Commissioned Devices</h3>
+            <button class="btn btn-small btn-secondary" id="btn-refresh-nodes">Refresh</button>
+        </div>
+        <div id="nodes-container">
+            <div class="loading-placeholder">Loading Matter nodes...</div>
+        </div>
+    </div>
+
+    <!-- Device Mapping -->
+    <div class="matter-section">
+        <div class="matter-section-header">
+            <h3>Hubitat &harr; Matter Mapping</h3>
+        </div>
+        <p class="help-text">
+            Link a Hubitat device to its Matter counterpart. Commands will be sent via both protocols.
+        </p>
+        <div id="mappings-container">
+            <div class="loading-placeholder">Loading mappings...</div>
+        </div>
+        <div class="mapping-form" id="mapping-form">
+            <select id="map-hubitat-device" class="mapping-select">
+                <option value="">Select Hubitat device...</option>
+            </select>
+            <select id="map-matter-node" class="mapping-select">
+                <option value="">Select Matter node...</option>
+            </select>
+            <button class="btn btn-primary btn-small" id="btn-create-mapping">Link</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script type="module" src="/static/js/controllers/matter-controller.js"></script>
+{% endblock %}

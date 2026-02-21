@@ -248,6 +248,7 @@ class BaseApp(ABC):
 
         Resets memoization (matching Groovy resetStates pattern) so that
         when the instance resumes, it doesn't carry stale override records.
+        Schedules auto-resume if duration_minutes > 0.
 
         Args:
             duration_minutes: How long to pause (0 = indefinite)
@@ -258,20 +259,52 @@ class BaseApp(ABC):
         # Reset memoization on pause (Groovy pattern: resetStates on pause)
         self._reset_memoization()
 
-        # Cancel pending timeout jobs
         from services.scheduler_service import get_scheduler
         scheduler = get_scheduler()
+
+        # Cancel pending timeout jobs
         if self._runtime.timeout_job_id:
             scheduler.cancel(self._runtime.timeout_job_id)
+
+        # Schedule auto-resume if duration specified
+        if duration_minutes > 0:
+            job_id = f"auto_resume_{self.instance_id}"
+            # Cancel any existing auto-resume job first
+            if self._runtime.auto_resume_job_id:
+                scheduler.cancel(self._runtime.auto_resume_job_id)
+            scheduler.schedule_once(
+                job_id=job_id,
+                delay_seconds=duration_minutes * 60,
+                callback=lambda **kwargs: self._auto_resume(),
+                instance_id=self.instance_id,
+                job_type='auto_resume'
+            )
+            self._runtime.auto_resume_job_id = job_id
+            self.logger.info(f"Auto-resume scheduled in {duration_minutes} minutes")
+
+    def _auto_resume(self) -> None:
+        """Auto-resume after pause duration expires."""
+        self.logger.info("Auto-resume triggered")
+        self._runtime.auto_resume_job_id = None
+        # Use instance_manager to resume (updates DB + in-memory state)
+        self.instance_manager.resume_instance(self.instance_id)
 
     def resume(self) -> None:
         """
         Resume from paused state.
 
         Resets memoization so the instance starts fresh.
+        Cancels any pending auto-resume job.
         """
         self._is_paused = False
         self.logger.info("Resumed")
+
+        # Cancel auto-resume if we're being manually resumed
+        if self._runtime.auto_resume_job_id:
+            from services.scheduler_service import get_scheduler
+            scheduler = get_scheduler()
+            scheduler.cancel(self._runtime.auto_resume_job_id)
+            self._runtime.auto_resume_job_id = None
 
         # Reset memoization on resume (Groovy pattern: resetStates on resume)
         self._reset_memoization()

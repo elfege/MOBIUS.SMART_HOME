@@ -66,6 +66,10 @@
 </div>
 {% endblock %}
 
+{% block extra_css %}
+<link rel="stylesheet" href="/static/css/device-tile-modal.css">
+{% endblock %}
+
 {% block extra_js %}
 <script type="module">
     import { InstanceWizardController } from '/static/js/controllers/instance-controller.js';

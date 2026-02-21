@@ -536,6 +536,12 @@
     background: var(--color-card, #fff);
 }
 
+.detail-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.35rem;
+}
+
 .detail-table {
     width: 100%;
     font-size: 0.78rem;
@@ -578,6 +584,33 @@
 
 .btn-expand-card:hover {
     color: var(--color-primary, #0066cc);
+}
+
+/* Cursors */
+.btn-auto-commission,
+.btn-rescan-device,
+.btn-change-match,
+.btn-delete-mapping,
+.btn-commission,
+.btn-create-mapping,
+.btn-test-on,
+.btn-test-off,
+.btn-scan-hubs,
+.btn-commission-all,
+.btn-refresh-status,
+.btn-refresh-nodes,
+.btn-refresh-discovered,
+.btn-save-match,
+.btn-cancel-match,
+.btn-copy-details,
+.matter-modal-close,
+#modal-confirm-delete {
+    cursor: pointer;
+}
+
+.detail-table td:last-child {
+    cursor: text;
+    user-select: text;
 }
 
 /* Responsive: stack on small screens */

@@ -1,0 +1,514 @@
+/* =============================================================================
+   E2E Test Modal
+   Dedicated CSS file for the E2E test suite UI.
+   Per CSS modularization rule: all E2E styles in this file, no inline styles.
+   ============================================================================= */
+
+/* === Modal Overlay === */
+
+.e2e-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.6);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.e2e-modal {
+    width: 95vw;
+    height: 95vh;
+    background: var(--color-card);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* === Modal Header === */
+
+.e2e-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1.5rem;
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+    background: var(--color-bg);
+}
+
+.e2e-modal-header h2 {
+    margin: 0;
+    font-size: 1.1rem;
+}
+
+.e2e-modal-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+/* === WebSocket Status Indicator === */
+
+.e2e-ws-status {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+}
+
+.e2e-ws-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #94a3b8;
+    transition: background 0.3s;
+}
+
+.e2e-ws-dot.connected {
+    background: var(--color-success);
+}
+
+.e2e-ws-dot.disconnected {
+    background: var(--color-danger);
+}
+
+/* === Modal Body — 3-panel layout === */
+
+.e2e-modal-body {
+    display: grid;
+    grid-template-columns: 280px 1fr 320px;
+    flex: 1;
+    overflow: hidden;
+}
+
+/* === Panel Common === */
+
+.e2e-panel {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-right: 1px solid var(--color-border);
+}
+
+.e2e-panel:last-child {
+    border-right: none;
+}
+
+.e2e-panel > h3 {
+    margin: 0;
+    padding: 0.6rem 0.75rem;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+    background: var(--color-bg);
+}
+
+/* === Devices Panel (left) === */
+
+.e2e-device-groups {
+    overflow-y: auto;
+    padding: 0.5rem;
+    flex: 1;
+}
+
+.e2e-device-group {
+    margin-bottom: 0.75rem;
+}
+
+.e2e-group-title {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    margin: 0 0 0.35rem;
+    padding: 0.2rem 0.4rem;
+    background: var(--color-bg);
+    border-radius: 4px;
+    font-weight: 600;
+}
+
+/* === Device Tile === */
+
+.e2e-device-tile {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 0.4rem 0.5rem;
+    margin-bottom: 0.35rem;
+    transition: border-color 0.3s, box-shadow 0.3s;
+}
+
+.e2e-device-tile.e2e-flash {
+    border-color: var(--color-primary);
+    box-shadow: 0 0 8px rgba(37, 99, 235, 0.3);
+}
+
+.e2e-device-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.2rem;
+}
+
+.e2e-device-name {
+    font-weight: 600;
+    font-size: 0.78rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 170px;
+}
+
+.e2e-device-id {
+    font-size: 0.65rem;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+}
+
+/* === Device Attributes === */
+
+.e2e-device-attrs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.2rem;
+    margin-bottom: 0.2rem;
+}
+
+.e2e-attr {
+    font-size: 0.68rem;
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    transition: background 0.3s, color 0.3s, border-color 0.3s;
+}
+
+.e2e-state-on {
+    background: #dcfce7;
+    color: #166534;
+    border-color: #86efac;
+}
+
+.e2e-state-off {
+    background: #f1f5f9;
+    color: #64748b;
+    border-color: var(--color-border);
+}
+
+.e2e-state-active {
+    background: #fef3c7;
+    color: #92400e;
+    border-color: #fcd34d;
+}
+
+.e2e-state-inactive {
+    background: #f1f5f9;
+    color: #64748b;
+    border-color: var(--color-border);
+}
+
+/* === Device Controls === */
+
+.e2e-device-controls {
+    display: flex;
+    gap: 0.2rem;
+    margin-top: 0.2rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.e2e-device-controls .btn {
+    padding: 0.12rem 0.35rem;
+    font-size: 0.68rem;
+}
+
+.e2e-level-slider {
+    flex: 1;
+    max-width: 80px;
+    height: 14px;
+    cursor: pointer;
+}
+
+/* === Tests Panel (center) === */
+
+.e2e-tests-panel {
+    min-width: 0;
+}
+
+.e2e-scenarios {
+    overflow-y: auto;
+    padding: 0.5rem;
+    flex: 1;
+}
+
+/* === Scenario Card === */
+
+.e2e-scenario {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    margin-bottom: 0.5rem;
+}
+
+.e2e-scenario-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--color-border);
+    gap: 0.5rem;
+}
+
+.e2e-scenario-name {
+    font-weight: 600;
+    font-size: 0.85rem;
+    display: block;
+}
+
+.e2e-scenario-desc {
+    font-size: 0.72rem;
+    color: var(--color-text-muted);
+}
+
+.e2e-scenario-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+}
+
+.e2e-scenario-summary {
+    font-size: 0.72rem;
+    font-weight: 600;
+}
+
+/* === Test Steps === */
+
+.e2e-steps {
+    padding: 0.35rem 0.75rem;
+}
+
+.e2e-step {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.25rem 0;
+    font-size: 0.78rem;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+}
+
+.e2e-step:last-child {
+    border-bottom: none;
+}
+
+/* === Step Indicator (colored dot) === */
+
+.e2e-step-indicator {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    transition: background 0.3s;
+}
+
+.e2e-pending {
+    background: #94a3b8;
+}
+
+.e2e-running {
+    background: var(--color-primary);
+    animation: e2e-pulse 1s infinite;
+}
+
+.e2e-pass {
+    background: var(--color-success);
+}
+
+.e2e-fail {
+    background: var(--color-danger);
+}
+
+.e2e-skip {
+    background: var(--color-warning);
+}
+
+@keyframes e2e-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+.e2e-step-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.e2e-step-message {
+    font-size: 0.68rem;
+    color: var(--color-text-muted);
+    text-align: right;
+    flex-shrink: 0;
+    max-width: 50%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* === Result Colors === */
+
+.e2e-result-pass {
+    color: var(--color-success);
+}
+
+.e2e-result-fail {
+    color: var(--color-danger);
+}
+
+/* === Panel Toolbar (header with title + actions) === */
+
+.e2e-panel-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 0.75rem 0 0;
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+    background: var(--color-bg);
+}
+
+.e2e-panel-toolbar h3 {
+    margin: 0;
+    padding: 0.6rem 0.75rem;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+}
+
+/* === Log Panel (right) — Terminal style === */
+
+.e2e-log-panel {
+    min-width: 0;
+}
+
+.e2e-log {
+    overflow-y: auto;
+    padding: 0.5rem;
+    flex: 1;
+    background: #1e1e2e;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.7rem;
+    line-height: 1.6;
+    color: #cdd6f4;
+}
+
+.e2e-log-line {
+    padding: 1px 4px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    word-break: break-all;
+}
+
+.e2e-log-time {
+    color: #6c7086;
+    margin-right: 0.4rem;
+}
+
+/* Color-coded log line types */
+.e2e-log-device {
+    color: #89b4fa;
+}
+
+.e2e-log-command {
+    color: #a6e3a1;
+}
+
+.e2e-log-pass {
+    color: #a6e3a1;
+}
+
+.e2e-log-fail {
+    color: #f38ba8;
+}
+
+.e2e-log-warning {
+    color: #f9e2af;
+}
+
+.e2e-log-info {
+    color: #cdd6f4;
+}
+
+.e2e-log-ws {
+    color: #cba6f7;
+}
+
+/* === Loading / Empty / Error === */
+
+.e2e-loading {
+    color: var(--color-text-muted);
+    font-style: italic;
+    padding: 1rem;
+    text-align: center;
+}
+
+.e2e-empty {
+    color: var(--color-text-muted);
+    padding: 1rem;
+    text-align: center;
+    font-size: 0.85rem;
+}
+
+.e2e-error {
+    color: var(--color-danger);
+    padding: 1rem;
+    text-align: center;
+}
+
+/* === Cursors === */
+
+.e2e-close,
+.e2e-run-all,
+.e2e-scenario-actions .btn,
+.e2e-device-controls .btn,
+.e2e-copy-log {
+    cursor: pointer;
+}
+
+.e2e-level-slider {
+    cursor: ew-resize;
+}
+
+.e2e-log {
+    cursor: text;
+    user-select: text;
+}
+
+/* === Responsive === */
+
+@media (max-width: 1024px) {
+    .e2e-modal-body {
+        grid-template-columns: 1fr;
+        grid-template-rows: 200px 1fr 200px;
+    }
+
+    .e2e-panel {
+        border-right: none;
+        border-bottom: 1px solid var(--color-border);
+    }
+
+    .e2e-panel:last-child {
+        border-bottom: none;
+    }
+}

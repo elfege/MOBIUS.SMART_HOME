@@ -57,6 +57,25 @@
         </div>
     </div>
 
+    <!-- Hubitat Discovery -->
+    <div class="matter-section">
+        <div class="matter-section-header">
+            <h3>Hubitat Matter Devices</h3>
+            <div class="header-actions">
+                <button class="btn btn-small btn-primary" id="btn-scan-hubs">Scan All Hubs</button>
+                <button class="btn btn-small btn-secondary" id="btn-refresh-discovered">Refresh</button>
+            </div>
+        </div>
+        <p class="help-text">
+            Discover Matter devices paired to your Hubitat hubs. Auto-matched to Maker API
+            devices by name. Fix mismatches using the dropdown, then commission into our fabric.
+        </p>
+        <div id="scan-status" class="commission-result" style="display:none;"></div>
+        <div id="discovered-container">
+            <div class="matter-empty">Click "Scan All Hubs" to discover Matter devices</div>
+        </div>
+    </div>
+
     <!-- Device Mapping -->
     <div class="matter-section">
         <div class="matter-section-header">

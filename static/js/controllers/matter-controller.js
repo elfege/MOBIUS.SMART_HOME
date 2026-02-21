@@ -2,7 +2,8 @@
  * Matter Device Management Controller
  *
  * Handles the Matter management page: server status, commissioning,
- * node listing, and Hubitat-to-Matter device mapping.
+ * node listing, Hubitat-to-Matter device mapping, and Hubitat
+ * Matter device discovery with auto-commissioning.
  */
 
 $(document).ready(function () {
@@ -13,6 +14,7 @@ $(document).ready(function () {
     let matterNodes = [];
     let hubitatDevices = [];
     let mappings = [];
+    let discoveredDevices = [];
 
     // =========================================================================
     // Initialization
@@ -24,19 +26,22 @@ $(document).ready(function () {
     $('#btn-refresh-nodes').on('click', loadNodes);
     $('#btn-commission').on('click', commissionDevice);
     $('#btn-create-mapping').on('click', createMapping);
+    $('#btn-scan-hubs').on('click', scanHubs);
+    $('#btn-refresh-discovered').on('click', loadDiscoveredDevices);
 
     // =========================================================================
     // Data Loading
     // =========================================================================
 
     /**
-     * Load all data in parallel: status, nodes, mappings, Hubitat devices.
+     * Load all data in parallel: status, nodes, mappings, Hubitat devices, discovered.
      */
     function loadAll() {
         loadStatus();
         loadNodes();
         loadMappings();
         loadHubitatDevices();
+        loadDiscoveredDevices();
     }
 
     /**
@@ -406,6 +411,271 @@ $(document).ready(function () {
         } else {
             alert(`Node ${nodeId} is not mapped to a Hubitat device. Create a mapping first.`);
         }
+    }
+
+    // =========================================================================
+    // Discovery
+    // =========================================================================
+
+    /**
+     * Load previously discovered Hubitat Matter devices from DB.
+     */
+    function loadDiscoveredDevices() {
+        $.getJSON('/api/matter/hubitat-devices')
+            .done(function (data) {
+                discoveredDevices = Array.isArray(data) ? data : [];
+                renderDiscoveredDevices();
+            })
+            .fail(function () {
+                $('#discovered-container').html(
+                    '<div class="matter-empty">Failed to load discovered devices</div>'
+                );
+            });
+    }
+
+    /**
+     * Trigger a scan of all Hubitat hubs for Matter devices.
+     * Shows progress, then refreshes the discovered devices table.
+     */
+    function scanHubs() {
+        const $status = $('#scan-status');
+        const $btn = $('#btn-scan-hubs');
+
+        $status.removeClass('success error loading')
+            .addClass('loading')
+            .text('Scanning all Hubitat hubs for Matter devices...')
+            .show();
+        $btn.prop('disabled', true);
+
+        $.ajax({
+            url: '/api/matter/discover',
+            method: 'POST',
+            timeout: 60000
+        })
+        .done(function (data) {
+            const count = data.discovered ? data.discovered.length : 0;
+            const errCount = data.errors ? data.errors.length : 0;
+            let msg = `Discovered ${count} device(s) across hubs.`;
+            if (errCount > 0) {
+                msg += ` ${errCount} hub(s) had errors.`;
+            }
+            $status.removeClass('loading').addClass('success').text(msg);
+            loadDiscoveredDevices();
+            // Also refresh nodes in case some were already commissioned
+            loadNodes();
+        })
+        .fail(function (xhr) {
+            const detail = xhr.responseJSON?.detail || 'Scan failed';
+            $status.removeClass('loading').addClass('error').text(detail);
+        })
+        .always(function () {
+            $btn.prop('disabled', false);
+        });
+    }
+
+    /**
+     * Render the discovered Hubitat Matter devices table.
+     * Shows: name, hub, online status, Maker API match, correction dropdown,
+     * commission button.
+     */
+    function renderDiscoveredDevices() {
+        const $container = $('#discovered-container');
+
+        if (discoveredDevices.length === 0) {
+            $container.html(
+                '<div class="matter-empty">No discovered devices yet. Click "Scan All Hubs" to start.</div>'
+            );
+            return;
+        }
+
+        let html = `
+            <table class="discovery-table">
+                <thead>
+                    <tr>
+                        <th>Device Name</th>
+                        <th>Hub</th>
+                        <th>Status</th>
+                        <th>Maker API Match</th>
+                        <th>Confidence</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+
+        for (const d of discoveredDevices) {
+            const online = d.is_online;
+            const statusClass = online ? 'online' : 'offline';
+            const statusLabel = online ? 'Online' : 'Offline';
+            const isCommissioned = d.is_commissioned;
+
+            // Confidence badge
+            const conf = d.match_confidence || 'none';
+            const confClass = conf === 'exact' ? 'badge-success'
+                            : conf === 'fuzzy' ? 'badge-warning'
+                            : conf === 'manual' ? 'badge-info'
+                            : 'badge-none';
+
+            // Maker API match display
+            const matchDisplay = d.maker_api_device_name
+                ? `${escapeHtml(d.maker_api_device_name)} (#${d.maker_api_device_id})`
+                : '<span class="text-muted">No match</span>';
+
+            // Commission button state
+            let actionHtml;
+            if (isCommissioned) {
+                actionHtml = `<span class="badge badge-success">Commissioned (Node ${d.our_node_id})</span>`;
+            } else if (!online) {
+                actionHtml = '<span class="text-muted">Offline</span>';
+            } else {
+                actionHtml = `
+                    <button class="btn btn-small btn-primary btn-auto-commission"
+                            data-unique-id="${escapeHtml(d.unique_id)}"
+                            data-device-name="${escapeHtml(d.device_name || '')}">
+                        Commission
+                    </button>
+                `;
+            }
+
+            html += `
+                <tr class="${isCommissioned ? 'row-commissioned' : ''}">
+                    <td>
+                        <strong>${escapeHtml(d.device_name || 'Unknown')}</strong>
+                        <div class="device-meta">${escapeHtml(d.manufacturer || '')} ${escapeHtml(d.model || '')}</div>
+                    </td>
+                    <td>${escapeHtml(d.hub_name || d.hub_ip)}</td>
+                    <td><span class="status-badge ${statusClass}">${statusLabel}</span></td>
+                    <td>
+                        <div class="match-cell">
+                            <span class="match-current">${matchDisplay}</span>
+                            <button class="btn-link btn-change-match"
+                                    data-unique-id="${escapeHtml(d.unique_id)}"
+                                    title="Change match">edit</button>
+                        </div>
+                    </td>
+                    <td><span class="badge ${confClass}">${conf}</span></td>
+                    <td>${actionHtml}</td>
+                </tr>
+            `;
+        }
+
+        html += '</tbody></table>';
+        $container.html(html);
+
+        // Bind auto-commission buttons
+        $container.find('.btn-auto-commission').on('click', function () {
+            autoCommission(
+                $(this).data('unique-id'),
+                $(this).data('device-name'),
+                $(this)
+            );
+        });
+
+        // Bind match-change buttons
+        $container.find('.btn-change-match').on('click', function () {
+            openMatchEditor($(this).data('unique-id'), $(this).closest('td'));
+        });
+    }
+
+    /**
+     * Auto-commission a single device: opens Hubitat pairing window,
+     * commissions into our fabric, creates mapping.
+     */
+    function autoCommission(uniqueId, deviceName, $btn) {
+        if (!confirm(`Commission "${deviceName}" into our Matter fabric?\n\nThis will:\n1. Open a pairing window on Hubitat\n2. Commission into our matter-server\n3. Map to its Maker API counterpart`)) {
+            return;
+        }
+
+        $btn.prop('disabled', true).text('Commissioning...');
+
+        $.ajax({
+            url: '/api/matter/auto-commission',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ unique_id: uniqueId }),
+            timeout: 180000  // 3 min timeout for commissioning
+        })
+        .done(function (data) {
+            $btn.replaceWith(
+                `<span class="badge badge-success">Commissioned (Node ${data.our_node_id || '?'})</span>`
+            );
+            // Refresh tables
+            loadNodes();
+            loadMappings();
+            loadDiscoveredDevices();
+        })
+        .fail(function (xhr) {
+            const detail = xhr.responseJSON?.detail || 'Commission failed';
+            alert(`Auto-commission failed: ${detail}`);
+            $btn.prop('disabled', false).text('Commission');
+        });
+    }
+
+    /**
+     * Open inline match editor: replaces the match cell with a dropdown
+     * of all Maker API devices for manual correction.
+     */
+    function openMatchEditor(uniqueId, $cell) {
+        if (hubitatDevices.length === 0) {
+            alert('Hubitat devices not loaded yet. Wait a moment and try again.');
+            return;
+        }
+
+        // Build dropdown options sorted by label
+        const sorted = [...hubitatDevices].sort((a, b) =>
+            (a.label || a.name || '').localeCompare(b.label || b.name || '')
+        );
+
+        let optionsHtml = '<option value="">-- Select device --</option>';
+        for (const d of sorted) {
+            const label = d.label || d.name || `Device ${d.id}`;
+            optionsHtml += `<option value="${d.id}">${escapeHtml(label)} (#${d.id})</option>`;
+        }
+
+        $cell.html(`
+            <div class="match-editor">
+                <select class="mapping-select match-select">${optionsHtml}</select>
+                <button class="btn btn-small btn-primary btn-save-match"
+                        data-unique-id="${escapeHtml(uniqueId)}">Save</button>
+                <button class="btn btn-small btn-secondary btn-cancel-match">Cancel</button>
+            </div>
+        `);
+
+        // Bind save
+        $cell.find('.btn-save-match').on('click', function () {
+            const makerDeviceId = $cell.find('.match-select').val();
+            if (!makerDeviceId) {
+                alert('Select a Maker API device.');
+                return;
+            }
+            saveMatch(uniqueId, makerDeviceId);
+        });
+
+        // Bind cancel
+        $cell.find('.btn-cancel-match').on('click', function () {
+            loadDiscoveredDevices();
+        });
+    }
+
+    /**
+     * Save a manual match correction to the server.
+     */
+    function saveMatch(uniqueId, makerApiDeviceId) {
+        $.ajax({
+            url: '/api/matter/hubitat-devices/match',
+            method: 'PATCH',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                unique_id: uniqueId,
+                maker_api_device_id: makerApiDeviceId
+            })
+        })
+        .done(function () {
+            loadDiscoveredDevices();
+        })
+        .fail(function (xhr) {
+            alert('Failed to save match: ' + (xhr.responseJSON?.detail || 'Unknown error'));
+        });
     }
 
     // =========================================================================

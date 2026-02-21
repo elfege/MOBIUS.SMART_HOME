@@ -1,0 +1,258 @@
+"""
+Webhook Router Service
+
+Routes incoming Hubitat webhooks to the correct app instances.
+Uses device_subscriptions table to determine which instances
+should receive each event.
+
+The Maker API can be configured to POST events to our webhook endpoint
+when device attributes change. This service parses those events and
+dispatches them to all subscribed instances.
+"""
+
+import os
+import logging
+from datetime import datetime
+from typing import Dict, List, Any, Optional
+import requests
+
+from models.event import DeviceEvent
+from services.instance_manager import get_instance_manager
+from services.device_cache import DeviceCache
+
+
+class WebhookRouter:
+    """
+    Routes Hubitat webhook events to subscribed app instances.
+
+    Flow:
+    1. Hubitat sends POST to /api/webhook/event
+    2. Router extracts device_id and event_type
+    3. Queries device_subscriptions for matching instance_ids
+    4. Dispatches event to each matching instance's on_event() method
+    5. Logs event to event_log table for audit/debugging
+
+    Webhook payload format from Hubitat:
+    {
+        "deviceId": "123",
+        "name": "motion",
+        "value": "active",
+        "displayName": "Office Motion Sensor",
+        "descriptionText": "Office Motion Sensor motion is active",
+        "unit": null,
+        "type": null,
+        "data": null
+    }
+
+    Example usage:
+        router = WebhookRouter()
+
+        # In Flask route handler:
+        @app.route('/api/webhook/event', methods=['POST'])
+        def handle_webhook():
+            payload = request.get_json()
+            routed_count = router.route_event(payload)
+            return {'routed_to': routed_count}
+    """
+
+    def __init__(
+        self,
+        postgrest_url: str = None,
+        device_cache: DeviceCache = None
+    ):
+        """
+        Initialize the webhook router.
+
+        Args:
+            postgrest_url: URL to PostgREST service
+            device_cache: Optional DeviceCache for updating device state
+        """
+        self.postgrest_url = postgrest_url or os.environ.get(
+            'POSTGREST_URL', 'http://postgrest:3001'
+        )
+        self.device_cache = device_cache
+        self.logger = logging.getLogger(__name__)
+
+    def route_event(self, webhook_payload: Dict[str, Any]) -> int:
+        """
+        Route incoming webhook to relevant instances.
+
+        Args:
+            webhook_payload: Raw webhook payload from Hubitat
+
+        Returns:
+            Number of instances that received the event
+        """
+        # Parse webhook
+        device_id = str(webhook_payload.get('deviceId', ''))
+        event_name = webhook_payload.get('name', '')
+        event_value = webhook_payload.get('value', '')
+        display_name = webhook_payload.get('displayName', '')
+
+        if not device_id or not event_name:
+            self.logger.warning(f"Invalid webhook payload: {webhook_payload}")
+            return 0
+
+        self.logger.debug(
+            f"Received event: device={device_id} ({display_name}), "
+            f"event={event_name}, value={event_value}"
+        )
+
+        # Create event object
+        event = DeviceEvent(
+            device_id=device_id,
+            device_name=display_name,
+            event_type=event_name,
+            value=event_value,
+            unit=webhook_payload.get('unit'),
+            description=webhook_payload.get('descriptionText'),
+            source='hubitat_webhook',
+            timestamp=datetime.now(),
+            raw_payload=webhook_payload
+        )
+
+        # Update device cache with new attribute value
+        if self.device_cache:
+            self.device_cache.update_device_attribute(
+                device_id, event_name, event_value
+            )
+
+        # Find subscribed instances
+        instance_manager = get_instance_manager()
+        subscribed_ids = instance_manager.get_subscribed_instances(
+            device_id=device_id,
+            event_type=event_name
+        )
+
+        # Dispatch to each instance
+        routed_to = []
+        for instance_id in subscribed_ids:
+            try:
+                app = instance_manager.get_running_instance(instance_id)
+                if app:
+                    app.on_event(event)
+                    routed_to.append(instance_id)
+                else:
+                    self.logger.warning(
+                        f"Instance {instance_id} subscribed but not running"
+                    )
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to dispatch event to instance {instance_id}: {e}"
+                )
+
+        # Log event
+        self._log_event(event, routed_to, webhook_payload)
+
+        if routed_to:
+            self.logger.debug(
+                f"Routed event to {len(routed_to)} instances: {routed_to}"
+            )
+
+        return len(routed_to)
+
+    def route_mode_change(self, webhook_payload: Dict[str, Any]) -> int:
+        """
+        Route mode change event to all active instances.
+
+        Mode changes affect all instances (unlike device events which
+        are subscription-based).
+
+        Args:
+            webhook_payload: Mode change webhook payload
+
+        Returns:
+            Number of instances notified
+        """
+        new_mode = webhook_payload.get('value', '')
+
+        if not new_mode:
+            self.logger.warning(f"Invalid mode change payload: {webhook_payload}")
+            return 0
+
+        self.logger.info(f"Mode changed to: {new_mode}")
+
+        # Notify all running instances
+        instance_manager = get_instance_manager()
+        notified = 0
+
+        for instance_id, app in instance_manager._running_instances.items():
+            try:
+                if hasattr(app, 'on_mode_change'):
+                    app.on_mode_change(new_mode)
+                    notified += 1
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to notify instance {instance_id} of mode change: {e}"
+                )
+
+        # Update location_modes table
+        self._update_mode(new_mode)
+
+        return notified
+
+    def _log_event(
+        self,
+        event: DeviceEvent,
+        routed_to: List[int],
+        raw_payload: Dict[str, Any]
+    ) -> None:
+        """Log event to database for audit/debugging."""
+        try:
+            requests.post(
+                f"{self.postgrest_url}/event_log",
+                json={
+                    'hubitat_device_id': event.device_id,
+                    'device_name': event.device_name,
+                    'event_type': event.event_type,
+                    'event_value': event.value,
+                    'event_unit': event.unit,
+                    'routed_to_instances': routed_to,
+                    'raw_payload': raw_payload,
+                    'received_at': datetime.now().isoformat()
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=5
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to log event: {e}")
+
+    def _update_mode(self, mode_name: str) -> None:
+        """Update location_modes table with new active mode."""
+        try:
+            # Set all modes to inactive
+            requests.patch(
+                f"{self.postgrest_url}/location_modes",
+                json={'is_active': False},
+                headers={"Content-Type": "application/json"},
+                timeout=5
+            )
+
+            # Set new mode to active (upsert)
+            requests.post(
+                f"{self.postgrest_url}/location_modes",
+                json={
+                    'mode_name': mode_name,
+                    'is_active': True,
+                    'updated_at': datetime.now().isoformat()
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates"
+                },
+                timeout=5
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to update mode in database: {e}")
+
+
+# Global router instance
+_webhook_router: Optional[WebhookRouter] = None
+
+
+def get_webhook_router() -> WebhookRouter:
+    """Get the global webhook router instance."""
+    global _webhook_router
+    if _webhook_router is None:
+        _webhook_router = WebhookRouter()
+    return _webhook_router

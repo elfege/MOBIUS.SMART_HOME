@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="dashboard">
+    <section class="dashboard-header">
+        <h2>Your Automations</h2>
+        <p class="status-summary">
+            <span id="instances-count">Loading...</span>
+        </p>
+    </section>
+
+    <section class="instances-grid" id="instances-container">
+        <!-- Instance cards will be populated by JavaScript -->
+        <div class="loading-placeholder">
+            <p>Loading automations...</p>
+        </div>
+    </section>
+
+    <section class="empty-state" id="empty-state" style="display: none;">
+        <h3>No automations yet</h3>
+        <p>Create your first automation to get started.</p>
+        <a href="/instance/new" class="btn btn-primary">+ Add Automation</a>
+    </section>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script type="module">
+    import { DashboardController } from '/static/js/controllers/dashboard-controller.js';
+
+    $(document).ready(function() {
+        const dashboard = new DashboardController('instances-container');
+        dashboard.init();
+    });
+</script>
+{% endblock %}

@@ -1,0 +1,55 @@
+{
+    "hubitat": {
+        "primary": {
+            "hub_ip": "<LAN_IP>",
+            "app_number": "268",
+            "token_env": "TOKEN_HUB_4"
+        }
+    },
+    "other_hubs": {
+        "hub1": {
+            "ip": "<LAN_IP>",
+            "app_number": "1717"
+        },
+        "hub2": {
+            "ip": "<LAN_IP>",
+            "app_number": "2151"
+        },
+        "hub3": {
+            "ip": "<LAN_IP>",
+            "app_number": "1269"
+        }
+    },
+    "database": {
+        "postgrest_url": "http://postgrest:3001",
+        "postgres_host": "postgres",
+        "postgres_port": 5432,
+        "postgres_db": "smarthome",
+        "postgres_user": "smarthome_api"
+    },
+    "webhook_dispatcher": {
+        "_comment": "Central webhook receiver - configure Hubitat Maker API to POST here",
+        "port_env": "WEBHOOK_PORT",
+        "port_default": 5050,
+        "hubitat_url": "http://<LAN_IP>:5050/api/webhook/event",
+        "targets_env": "WEBHOOK_TARGETS",
+        "targets_default": [
+            "http://smarthome-app:5000/api/webhook/event",
+            "http://host.docker.internal:80"
+        ]
+    },
+    "webhook": {
+        "_comment": "Internal webhook endpoints (receives from dispatcher)",
+        "event_endpoint": "/api/webhook/event",
+        "mode_endpoint": "/api/webhook/mode"
+    },
+    "scheduler": {
+        "misfire_grace_time": 60,
+        "max_instances": 3,
+        "coalesce": true
+    },
+    "device_cache": {
+        "ttl_seconds": 300,
+        "refresh_on_event": true
+    }
+}

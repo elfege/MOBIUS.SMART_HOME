@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block title %}Create Automation{% endblock %}
+
+{% block content %}
+<div class="wizard">
+    <header class="wizard-header">
+        <h2>Create New Automation</h2>
+        <div class="wizard-steps">
+            <span class="step active" data-step="1">1. Choose Type</span>
+            <span class="step" data-step="2">2. Select Devices</span>
+            <span class="step" data-step="3">3. Configure</span>
+            <span class="step" data-step="4">4. Name & Create</span>
+        </div>
+    </header>
+
+    <!-- Step 1: Choose App Type -->
+    <section class="wizard-step" id="step-1">
+        <h3>Choose Automation Type</h3>
+        <div class="app-types-grid" id="app-types-container">
+            <!-- App type cards populated by JavaScript -->
+            <div class="loading-placeholder">Loading available types...</div>
+        </div>
+    </section>
+
+    <!-- Step 2: Select Devices -->
+    <section class="wizard-step" id="step-2" style="display: none;">
+        <h3>Select Devices</h3>
+        <div id="device-categories-container">
+            <!-- Device pickers populated by JavaScript -->
+        </div>
+        <div class="wizard-nav">
+            <button class="btn btn-secondary" onclick="wizard.prevStep()">Back</button>
+            <button class="btn btn-primary" onclick="wizard.nextStep()">Next</button>
+        </div>
+    </section>
+
+    <!-- Step 3: Configure Settings -->
+    <section class="wizard-step" id="step-3" style="display: none;">
+        <h3>Configure Settings</h3>
+        <div id="settings-form-container">
+            <!-- Settings form populated from JSON Schema -->
+        </div>
+        <div class="wizard-nav">
+            <button class="btn btn-secondary" onclick="wizard.prevStep()">Back</button>
+            <button class="btn btn-primary" onclick="wizard.nextStep()">Next</button>
+        </div>
+    </section>
+
+    <!-- Step 4: Name & Create -->
+    <section class="wizard-step" id="step-4" style="display: none;">
+        <h3>Name Your Automation</h3>
+        <div class="form-group">
+            <label for="instance-label">Automation Name</label>
+            <input type="text" id="instance-label" placeholder="e.g., Office Motion Lights" required>
+            <p class="help-text">Choose a descriptive name to identify this automation.</p>
+        </div>
+        <div class="wizard-summary" id="wizard-summary">
+            <!-- Summary populated by JavaScript -->
+        </div>
+        <div class="wizard-nav">
+            <button class="btn btn-secondary" onclick="wizard.prevStep()">Back</button>
+            <button class="btn btn-primary btn-create" onclick="wizard.create()">Create Automation</button>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script type="module">
+    import { InstanceWizardController } from '/static/js/controllers/instance-controller.js';
+
+    window.wizard = new InstanceWizardController();
+
+    $(document).ready(function() {
+        wizard.init();
+    });
+</script>
+{% endblock %}

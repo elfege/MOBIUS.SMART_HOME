@@ -182,11 +182,10 @@ services:
     container_name: smarthome-matter-server
     restart: unless-stopped
     network_mode: host
-    security_opt:
-      - apparmor:unconfined
+    privileged: true
     volumes:
       - matter_data:/data/
-      - /run/dbus:/run/dbus:ro
+      - /run/dbus:/run/dbus
     environment:
       MATTER_SERVER__INSTANCE_NAME: "0_SMART_HOME"
       MATTER_SERVER__PORT: "${MATTER_PORT:-5580}"

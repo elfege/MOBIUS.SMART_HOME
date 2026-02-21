@@ -133,13 +133,15 @@ mkdir -p "$SCRIPT_DIR/nginx/html"
 # -------------------------------------------------------------------------
 echo ""
 
-# Check if webhook-dispatcher is already running (from 0_TILES or elsewhere)
+# webhook-dispatcher is shared across projects (0_SMART_HOME, 0_TILES).
+# Docker only runs one — whichever project starts first owns the container.
+# If it's already running from another project, skip it to avoid name conflict.
 if docker ps --format '{{.Names}}' | grep -q '^webhook-dispatcher$'; then
-	echo -e "${CYAN:-}INFO: webhook-dispatcher already running (from another project). Skipping.${NC:-}"
-	echo "Starting 0_SMART_HOME services only (smart-home, postgres, postgrest, nginx)..."
-	docker compose up -d --no-deps smart-home postgres postgrest nginx
+	echo "webhook-dispatcher already running (shared container) — skipping"
+	echo "Starting remaining containers..."
+	docker compose up -d smart-home postgres postgrest nginx matter-server
 else
-	echo "Starting all containers (including webhook-dispatcher)..."
+	echo "Starting all containers..."
 	docker compose up -d
 fi
 

@@ -298,6 +298,54 @@ async def get_instance_status(instance_id: int):
     }
 
 
+@app.post("/api/instances/{instance_id}/run", tags=["instances"])
+async def run_instance(instance_id: int):
+    """
+    Run instance: start if stopped, or re-evaluate state if already running.
+
+    When already running, calls master() to evaluate current conditions
+    (motion state, timeouts) and control lights accordingly.
+    """
+    from services.instance_manager import get_instance_manager
+    manager = get_instance_manager()
+
+    instance = manager.get_instance(instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    running = manager.get_running_instance(instance_id)
+    if running:
+        # Already running — re-evaluate current state via master()
+        running.master()
+        return {"message": "Instance re-evaluated current state"}
+
+    if manager._start_instance(instance_id, instance):
+        return {"message": "Instance started"}
+    raise HTTPException(status_code=500, detail="Failed to start instance")
+
+
+@app.post("/api/instances/{instance_id}/update", tags=["instances"])
+async def update_initialize_instance(instance_id: int):
+    """
+    Reload an instance (stop + start with current config).
+
+    Also resets memoization state so the instance starts fresh
+    without stale override records.
+    """
+    from services.instance_manager import get_instance_manager
+    manager = get_instance_manager()
+
+    instance = manager.get_instance(instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    # Reset memoization on reload (stale memo causes incorrect behavior)
+    manager.update_memoization(instance_id, {})
+
+    manager._reload_instance(instance_id)
+    return {"message": "Instance reloaded with memoization reset"}
+
+
 # =============================================================================
 # Devices
 # =============================================================================
@@ -464,6 +512,44 @@ async def dashboard(request: Request):
 async def new_instance(request: Request):
     """Instance creation wizard."""
     return templates.TemplateResponse(request, "instance_wizard.html")
+
+
+@app.get("/api/instances/{instance_id}/events", tags=["instances"])
+async def stream_instance_events(instance_id: int):
+    """Recent events for an instance's subscribed devices."""
+    from services.instance_manager import get_instance_manager
+    manager = get_instance_manager()
+
+    instance = manager.get_instance(instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    # Collect all device IDs from instance's device_selections
+    device_ids = []
+    for ids in (instance.get('device_selections') or {}).values():
+        device_ids.extend(str(d) for d in ids)
+
+    if not device_ids:
+        return []
+
+    try:
+        import requests as req
+        postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+        response = req.get(
+            f"{postgrest_url}/event_log",
+            params={
+                "hubitat_device_id": f"in.({','.join(device_ids)})",
+                "order": "received_at.desc",
+                "limit": "50"
+            },
+            timeout=5
+        )
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except Exception as e:
+        logger.error(f"Failed to get instance events: {e}")
+        return []
 
 
 @app.get("/instance/{instance_id}", response_class=HTMLResponse, include_in_schema=False)

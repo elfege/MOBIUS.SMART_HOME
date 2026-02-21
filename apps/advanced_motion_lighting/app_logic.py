@@ -114,6 +114,11 @@ class AdvancedMotionLightingApp(BaseApp):
 
     def on_event(self, event: DeviceEvent) -> None:
         """Handle device events."""
+        # Button events ALWAYS processed — they're the unpause mechanism
+        if event.event_type in ('pushed', 'held', 'doubleTapped'):
+            self._handle_button(event)
+            return
+
         if self.is_paused:
             self.logger.debug(f"Paused, ignoring event: {event}")
             return
@@ -126,8 +131,6 @@ class AdvancedMotionLightingApp(BaseApp):
             self._handle_switch(event)
         elif event.event_type == 'illuminance':
             self._handle_illuminance(event)
-        elif event.event_type == 'pushed':
-            self._handle_button(event)
         elif event.event_type == 'contact':
             self._handle_contact(event)
 
@@ -148,29 +151,15 @@ class AdvancedMotionLightingApp(BaseApp):
 
     def _handle_switch(self, event: DeviceEvent) -> None:
         """
-        Handle switch event (for memoization).
+        Handle switch event.
 
-        If user manually changed a switch, remember that override
-        so we don't fight with them.
+        NOTE: Memoization is NOT updated from external switch events.
+        The Groovy pattern only records memo when the APP sends commands.
+        User overrides are detected at command time by comparing memo
+        vs desired action: if memo == action, it means "I already did this;
+        if the device is now different, user overrode me — skip."
         """
-        if not self.get_setting('memoize', False):
-            return
-
-        # Check if this was our command or user intervention
-        # (Hubitat doesn't tell us, so we use timing heuristic)
-        if self._runtime.last_switch_control:
-            time_since_command = (
-                datetime.now() - self._runtime.last_switch_control
-            ).total_seconds()
-            if time_since_command < 3:
-                # This event is probably from our own command
-                return
-
-        # User intervention - update memoization
-        device_name = event.device_name
-        self._memoization['switch_state'][device_name] = event.value
-        self._save_memoization()
-        self.logger.info(f"User override detected: {device_name} → {event.value}")
+        self.logger.debug(f"Switch event: {event.device_name} -> {event.value}")
 
     def _handle_illuminance(self, event: DeviceEvent) -> None:
         """Handle illuminance change."""
@@ -179,22 +168,63 @@ class AdvancedMotionLightingApp(BaseApp):
         self.master()
 
     def _handle_button(self, event: DeviceEvent) -> None:
-        """Handle button push (pause/resume)."""
-        self.logger.info(f"Button pushed: {event.device_name}")
+        """
+        Handle button event (pause/resume toggle).
+
+        Triggers on pushed, held, or doubleTapped based on buttonEventType setting.
+        Also controls pause indicator lights if configured.
+        """
+        self.logger.info(f"Button {event.event_type}: {event.device_name}")
 
         pause_duration = self.get_setting('pauseDuration', 60)
         if self.get_setting('pauseDurationUnit', 'Minutes') == 'Hours':
             pause_duration *= 60
 
-        # Toggle pause
+        # Toggle pause state
         if self.is_paused:
             self.instance_manager.resume_instance(self.instance_id)
+            self._control_pause_lights(resuming=True)
         else:
             self.instance_manager.pause_instance(
                 self.instance_id,
                 duration_minutes=pause_duration,
                 reason='Button press'
             )
+            self._control_pause_lights(resuming=False)
+
+    def _control_pause_lights(self, resuming: bool) -> None:
+        """
+        Control pause indicator lights when pausing/resuming.
+
+        These are separate devices (not the main controlled lights) that
+        provide visual feedback when the automation is paused.
+
+        Args:
+            resuming: True if resuming (un-pausing), False if pausing
+        """
+        indicator_ids = self.get_devices('pause_switches')
+        if not indicator_ids:
+            return
+
+        action = self.get_setting('pauseSwitchAction', 'toggle')
+
+        for device_id in indicator_ids:
+            if action == 'toggle':
+                # Toggle: read current state and invert
+                device = self.get_device_state(device_id)
+                if device:
+                    current = device.get('attributes', {}).get('switch', 'off')
+                    cmd = 'off' if current == 'on' else 'on'
+                else:
+                    # Can't read state — default: on when pausing, off when resuming
+                    cmd = 'off' if resuming else 'on'
+                self.send_command(device_id, cmd)
+            elif action == 'on':
+                # "on" means: turn ON when pausing, OFF when resuming
+                self.send_command(device_id, 'off' if resuming else 'on')
+            elif action == 'off':
+                # "off" means: turn OFF when pausing, ON when resuming
+                self.send_command(device_id, 'on' if resuming else 'off')
 
     def _handle_contact(self, event: DeviceEvent) -> None:
         """Handle contact sensor (door open → lights on)."""
@@ -284,6 +314,12 @@ class AdvancedMotionLightingApp(BaseApp):
         """
         Control all switches based on action.
 
+        Groovy compare-and-skip pattern:
+        1. Check memo: if memo == action → skip (user may have overridden)
+        2. Check actual device state: if already in desired state → skip
+           command AND preserve memo (critical for override detection)
+        3. Only update memo when app actually sends a command
+
         Args:
             action: 'on' or 'off'
         """
@@ -291,24 +327,37 @@ class AdvancedMotionLightingApp(BaseApp):
 
         for device_id in switch_ids:
             device = self.get_device_state(device_id)
-            device_name = device.get('device_name', device_id) if device else device_id
+            device_name = device.get('device_label', device.get('device_name', device_id)) if device else device_id
 
-            # Check memoization
+            # Memoization check: if app already set this to desired state, skip
             if self._should_skip_due_to_memo(device_name, action):
                 continue
 
-            # Send command
+            # Send command (checks actual device state before sending)
             if action == 'on':
-                self._turn_on_switch(device_id, device_name)
+                self._turn_on_switch(device_id, device_name, device)
             else:
-                self._turn_off_switch(device_id, device_name)
+                self._turn_off_switch(device_id, device_name, device)
 
-    def _turn_on_switch(self, device_id: str, device_name: str) -> None:
-        """Turn on a switch with appropriate level/color."""
+    def _turn_on_switch(
+        self, device_id: str, device_name: str,
+        device: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Turn on a switch with appropriate level/color.
+
+        Checks actual device state first. If device is already on,
+        skips command AND does not update memo (preserves override detection).
+        """
+        # Check actual device state — if already on, skip to preserve memo
+        if device:
+            actual_state = device.get('attributes', {}).get('switch')
+            if actual_state == 'on':
+                self.logger.debug(f"Skip ON for {device_name}: already on")
+                return
+
         self.logger.info(f"Turning on: {device_name}")
-        self._runtime.last_switch_control = datetime.now()
 
-        # Get target dim level
         use_dim = self.get_setting('useDim', False)
         if use_dim:
             level = self._get_current_dim_level()
@@ -317,24 +366,36 @@ class AdvancedMotionLightingApp(BaseApp):
             self.send_command(device_id, 'on')
 
         # Set color if enabled
-        use_color = self.get_setting('useColor', False)
-        if use_color:
+        if self.get_setting('useColor', False):
             self._set_color(device_id)
 
-        # Update memoization
+        # Update memo ONLY when app actually sends a command
         self._memoization['switch_state'][device_name] = 'on'
         if use_dim:
             self._memoization['dim_level'][device_name] = level
         self._save_memoization()
 
-    def _turn_off_switch(self, device_id: str, device_name: str) -> None:
-        """Turn off a switch."""
-        self.logger.info(f"Turning off: {device_name}")
-        self._runtime.last_switch_control = datetime.now()
+    def _turn_off_switch(
+        self, device_id: str, device_name: str,
+        device: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Turn off a switch.
 
+        Checks actual device state first. If device is already off,
+        skips command AND does not update memo (preserves override detection).
+        """
+        # Check actual device state — if already off, skip to preserve memo
+        if device:
+            actual_state = device.get('attributes', {}).get('switch')
+            if actual_state == 'off':
+                self.logger.debug(f"Skip OFF for {device_name}: already off")
+                return
+
+        self.logger.info(f"Turning off: {device_name}")
         self.send_command(device_id, 'off')
 
-        # Update memoization
+        # Update memo ONLY when app actually sends a command
         self._memoization['switch_state'][device_name] = 'off'
         self._save_memoization()
 
@@ -513,6 +574,13 @@ class AdvancedMotionLightingApp(BaseApp):
                     "description": "If all sensors fail, assume motion active (conservative)",
                     "default": False
                 },
+                "buttonEventType": {
+                    "type": "string",
+                    "title": "Button Event Type",
+                    "description": "Which button action triggers pause/resume",
+                    "enum": ["held", "pushed", "doubleTapped"],
+                    "default": "held"
+                },
                 "pauseDuration": {
                     "type": "integer",
                     "title": "Pause Duration",
@@ -525,6 +593,13 @@ class AdvancedMotionLightingApp(BaseApp):
                     "title": "Pause Duration Unit",
                     "enum": ["Minutes", "Hours"],
                     "default": "Minutes"
+                },
+                "pauseSwitchAction": {
+                    "type": "string",
+                    "title": "Pause Switch Action",
+                    "description": "What to do with pause switches when pausing (reverses on resume)",
+                    "enum": ["toggle", "on", "off"],
+                    "default": "toggle"
                 }
             }
         }
@@ -572,5 +647,13 @@ class AdvancedMotionLightingApp(BaseApp):
                 "multiple": True,
                 "required": False,
                 "description": "Optional: Turn on lights when door opens"
+            },
+            {
+                "key": "pause_switches",
+                "label": "Switches to Control on Pause/Resume",
+                "capability": "switch",
+                "multiple": True,
+                "required": False,
+                "description": "Optional: Switches to turn on/off when pausing or resuming (can overlap with motion switches)"
             }
         ]

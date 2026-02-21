@@ -246,11 +246,17 @@ class BaseApp(ABC):
         """
         Pause the instance.
 
+        Resets memoization (matching Groovy resetStates pattern) so that
+        when the instance resumes, it doesn't carry stale override records.
+
         Args:
             duration_minutes: How long to pause (0 = indefinite)
         """
         self._is_paused = True
         self.logger.info(f"Paused for {duration_minutes} minutes")
+
+        # Reset memoization on pause (Groovy pattern: resetStates on pause)
+        self._reset_memoization()
 
         # Cancel pending timeout jobs
         from services.scheduler_service import get_scheduler
@@ -259,9 +265,16 @@ class BaseApp(ABC):
             scheduler.cancel(self._runtime.timeout_job_id)
 
     def resume(self) -> None:
-        """Resume from paused state."""
+        """
+        Resume from paused state.
+
+        Resets memoization so the instance starts fresh.
+        """
         self._is_paused = False
         self.logger.info("Resumed")
+
+        # Reset memoization on resume (Groovy pattern: resetStates on resume)
+        self._reset_memoization()
 
         # Re-evaluate state
         self.master()
@@ -405,6 +418,10 @@ class BaseApp(ABC):
         """
         from services.scheduler_service import get_scheduler
         scheduler = get_scheduler()
+
+        # Cancel existing timeout to prevent scheduling leak
+        if self._runtime.timeout_job_id:
+            scheduler.cancel(self._runtime.timeout_job_id)
 
         job_id = f"timeout_{self.instance_id}_{datetime.now().timestamp()}"
 

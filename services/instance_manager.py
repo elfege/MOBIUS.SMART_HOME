@@ -190,7 +190,10 @@ class InstanceManager:
                 instance_id = instance['id']
 
                 # Create device subscriptions
-                self._create_subscriptions(instance_id, device_selections, app_type)
+                self._create_subscriptions(
+                    instance_id, device_selections, app_type,
+                    settings=settings or {}
+                )
 
                 # Initialize runtime instance
                 self._start_instance(instance_id, instance)
@@ -305,7 +308,10 @@ class InstanceManager:
             instance = self.get_instance(instance_id)
             if instance:
                 app_type = self._get_app_type_name(instance['app_type_id'])
-                self._create_subscriptions(instance_id, device_selections, app_type)
+                self._create_subscriptions(
+                    instance_id, device_selections, app_type,
+                    settings=instance.get('settings', {})
+                )
 
         if settings is not None:
             # Merge with existing settings
@@ -624,16 +630,20 @@ class InstanceManager:
         self,
         instance_id: int,
         device_selections: Dict[str, List[str]],
-        app_type: str
+        app_type: str,
+        settings: Dict[str, Any] = None
     ) -> None:
         """Create device subscriptions for an instance."""
+        # Button event type is configurable (default: held)
+        button_event = (settings or {}).get('buttonEventType', 'held')
+
         # Map device categories to event types
         category_events = {
             'motion_sensors': 'motion',
             'switches': 'switch',
             'contacts': 'contact',
             'illuminance_sensor': 'illuminance',
-            'pause_buttons': 'pushed'
+            'pause_buttons': button_event
         }
 
         subscriptions = []

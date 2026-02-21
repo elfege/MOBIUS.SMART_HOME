@@ -1,0 +1,183 @@
+# =============================================================================
+# 0_SMART_HOME Docker Compose Configuration
+# Multi-service orchestration for Hubitat automation system
+#
+# ALL configuration comes from environment variables exported by start.sh
+# which pulls from AWS Secrets Manager. NO .env file.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Webhook Dispatcher - Central hub for Hubitat events
+  # Receives from Hubitat, forwards to all apps (0_TILES, 0_SMART_HOME, etc.)
+  # container_name is IDENTICAL to 0_TILES — Docker runs only one.
+  # start.sh skips this if already running from another project.
+  # ---------------------------------------------------------------------------
+  webhook-dispatcher:
+    build:
+      context: .
+      dockerfile: Dockerfile.dispatcher
+    container_name: webhook-dispatcher
+    ports:
+      - "${WEBHOOK_PORT:-5050}:5050"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      WEBHOOK_PORT: "5050"
+      WEBHOOK_TARGETS: ${WEBHOOK_TARGETS:-http://smarthome-app:${APP_INTERNAL_PORT:-5000}/api/webhook/event,http://host.docker.internal:80/api/webhook/event}
+    restart: unless-stopped
+    networks:
+      - smarthome-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5050/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # FastAPI Application - Core automation engine
+  # ---------------------------------------------------------------------------
+  smart-home:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: smarthome-app
+    ports:
+      - "${APP_EXTERNAL_PORT:-5001}:${APP_INTERNAL_PORT:-5000}"
+    environment:
+      PYTHONUNBUFFERED: "1"
+
+      # Hubitat credentials (from AWS Secrets Manager via start.sh)
+      HUBITAT_API_TOKEN_1: ${HUBITAT_API_TOKEN_1:-}
+      HUBITAT_API_TOKEN_2: ${HUBITAT_API_TOKEN_2:-}
+      HUBITAT_API_TOKEN_3: ${HUBITAT_API_TOKEN_3:-}
+      HUBITAT_API_TOKEN_4: ${HUBITAT_API_TOKEN_4}
+      HUBITAT_HUB_IP_1: ${HUBITAT_HUB_IP_1:-}
+      HUBITAT_HUB_IP_2: ${HUBITAT_HUB_IP_2:-}
+      HUBITAT_HUB_IP_3: ${HUBITAT_HUB_IP_3:-}
+      HUBITAT_HUB_IP_4: ${HUBITAT_HUB_IP_4:-<LAN_IP>}
+      HUBITAT_API_NUMBER_1: ${HUBITAT_API_NUMBER_1:-}
+      HUBITAT_API_NUMBER_2: ${HUBITAT_API_NUMBER_2:-}
+      HUBITAT_API_NUMBER_3: ${HUBITAT_API_NUMBER_3:-}
+      HUBITAT_API_NUMBER_4: ${HUBITAT_API_NUMBER_4:-268}
+
+      # Primary hub aliases (convenience)
+      MAIN_HUB_IP: ${HUBITAT_HUB_IP_4:-<LAN_IP>}
+      MAIN_HUB_APP: ${HUBITAT_API_NUMBER_4:-268}
+
+      # App API authentication token
+      APP_API_TOKEN: ${APP_API_TOKEN}
+
+      # Database configuration
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "${POSTGRES_INTERNAL_PORT:-5432}"
+      POSTGRES_DB: ${POSTGRES_DB:-smarthome}
+      POSTGRES_USER: ${POSTGRES_USER:-smarthome_api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGREST_URL: http://postgrest:${POSTGREST_INTERNAL_PORT:-3001}
+
+      # Server configuration
+      SERVER_IP: ${SERVER_IP:-<LAN_IP>}
+    volumes:
+      # Mount source for development (hot reload)
+      - ./app.py:/app/app.py:ro
+      - ./apps:/app/apps:ro
+      - ./services:/app/services:ro
+      - ./models:/app/models:ro
+      - ./config:/app/config:ro
+      - ./templates:/app/templates:ro
+      - ./static:/app/static:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgrest:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - smarthome-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${APP_INTERNAL_PORT:-5000}/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL - Database for instances, subscriptions, device cache
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: smarthome-postgres
+    ports:
+      - "${POSTGRES_EXTERNAL_PORT:-5434}:${POSTGRES_INTERNAL_PORT:-5432}"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-smarthome}
+      POSTGRES_USER: ${POSTGRES_USER:-smarthome_api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./psql/init-db.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-smarthome_api} -d ${POSTGRES_DB:-smarthome}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - smarthome-net
+
+  # ---------------------------------------------------------------------------
+  # PostgREST - Auto-generated REST API from PostgreSQL schema
+  # ---------------------------------------------------------------------------
+  postgrest:
+    image: postgrest/postgrest:v12.0.2
+    container_name: smarthome-postgrest
+    ports:
+      - "${POSTGREST_EXTERNAL_PORT:-3003}:${POSTGREST_INTERNAL_PORT:-3001}"
+    environment:
+      PGRST_DB_URI: postgres://${POSTGRES_USER:-smarthome_api}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_INTERNAL_PORT:-5432}/${POSTGRES_DB:-smarthome}
+      PGRST_DB_SCHEMA: public
+      PGRST_DB_ANON_ROLE: smarthome_anon
+      PGRST_SERVER_PORT: "${POSTGREST_INTERNAL_PORT:-3001}"
+      PGRST_OPENAPI_MODE: ignore-privileges
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - smarthome-net
+
+  # ---------------------------------------------------------------------------
+  # Nginx - HTTPS reverse proxy and static file serving
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: smarthome-nginx
+    ports:
+      - "${NGINX_HTTP_PORT:-8080}:80"
+      - "${NGINX_HTTPS_PORT:-8444}:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/html:/etc/nginx/html:ro
+      - ./static:/usr/share/nginx/html/static:ro
+    depends_on:
+      - smart-home
+    restart: unless-stopped
+    networks:
+      - smarthome-net
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  smarthome-net:
+    driver: bridge
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres_data:
+    driver: local

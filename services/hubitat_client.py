@@ -239,9 +239,16 @@ class HubitatClient:
         """
         all_devices = self.get_all_devices()
 
+        # Hubitat returns PascalCase capabilities (e.g., 'MotionSensor')
+        # but queries may use camelCase (e.g., 'motionSensor').
+        # Compare case-insensitively.
+        cap_lower = capability.lower()
         return [
             device for device in all_devices
-            if capability in device.get('capabilities', [])
+            if any(
+                isinstance(c, str) and c.lower() == cap_lower
+                for c in device.get('capabilities', [])
+            )
         ]
 
     def get_device_events(

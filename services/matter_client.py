@@ -257,7 +257,8 @@ class MatterClient:
         try:
             await self._ws.send(json.dumps(message))
             # Wait for response with timeout
-            result = await asyncio.wait_for(future, timeout=30)
+            # Commissioning can take 60-90s per device over network
+            result = await asyncio.wait_for(future, timeout=120)
             return result
         except asyncio.TimeoutError:
             self._pending_responses.pop(msg_id, None)
@@ -345,24 +346,25 @@ class MatterClient:
         result = await self._send_command("get_node", {"node_id": node_id})
         return result
 
-    async def commission_with_code(self, code: str) -> Dict[str, Any]:
+    async def commission_with_code(self, code: str, network_only: bool = True) -> Dict[str, Any]:
         """
         Commission a new Matter device using a pairing code.
 
         The code can be a QR code string (MT:...) or a manual pairing code
-        (numeric). BLE is required for many WiFi devices unless they support
-        on-network commissioning.
+        (numeric).
 
         Args:
             code: QR code string or manual pairing code
+            network_only: If True, commission over IP network only (no BLE).
+                          Default True since our devices are already on WiFi via Hubitat.
 
         Returns:
             Node info for the newly commissioned device
         """
-        logger.info(f"Commissioning device with code: {code[:10]}...")
+        logger.info(f"Commissioning device with code: {code[:10]}... (network_only={network_only})")
         result = await self._send_command(
             "commission_with_code",
-            {"code": code}
+            {"code": code, "network_only": network_only}
         )
         logger.info(f"Device commissioned: {result}")
         return result

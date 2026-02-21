@@ -27,6 +27,7 @@ $(document).ready(function () {
     $('#btn-commission').on('click', commissionDevice);
     $('#btn-create-mapping').on('click', createMapping);
     $('#btn-scan-hubs').on('click', scanHubs);
+    $('#btn-commission-all').on('click', function () { commissionAll(); });
     $('#btn-refresh-discovered').on('click', loadDiscoveredDevices);
 
     // =========================================================================
@@ -338,7 +339,7 @@ $(document).ready(function () {
         const matterNodeId = $('#map-matter-node').val();
 
         if (!hubitatId || !matterNodeId) {
-            alert('Select both a Hubitat device and a Matter node');
+            showToast('Select both a Hubitat device and a Matter node', 'error');
             return;
         }
 
@@ -363,7 +364,7 @@ $(document).ready(function () {
             $('#map-matter-node').val('');
         })
         .fail(function (xhr) {
-            alert('Failed to create mapping: ' + (xhr.responseJSON?.detail || 'Unknown error'));
+            showToast('Failed to create mapping: ' + (xhr.responseJSON?.detail || 'Unknown error'), 'error');
         });
     }
 
@@ -371,18 +372,41 @@ $(document).ready(function () {
      * Delete a device mapping.
      */
     function deleteMapping(deviceId) {
-        if (!confirm(`Remove mapping for Hubitat device #${deviceId}?`)) return;
-
-        $.ajax({
-            url: `/api/matter/map/${deviceId}`,
-            method: 'DELETE'
-        })
-        .done(function () {
-            loadMappings();
-            loadNodes();
-        })
-        .fail(function (xhr) {
-            alert('Failed to delete mapping: ' + (xhr.responseJSON?.detail || 'Unknown error'));
+        // Non-blocking confirmation via modal
+        $('#matter-modal-overlay').remove();
+        const html = `
+            <div id="matter-modal-overlay" class="matter-modal-overlay">
+                <div class="matter-modal" data-type="info">
+                    <div class="matter-modal-header"><h4>Remove mapping?</h4></div>
+                    <div class="matter-modal-body"><p>Remove mapping for Hubitat device #${escapeHtml(String(deviceId))}?</p></div>
+                    <div class="matter-modal-footer">
+                        <button class="btn btn-small btn-secondary matter-modal-close">Cancel</button>
+                        <button class="btn btn-small btn-primary" id="modal-confirm-delete">Remove</button>
+                    </div>
+                </div>
+            </div>`;
+        $('body').append(html);
+        $('#matter-modal-overlay').on('click', function (e) {
+            if ($(e.target).is('#matter-modal-overlay') || $(e.target).is('.matter-modal-close')) {
+                $('#matter-modal-overlay').remove();
+            }
+        });
+        $(document).on('keydown.matterModal', function (e) {
+            if (e.key === 'Escape') { $('#matter-modal-overlay').remove(); $(document).off('keydown.matterModal'); }
+        });
+        $('#modal-confirm-delete').on('click', function () {
+            $('#matter-modal-overlay').remove();
+            $.ajax({
+                url: `/api/matter/map/${deviceId}`,
+                method: 'DELETE'
+            })
+            .done(function () {
+                loadMappings();
+                loadNodes();
+            })
+            .fail(function (xhr) {
+                showToast('Failed to delete mapping: ' + (xhr.responseJSON?.detail || 'Unknown error'), 'error');
+            });
         });
     }
 
@@ -406,10 +430,10 @@ $(document).ready(function () {
                 console.log(`Test ${command} sent to Hubitat #${mapping.hubitat_device_id} + Matter node ${nodeId}`);
             })
             .fail(function (xhr) {
-                alert(`Test failed: ${xhr.responseJSON?.detail || 'Unknown error'}`);
+                showToast(`Test failed: ${xhr.responseJSON?.detail || 'Unknown error'}`, 'error');
             });
         } else {
-            alert(`Node ${nodeId} is not mapped to a Hubitat device. Create a mapping first.`);
+            showToast(`Node ${nodeId} is not mapped to a Hubitat device. Create a mapping first.`, 'info');
         }
     }
 
@@ -453,7 +477,7 @@ $(document).ready(function () {
             timeout: 60000
         })
         .done(function (data) {
-            const count = data.discovered ? data.discovered.length : 0;
+            const count = data.discovered || 0;
             const errCount = data.errors ? data.errors.length : 0;
             let msg = `Discovered ${count} device(s) across hubs.`;
             if (errCount > 0) {
@@ -463,6 +487,12 @@ $(document).ready(function () {
             loadDiscoveredDevices();
             // Also refresh nodes in case some were already commissioned
             loadNodes();
+
+            // Auto-commission all online, uncommissioned devices
+            if (count > 0) {
+                $status.text(msg + ' Starting auto-commission...');
+                commissionAll($status, msg);
+            }
         })
         .fail(function (xhr) {
             const detail = xhr.responseJSON?.detail || 'Scan failed';
@@ -488,26 +518,15 @@ $(document).ready(function () {
             return;
         }
 
-        let html = `
-            <table class="discovery-table">
-                <thead>
-                    <tr>
-                        <th>Device Name</th>
-                        <th>Hub</th>
-                        <th>Status</th>
-                        <th>Maker API Match</th>
-                        <th>Confidence</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-        `;
+        let html = '<div class="device-cards-grid">';
 
         for (const d of discoveredDevices) {
             const online = d.is_online;
             const statusClass = online ? 'online' : 'offline';
             const statusLabel = online ? 'Online' : 'Offline';
             const isCommissioned = d.is_commissioned;
+            const uid = escapeHtml(d.unique_id);
+            const name = escapeHtml(d.device_name || 'Unknown');
 
             // Confidence badge
             const conf = d.match_confidence || 'none';
@@ -516,51 +535,84 @@ $(document).ready(function () {
                             : conf === 'manual' ? 'badge-info'
                             : 'badge-none';
 
-            // Maker API match display
+            // Maker API match
             const matchDisplay = d.maker_api_device_name
                 ? `${escapeHtml(d.maker_api_device_name)} (#${d.maker_api_device_id})`
                 : '<span class="text-muted">No match</span>';
 
-            // Commission button state
+            // Actions
             let actionHtml;
             if (isCommissioned) {
-                actionHtml = `<span class="badge badge-success">Commissioned (Node ${d.our_node_id})</span>`;
+                actionHtml = `<span class="badge badge-success">Node ${d.our_node_id}</span>`;
             } else if (!online) {
-                actionHtml = '<span class="text-muted">Offline</span>';
+                actionHtml = `<button class="btn btn-small btn-secondary btn-rescan-device"
+                                data-unique-id="${uid}" data-hub-ip="${escapeHtml(d.hub_ip)}"
+                                data-node-id="${d.hubitat_node_id}" title="Rescan this device">Rescan</button>`;
             } else {
-                actionHtml = `
-                    <button class="btn btn-small btn-primary btn-auto-commission"
-                            data-unique-id="${escapeHtml(d.unique_id)}"
-                            data-device-name="${escapeHtml(d.device_name || '')}">
-                        Commission
-                    </button>
-                `;
+                actionHtml = `<button class="btn btn-small btn-primary btn-auto-commission"
+                            data-unique-id="${uid}"
+                            data-device-name="${name}">Commission</button>`;
             }
 
+            // Detail rows for expandable section
+            const mac = d.mac_address ? escapeHtml(d.mac_address) : '<span class="text-muted">unknown</span>';
+            const ip = d.ip_address ? escapeHtml(d.ip_address) : '<span class="text-muted">none</span>';
+            const fw = d.firmware_version ? escapeHtml(d.firmware_version) : '—';
+            const hw = d.hardware_version ? escapeHtml(d.hardware_version) : '—';
+            const serial = d.serial_number ? escapeHtml(d.serial_number) : '—';
+            const dni = d.hubitat_dni ? escapeHtml(d.hubitat_dni) : '—';
+            const lastSeen = d.last_seen_at ? new Date(d.last_seen_at).toLocaleString() : '—';
+
             html += `
-                <tr class="${isCommissioned ? 'row-commissioned' : ''}">
-                    <td>
-                        <strong>${escapeHtml(d.device_name || 'Unknown')}</strong>
-                        <div class="device-meta">${escapeHtml(d.manufacturer || '')} ${escapeHtml(d.model || '')}</div>
-                    </td>
-                    <td>${escapeHtml(d.hub_name || d.hub_ip)}</td>
-                    <td><span class="status-badge ${statusClass}">${statusLabel}</span></td>
-                    <td>
-                        <div class="match-cell">
-                            <span class="match-current">${matchDisplay}</span>
-                            <button class="btn-link btn-change-match"
-                                    data-unique-id="${escapeHtml(d.unique_id)}"
-                                    title="Change match">edit</button>
+                <div class="device-card ${statusClass} ${isCommissioned ? 'commissioned' : ''}" data-uid="${uid}">
+                    <div class="device-card-header">
+                        <div class="device-card-title">
+                            <strong>${name}</strong>
+                            <span class="status-badge ${statusClass}">${statusLabel}</span>
                         </div>
-                    </td>
-                    <td><span class="badge ${confClass}">${conf}</span></td>
-                    <td>${actionHtml}</td>
-                </tr>
+                        <div class="device-card-actions">
+                            ${actionHtml}
+                            <button class="btn-link btn-expand-card" title="Show details">&#9660;</button>
+                        </div>
+                    </div>
+                    <div class="device-card-summary">
+                        <span class="device-card-mfr">${escapeHtml(d.manufacturer || '')} ${escapeHtml(d.model || '')}</span>
+                        <span class="device-card-hub">${escapeHtml(d.hub_name || d.hub_ip)}</span>
+                        <span class="badge ${confClass}">${conf}</span>
+                    </div>
+                    <div class="device-card-match">
+                        <span class="match-current">${matchDisplay}</span>
+                        <button class="btn-link btn-change-match" data-unique-id="${uid}" title="Change match">edit</button>
+                    </div>
+                    <div class="device-card-details" style="display:none;">
+                        <table class="detail-table">
+                            <tr><td>MAC Address</td><td>${mac}</td></tr>
+                            <tr><td>IP Address</td><td>${ip}</td></tr>
+                            <tr><td>Unique ID</td><td><code>${uid}</code></td></tr>
+                            <tr><td>DNI</td><td>${dni}</td></tr>
+                            <tr><td>Hub Node</td><td>${d.hubitat_node_id || '—'}</td></tr>
+                            <tr><td>Hubitat Device ID</td><td>${d.hubitat_device_id || '—'}</td></tr>
+                            <tr><td>Firmware</td><td>${fw}</td></tr>
+                            <tr><td>Hardware</td><td>${hw}</td></tr>
+                            <tr><td>Serial</td><td>${serial}</td></tr>
+                            <tr><td>Last Seen</td><td>${lastSeen}</td></tr>
+                            ${isCommissioned ? `<tr><td>Our Node ID</td><td>${d.our_node_id}</td></tr>` : ''}
+                        </table>
+                    </div>
+                </div>
             `;
         }
 
-        html += '</tbody></table>';
+        html += '</div>';
         $container.html(html);
+
+        // Bind expand/collapse
+        $container.find('.btn-expand-card').on('click', function () {
+            const $card = $(this).closest('.device-card');
+            const $details = $card.find('.device-card-details');
+            $details.slideToggle(150);
+            $(this).html($details.is(':visible') ? '&#9650;' : '&#9660;');
+        });
 
         // Bind auto-commission buttons
         $container.find('.btn-auto-commission').on('click', function () {
@@ -571,9 +623,35 @@ $(document).ready(function () {
             );
         });
 
+        // Bind rescan buttons (individual offline device rescan)
+        $container.find('.btn-rescan-device').on('click', function () {
+            rescanDevice($(this).data('unique-id'), $(this));
+        });
+
         // Bind match-change buttons
         $container.find('.btn-change-match').on('click', function () {
-            openMatchEditor($(this).data('unique-id'), $(this).closest('td'));
+            openMatchEditor($(this).data('unique-id'), $(this).closest('.device-card-match'));
+        });
+    }
+
+    /**
+     * Rescan a single device's hub to refresh its online status.
+     */
+    function rescanDevice(uniqueId, $btn) {
+        $btn.prop('disabled', true).text('Scanning...');
+        $.ajax({
+            url: '/api/matter/discover',
+            method: 'POST',
+            timeout: 60000
+        })
+        .done(function () {
+            loadDiscoveredDevices();
+        })
+        .fail(function () {
+            showToast('Rescan failed', 'error');
+        })
+        .always(function () {
+            $btn.prop('disabled', false).text('Rescan');
         });
     }
 
@@ -582,11 +660,13 @@ $(document).ready(function () {
      * commissions into our fabric, creates mapping.
      */
     function autoCommission(uniqueId, deviceName, $btn) {
-        if (!confirm(`Commission "${deviceName}" into our Matter fabric?\n\nThis will:\n1. Open a pairing window on Hubitat\n2. Commission into our matter-server\n3. Map to its Maker API counterpart`)) {
-            return;
-        }
-
         $btn.prop('disabled', true).text('Commissioning...');
+
+        showModal(
+            `Commissioning "${deviceName}"`,
+            '1. Opening pairing window on Hubitat...\n2. Commissioning into matter-server...\n3. Creating Maker API mapping...',
+            'loading'
+        );
 
         $.ajax({
             url: '/api/matter/auto-commission',
@@ -599,15 +679,62 @@ $(document).ready(function () {
             $btn.replaceWith(
                 `<span class="badge badge-success">Commissioned (Node ${data.our_node_id || '?'})</span>`
             );
-            // Refresh tables
+            showModal(
+                `Commissioned "${deviceName}"`,
+                `Node ID: ${data.our_node_id || '?'}\nMapped to Hubitat #${data.hubitat_device_id || '?'}`,
+                'success'
+            );
             loadNodes();
             loadMappings();
             loadDiscoveredDevices();
         })
         .fail(function (xhr) {
             const detail = xhr.responseJSON?.detail || 'Commission failed';
-            alert(`Auto-commission failed: ${detail}`);
+            showModal(`Commission failed: ${deviceName}`, detail, 'error');
             $btn.prop('disabled', false).text('Commission');
+        });
+    }
+
+    /**
+     * Commission ALL online, uncommissioned devices in bulk.
+     * Called automatically after scan, or manually via button.
+     * @param {jQuery} $status - optional status element to update progress
+     * @param {string} baseMsg - optional base message to prepend to status
+     */
+    function commissionAll($status, baseMsg) {
+        const statusEl = $status || $('#scan-status');
+        const prefix = baseMsg || '';
+
+        statusEl.removeClass('success error')
+            .addClass('loading')
+            .text(prefix + ' Commissioning all online devices...')
+            .show();
+
+        $.ajax({
+            url: '/api/matter/auto-commission-all',
+            method: 'POST',
+            timeout: 600000  // 10 min — commissioning each device takes time
+        })
+        .done(function (data) {
+            let msg = prefix ? prefix + ' ' : '';
+            msg += data.message;
+            if (data.failed > 0) {
+                msg += ` (${data.failed} failed)`;
+                statusEl.removeClass('loading').addClass('success').text(msg);
+                // Log failures to console for debugging
+                console.warn('Commission failures:', data.results.filter(r => r.status === 'error'));
+            } else {
+                statusEl.removeClass('loading').addClass('success').text(msg);
+            }
+            // Refresh everything
+            loadNodes();
+            loadMappings();
+            loadDiscoveredDevices();
+        })
+        .fail(function (xhr) {
+            const detail = xhr.responseJSON?.detail || 'Bulk commission failed';
+            statusEl.removeClass('loading').addClass('error')
+                .text(prefix + ' Commission error: ' + detail);
         });
     }
 
@@ -617,7 +744,7 @@ $(document).ready(function () {
      */
     function openMatchEditor(uniqueId, $cell) {
         if (hubitatDevices.length === 0) {
-            alert('Hubitat devices not loaded yet. Wait a moment and try again.');
+            showToast('Hubitat devices not loaded yet. Wait a moment and try again.', 'info');
             return;
         }
 
@@ -645,7 +772,7 @@ $(document).ready(function () {
         $cell.find('.btn-save-match').on('click', function () {
             const makerDeviceId = $cell.find('.match-select').val();
             if (!makerDeviceId) {
-                alert('Select a Maker API device.');
+                showToast('Select a Maker API device.', 'error');
                 return;
             }
             saveMatch(uniqueId, makerDeviceId);
@@ -674,7 +801,7 @@ $(document).ready(function () {
             loadDiscoveredDevices();
         })
         .fail(function (xhr) {
-            alert('Failed to save match: ' + (xhr.responseJSON?.detail || 'Unknown error'));
+            showToast('Failed to save match: ' + (xhr.responseJSON?.detail || 'Unknown error'), 'error');
         });
     }
 
@@ -695,16 +822,34 @@ $(document).ready(function () {
      * The structure varies by matter-server version.
      */
     function extractNodeName(node) {
-        // Try common fields
+        const nodeId = node.node_id || node.nodeId;
+
+        // First: backend-enriched name (cross-referenced via UniqueID → hubitat_matter_devices)
+        if (node._device_name) return node._device_name;
+
+        // Second: check our mapping table for a friendly name
+        const mapped = mappings.find(m => m.matter_node_id === nodeId);
+        if (mapped && mapped.device_name) return mapped.device_name;
+
+        // Third: check discovered devices table for name
+        const discovered = discoveredDevices.find(d =>
+            d.our_node_id === nodeId || d.our_node_id === String(nodeId)
+        );
+        if (discovered && discovered.device_name) return discovered.device_name;
+
+        // Fourth: matter-server fields
         if (node.node_label) return node.node_label;
         if (node.name) return node.name;
 
-        // Try attributes path for Basic Information cluster (cluster 40)
+        // Fourth: Matter Basic Information cluster (40) attributes
+        // Attr 5 = NodeLabel, Attr 3 = ProductName, Attr 1 = VendorName (last resort)
         const attrs = node.attributes || {};
-        for (const key in attrs) {
-            // key format: "endpoint/cluster/attribute"
-            if (key.includes('/40/') && typeof attrs[key] === 'string') {
-                return attrs[key];
+        const attrPriority = ['/40/5', '/40/3', '/40/1'];
+        for (const suffix of attrPriority) {
+            for (const key in attrs) {
+                if (key.endsWith(suffix) && typeof attrs[key] === 'string' && attrs[key]) {
+                    return attrs[key];
+                }
             }
         }
 
@@ -744,5 +889,71 @@ $(document).ready(function () {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    // =========================================================================
+    // Modal — replaces all alert() and confirm() calls
+    // =========================================================================
+
+    /**
+     * Show a non-blocking modal overlay. Backdrop click or Escape dismisses it.
+     * @param {string} title - Modal heading
+     * @param {string} body - Message text (newlines become <br>)
+     * @param {string} type - 'loading', 'success', 'error', 'info'
+     */
+    function showModal(title, body, type) {
+        // Remove existing modal if any
+        $('#matter-modal-overlay').remove();
+
+        const typeClass = type || 'info';
+        const showSpinner = type === 'loading';
+        const bodyHtml = escapeHtml(body).replace(/\n/g, '<br>');
+
+        const html = `
+            <div id="matter-modal-overlay" class="matter-modal-overlay">
+                <div class="matter-modal" data-type="${typeClass}">
+                    <div class="matter-modal-header">
+                        <h4>${escapeHtml(title)}</h4>
+                    </div>
+                    <div class="matter-modal-body">
+                        ${showSpinner ? '<div class="matter-modal-spinner"></div>' : ''}
+                        <p>${bodyHtml}</p>
+                    </div>
+                    ${!showSpinner ? '<div class="matter-modal-footer"><button class="btn btn-small btn-secondary matter-modal-close">OK</button></div>' : ''}
+                </div>
+            </div>
+        `;
+        $('body').append(html);
+
+        // Dismiss on backdrop click
+        $('#matter-modal-overlay').on('click', function (e) {
+            if ($(e.target).is('#matter-modal-overlay') || $(e.target).is('.matter-modal-close')) {
+                $('#matter-modal-overlay').remove();
+            }
+        });
+
+        // Dismiss on Escape
+        $(document).on('keydown.matterModal', function (e) {
+            if (e.key === 'Escape') {
+                $('#matter-modal-overlay').remove();
+                $(document).off('keydown.matterModal');
+            }
+        });
+    }
+
+    /**
+     * Show a toast notification (brief, auto-dismissing).
+     * @param {string} msg - Message text
+     * @param {string} type - 'success', 'error', 'info'
+     */
+    function showToast(msg, type) {
+        const typeClass = type || 'info';
+        const $toast = $(`<div class="matter-toast matter-toast-${typeClass}">${escapeHtml(msg)}</div>`);
+        $('body').append($toast);
+        setTimeout(() => $toast.addClass('visible'), 10);
+        setTimeout(() => {
+            $toast.removeClass('visible');
+            setTimeout(() => $toast.remove(), 300);
+        }, 3000);
     }
 });

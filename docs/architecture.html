@@ -1,0 +1,1350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>0_SMART_HOME - Engineering Architecture (February 21, 2026)</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 15px;
+            background: #f5f5f5;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1800px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 2.2em;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+        }
+
+        h2 {
+            color: #34495e;
+            border-left: 4px solid #3498db;
+            padding-left: 15px;
+            margin-top: 40px;
+            font-size: 1.6em;
+        }
+
+        h3 {
+            color: #2980b9;
+            font-size: 1.2em;
+            margin-top: 20px;
+        }
+
+        .diagram-container {
+            background: #fafafa;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 40px 15px 15px 15px;
+            margin: 20px 0;
+            overflow-x: auto;
+        }
+
+        .mermaid {
+            font-size: 11px;
+        }
+
+        .key-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 25px 0;
+        }
+
+        .metric-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .metric-value {
+            font-size: 2em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .metric-label {
+            font-size: 0.9em;
+            opacity: 0.9;
+        }
+
+        .architecture-note {
+            background: #e8f4fd;
+            color: #2c3e50;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            border-left: 4px solid #3498db;
+            font-size: 14px;
+        }
+
+        .critical-note {
+            background: #d1ecf1;
+            color: #0c5460;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            border-left: 4px solid #17a2b8;
+            font-size: 14px;
+        }
+
+        .alert-note {
+            background: #fff3cd;
+            color: #856404;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            border-left: 4px solid #ffc107;
+            font-size: 14px;
+        }
+
+        .danger-note {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            border-left: 4px solid #dc3545;
+            font-size: 14px;
+        }
+
+        .legend {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px;
+            margin: 20px 0;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            background: #ecf0f1;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+
+        .legend-color {
+            width: 18px;
+            height: 18px;
+            border-radius: 3px;
+            margin-right: 10px;
+        }
+
+        ul {
+            line-height: 1.8;
+            margin-left: 20px;
+        }
+
+        li {
+            margin: 8px 0;
+        }
+
+        strong {
+            color: #2c3e50;
+        }
+
+        code {
+            background: #f5f5f5;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            color: #d63384;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+
+        th {
+            background: #667eea;
+            color: white;
+        }
+
+        tr:nth-child(even) {
+            background: #f9f9f9;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>0_SMART_HOME - Engineering Architecture</h1>
+
+        <div class="critical-note">
+            <strong>System Overview:</strong> 0_SMART_HOME is a multi-instance home automation platform built with Python/FastAPI, PostgreSQL, and a modular ES6+jQuery frontend. It migrates Hubitat Groovy apps to a modern web-based system where users create independent automation instances (e.g., "Office Lights", "Bedroom Lights") from app blueprints. Events from Hubitat hubs flow through a central webhook dispatcher, are routed to subscribed instances, and trigger automation logic with memoization, scheduling, and health monitoring. All configuration is managed via AWS Secrets Manager. <em>Last updated: February 21, 2026.</em>
+        </div>
+
+        <div class="key-metrics">
+            <div class="metric-card">
+                <div class="metric-value">5</div>
+                <div class="metric-label">Docker Services</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">4</div>
+                <div class="metric-label">Hubitat Hubs</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">1</div>
+                <div class="metric-label">App Type (Extensible)</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">8</div>
+                <div class="metric-label">Database Tables</div>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 1: SYSTEM OVERVIEW                                     -->
+        <!-- ============================================================ -->
+        <h2>Level 1: System Overview</h2>
+
+        <div class="architecture-note">
+            <strong>High-Level Architecture:</strong> Hubitat hubs generate device events (motion, switch, illuminance, etc.) which POST to a central Webhook Dispatcher (Flask, port 5050). The dispatcher fans out events to all registered apps. The FastAPI core application receives events, routes them to subscribed app instances via PostgREST-backed subscriptions, and executes automation logic. The frontend provides a wizard-based UI for creating and managing instances. All secrets and configuration flow from AWS Secrets Manager through <code>start.sh</code> into Docker environment variables.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                graph LR
+                    HUB[Hubitat Hubs<br/>4 Hubs on LAN] -->|Maker API Events| WD[Webhook Dispatcher<br/>Flask :5050]
+                    WD -->|Fan-out POST| APP[FastAPI App<br/>:5001 → :5000]
+                    WD -->|Fan-out POST| OTHER[Other Apps<br/>0_TILES etc.]
+
+                    APP -->|REST API| UI[Web Browser<br/>ES6 + jQuery]
+                    APP -->|PostgREST| PG[(PostgreSQL<br/>:5435 → :5432)]
+                    APP -->|Maker API| HUB
+
+                    PR[PostgREST<br/>:3003 → :3001] -->|Auto-REST| PG
+                    APP -->|CRUD via| PR
+
+                    NGX[Nginx<br/>:8444 HTTPS] -->|Reverse Proxy| APP
+                    UI -->|HTTPS| NGX
+
+                    AWS[(AWS Secrets<br/>Manager)] -.->|start.sh| APP
+                    AWS -.->|Credentials| WD
+
+                    style HUB fill:#d4edda
+                    style WD fill:#fd7e14,color:#fff
+                    style APP fill:#667eea,color:#fff
+                    style UI fill:#e1f5ff
+                    style PG fill:#17a2b8,color:#fff
+                    style PR fill:#6f42c1,color:#fff
+                    style NGX fill:#28a745,color:#fff
+                    style AWS fill:#fff3cd
+                    style OTHER fill:#ecf0f1
+            </div>
+        </div>
+
+        <div class="legend">
+            <div class="legend-item">
+                <div class="legend-color" style="background: #d4edda;"></div>
+                Hubitat Hubs (IoT)
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #fd7e14;"></div>
+                Webhook Dispatcher
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #667eea;"></div>
+                FastAPI Application
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #e1f5ff;"></div>
+                Frontend (Browser)
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #17a2b8;"></div>
+                PostgreSQL Database
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #6f42c1;"></div>
+                PostgREST API
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #28a745;"></div>
+                Nginx Reverse Proxy
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #fff3cd;"></div>
+                AWS Secrets Manager
+            </div>
+        </div>
+
+        <div class="architecture-note">
+            <h3>Technology Stack</h3>
+            <ul>
+                <li><strong>Backend:</strong> Python 3.11 + FastAPI + Uvicorn (single worker for SSE compatibility)</li>
+                <li><strong>Frontend:</strong> Jinja2 Templates + ES6 Modules + jQuery</li>
+                <li><strong>Database:</strong> PostgreSQL 16 + PostgREST v12 (auto-generated REST API from schema)</li>
+                <li><strong>Webhook Fan-out:</strong> Flask-based dispatcher (shared with 0_TILES, 0_NVR)</li>
+                <li><strong>Scheduling:</strong> APScheduler with PostgreSQL persistence</li>
+                <li><strong>Proxy:</strong> Nginx 1.27 with self-signed TLS</li>
+                <li><strong>Containerization:</strong> Docker Compose (5 services)</li>
+                <li><strong>Secrets:</strong> AWS Secrets Manager (no .env files)</li>
+            </ul>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 2: CONTAINER ARCHITECTURE                              -->
+        <!-- ============================================================ -->
+        <h2>Level 2: Container Architecture</h2>
+
+        <div class="architecture-note">
+            <strong>Docker Compose Services:</strong> Five containers orchestrated by <code>docker-compose.yml</code>. The webhook dispatcher is shared across projects (0_SMART_HOME, 0_TILES) via hardlinks from <code>~/0_SCRIPTS/webhook_dispatcher/</code>. Only one dispatcher container runs system-wide (whichever project starts first wins). The FastAPI app runs with a single Uvicorn worker because SSE requires shared in-process memory.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                graph TB
+                    subgraph DockerCompose["Docker Compose Network"]
+                        WD[webhook-dispatcher<br/>Flask :5050<br/>Python 3.11-slim]
+                        APP[smarthome-app<br/>FastAPI :5001→:5000<br/>Python 3.11 + Uvicorn]
+                        PG[smarthome-postgres<br/>PostgreSQL :5435→:5432<br/>postgres:16-alpine]
+                        PR[smarthome-postgrest<br/>PostgREST :3003→:3001<br/>postgrest:v12.0.2]
+                        NGX[smarthome-nginx<br/>Nginx :8080/:8444→:80/:443<br/>nginx:1.27-alpine]
+                    end
+
+                    subgraph External["External"]
+                        HUB[Hubitat Hubs<br/><LAN_IP>-72]
+                        BROWSER[Web Browser]
+                    end
+
+                    HUB -->|POST /api/webhook/event| WD
+                    WD -->|POST to smarthome-app:5000| APP
+                    BROWSER -->|HTTPS :8444| NGX
+                    NGX -->|proxy_pass :5000| APP
+                    APP -->|REST :3001| PR
+                    PR -->|SQL :5432| PG
+                    APP -->|Maker API HTTP| HUB
+
+                    style WD fill:#fd7e14,color:#fff
+                    style APP fill:#667eea,color:#fff
+                    style PG fill:#17a2b8,color:#fff
+                    style PR fill:#6f42c1,color:#fff
+                    style NGX fill:#28a745,color:#fff
+                    style HUB fill:#d4edda
+                    style BROWSER fill:#e1f5ff
+            </div>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Service</th>
+                    <th>Image</th>
+                    <th>External Port</th>
+                    <th>Internal Port</th>
+                    <th>Purpose</th>
+                    <th>Notes</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>webhook-dispatcher</strong></td>
+                    <td>Python 3.11-slim + Flask</td>
+                    <td>5050</td>
+                    <td>5050</td>
+                    <td>Hubitat event fan-out</td>
+                    <td>Shared across projects via hardlink</td>
+                </tr>
+                <tr>
+                    <td><strong>smarthome-app</strong></td>
+                    <td>Python 3.11 + FastAPI</td>
+                    <td>5001</td>
+                    <td>5000</td>
+                    <td>Core automation engine</td>
+                    <td>Single worker (SSE requirement)</td>
+                </tr>
+                <tr>
+                    <td><strong>smarthome-postgres</strong></td>
+                    <td>postgres:16-alpine</td>
+                    <td>5435</td>
+                    <td>5432</td>
+                    <td>Database</td>
+                    <td>Schema from <code>psql/init-db.sql</code></td>
+                </tr>
+                <tr>
+                    <td><strong>smarthome-postgrest</strong></td>
+                    <td>postgrest/postgrest:v12.0.2</td>
+                    <td>3003</td>
+                    <td>3001</td>
+                    <td>Auto-REST from schema</td>
+                    <td>All CRUD via REST, no raw SQL in app</td>
+                </tr>
+                <tr>
+                    <td><strong>smarthome-nginx</strong></td>
+                    <td>nginx:1.27-alpine</td>
+                    <td>8080 / 8444</td>
+                    <td>80 / 443</td>
+                    <td>HTTPS reverse proxy</td>
+                    <td>Self-signed certs generated by start.sh</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="danger-note">
+            <strong>Single Worker Requirement:</strong> FastAPI runs with <code>--workers 1</code>. Multiple workers have isolated memory, meaning SSE clients connected to one worker will never receive events from webhooks hitting another. The single async worker handles concurrency via Python's event loop.
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 3: MULTI-INSTANCE ARCHITECTURE                         -->
+        <!-- ============================================================ -->
+        <h2>Level 3: Multi-Instance Architecture</h2>
+
+        <div class="architecture-note">
+            <strong>Core Design Principle:</strong> Each user-created automation is a row in <code>app_instances</code>. App types (blueprints) define the automation logic, settings schema, and device categories. Users create instances from these blueprints, each with independent device selections, settings, memoization state, and runtime behavior. The <code>InstanceManager</code> handles lifecycle (CRUD, pause/resume) and maintains in-memory Python objects for each running instance.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                graph TB
+                    subgraph Blueprints["App Types (Blueprints)"]
+                        AT1[advanced_motion_lighting<br/>v2.0.0<br/>Settings Schema + Device Categories]
+                        AT2[future_app_type<br/>...<br/>Extensible]
+                    end
+
+                    subgraph Instances["App Instances (User-Created)"]
+                        I1["Instance #1: Office Lights<br/>motion_sensors: [123, 124]<br/>switches: [456, 457]<br/>noMotionTime: 5 min"]
+                        I2["Instance #2: Bedroom Lights<br/>motion_sensors: [200]<br/>switches: [300]<br/>noMotionTime: 10 min"]
+                        I3["Instance #3: Garage<br/>...<br/>is_paused: true"]
+                    end
+
+                    subgraph Runtime["In-Memory Runtime Objects"]
+                        R1[AdvancedMotionLightingApp<br/>Instance 1<br/>_runtime + _memoization]
+                        R2[AdvancedMotionLightingApp<br/>Instance 2<br/>_runtime + _memoization]
+                    end
+
+                    subgraph Subscriptions["Device Subscriptions"]
+                        S1["device 123 → Instance 1 (motion)"]
+                        S2["device 124 → Instance 1 (motion)"]
+                        S3["device 456 → Instance 1 (switch)"]
+                        S4["device 200 → Instance 2 (motion)"]
+                        S5["device 300 → Instance 2 (switch)"]
+                    end
+
+                    AT1 --> I1
+                    AT1 --> I2
+                    AT1 --> I3
+                    I1 --> R1
+                    I2 --> R2
+                    I1 --> S1
+                    I1 --> S2
+                    I1 --> S3
+                    I2 --> S4
+                    I2 --> S5
+
+                    style AT1 fill:#667eea,color:#fff
+                    style AT2 fill:#ecf0f1
+                    style I1 fill:#28a745,color:#fff
+                    style I2 fill:#28a745,color:#fff
+                    style I3 fill:#6c757d,color:#fff
+                    style R1 fill:#fd7e14,color:#fff
+                    style R2 fill:#fd7e14,color:#fff
+            </div>
+        </div>
+
+        <div class="critical-note">
+            <h3>Instance Lifecycle</h3>
+            <ul>
+                <li><strong>Create:</strong> UI wizard collects label, device selections, settings. <code>InstanceManager.create_instance()</code> writes to <code>app_instances</code>, registers <code>device_subscriptions</code>, instantiates runtime object, calls <code>app.initialize()</code></li>
+                <li><strong>Update:</strong> Modify devices/settings via <code>PUT /api/instances/{id}</code>. Manager updates DB, reloads subscriptions, re-initializes runtime object</li>
+                <li><strong>Pause:</strong> Cancels active timeouts, sets <code>is_paused=true</code>. Optional duration auto-resumes via scheduler</li>
+                <li><strong>Resume:</strong> Sets <code>is_paused=false</code>, re-evaluates current sensor state, calls <code>master()</code></li>
+                <li><strong>Delete:</strong> Stops runtime, removes from memory, cascading delete on subscriptions</li>
+                <li><strong>Startup:</strong> <code>initialize_all_instances()</code> loads all enabled instances from DB and instantiates runtime objects</li>
+            </ul>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 4: WEBHOOK EVENT FLOW                                  -->
+        <!-- ============================================================ -->
+        <h2>Level 4: Webhook Event Flow</h2>
+
+        <div class="architecture-note">
+            <strong>End-to-End Event Pipeline:</strong> A physical device event (e.g., motion sensor activates) travels from the Hubitat hub through the webhook dispatcher, into the FastAPI app, through the webhook router which queries subscriptions, and finally dispatches to the appropriate app instance's <code>on_event()</code> method. The event is logged, the device cache is updated, and the automation logic executes.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                sequenceDiagram
+                    participant Hub as Hubitat Hub
+                    participant Disp as Webhook Dispatcher<br/>:5050
+                    participant API as FastAPI<br/>/api/webhook/event
+                    participant Router as WebhookRouter
+                    participant Cache as DeviceCache
+                    participant Sub as device_subscriptions<br/>(PostgREST)
+                    participant App as AppInstance<br/>(in-memory)
+                    participant Sched as SchedulerService
+                    participant Log as event_log<br/>(PostgREST)
+
+                    Hub->>Disp: POST {content: {deviceId, name, value, ...}}
+                    Note over Disp: Unwrap 'content' envelope
+                    Disp->>API: POST {deviceId, name, value, ...}
+
+                    API->>Router: route_event(payload)
+                    Router->>Router: Create DeviceEvent object
+
+                    par Update cache & query subscriptions
+                        Router->>Cache: update_device_attribute(id, name, value)
+                        Router->>Sub: GET where device_id=X AND event_type=Y
+                    end
+
+                    Sub-->>Router: [instance_id: 1, instance_id: 2, ...]
+
+                    loop For each subscribed instance
+                        Router->>App: app.on_event(event)
+                        App->>App: Check if paused
+                        App->>App: Route to handler (_handle_motion, etc.)
+                        App->>App: Execute master() logic
+                        App->>Hub: send_command(device_id, 'on')
+                        App->>Sched: schedule_timeout(300s)
+                    end
+
+                    Router->>Log: Write event_log entry
+                    Router-->>API: {routed_to: N instances}
+            </div>
+        </div>
+
+        <div class="alert-note">
+            <h3>Webhook Payload Format</h3>
+            <p><strong>From Hubitat Maker API</strong> (wrapped in <code>content</code> object, unwrapped by dispatcher):</p>
+            <ul>
+                <li><code>deviceId</code>: Hubitat device ID (string)</li>
+                <li><code>name</code>: Event type — <code>"motion"</code>, <code>"switch"</code>, <code>"level"</code>, <code>"illuminance"</code>, <code>"pushed"</code>, <code>"contact"</code></li>
+                <li><code>value</code>: Event value — <code>"active"</code>/<code>"inactive"</code>, <code>"on"</code>/<code>"off"</code>, numeric values</li>
+                <li><code>displayName</code>: Human-readable device name</li>
+                <li><code>descriptionText</code>: Full event description</li>
+            </ul>
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                flowchart TB
+                    subgraph HubitatHubs["Hubitat Hubs (4 Hubs)"]
+                        H1["Hub Main<br/><LAN_IP><br/>App 268"]
+                        H2["Hub 1<br/><LAN_IP><br/>App 1717"]
+                        H3["Hub 2<br/><LAN_IP><br/>App 2151"]
+                        H4["Hub 3<br/><LAN_IP><br/>App 1269"]
+                    end
+
+                    subgraph Dispatcher["Webhook Dispatcher (:5050)"]
+                        RX[Receive POST]
+                        UW[Unwrap content]
+                        FAN[Fan-out to targets]
+                    end
+
+                    subgraph Targets["Webhook Targets"]
+                        SM["smarthome-app:5000<br/>/api/webhook/event"]
+                        TILES["host.docker.internal:80<br/>/api/webhook/event"]
+                    end
+
+                    H1 -->|POST| RX
+                    H2 -->|POST| RX
+                    H3 -->|POST| RX
+                    H4 -->|POST| RX
+                    RX --> UW
+                    UW --> FAN
+                    FAN --> SM
+                    FAN --> TILES
+
+                    style H1 fill:#28a745,color:#fff
+                    style H2 fill:#d4edda
+                    style H3 fill:#d4edda
+                    style H4 fill:#d4edda
+                    style RX fill:#fd7e14,color:#fff
+                    style UW fill:#fd7e14,color:#fff
+                    style FAN fill:#fd7e14,color:#fff
+                    style SM fill:#667eea,color:#fff
+                    style TILES fill:#ecf0f1
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 5: SERVICE ARCHITECTURE                                -->
+        <!-- ============================================================ -->
+        <h2>Level 5: Service Architecture</h2>
+
+        <div class="architecture-note">
+            <strong>Internal Services:</strong> The application initializes singleton services at startup: <code>HubitatClient</code> for Maker API communication, <code>DeviceCache</code> for TTL-based device state caching, <code>InstanceManager</code> for instance CRUD and lifecycle, <code>WebhookRouter</code> for event routing, and <code>SchedulerService</code> for APScheduler-backed background jobs. All services use global factory functions (e.g., <code>get_instance_manager()</code>) to ensure single instances.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                graph TB
+                    subgraph Startup["Application Startup (app.py lifespan)"]
+                        INIT[initialize_services]
+                        REG[initialize_registry]
+                        LOAD[initialize_all_instances]
+                    end
+
+                    subgraph Services["Singleton Services"]
+                        HC[HubitatClient<br/>Maker API wrapper<br/>Connection pooling + retries]
+                        DC[DeviceCache<br/>TTL 300s<br/>Memory + DB fallback]
+                        IM[InstanceManager<br/>Instance CRUD<br/>Runtime lifecycle]
+                        WR[WebhookRouter<br/>Event routing<br/>Subscription queries]
+                        SS[SchedulerService<br/>APScheduler<br/>DB persistence]
+                    end
+
+                    subgraph Registry["App Registry"]
+                        AR[AppRegistry<br/>Type registration<br/>DB sync]
+                        AML[AdvancedMotionLightingApp<br/>registered class]
+                    end
+
+                    subgraph External["External Dependencies"]
+                        PREST[PostgREST :3001]
+                        HAPI[Hubitat Maker API]
+                    end
+
+                    INIT --> HC
+                    INIT --> DC
+                    INIT --> IM
+                    INIT --> WR
+                    INIT --> SS
+                    REG --> AR
+                    AR --> AML
+                    LOAD --> IM
+
+                    HC --> HAPI
+                    DC --> PREST
+                    IM --> PREST
+                    WR --> PREST
+                    SS --> PREST
+                    AR --> PREST
+
+                    style INIT fill:#667eea,color:#fff
+                    style REG fill:#667eea,color:#fff
+                    style LOAD fill:#667eea,color:#fff
+                    style HC fill:#28a745,color:#fff
+                    style DC fill:#17a2b8,color:#fff
+                    style IM fill:#fd7e14,color:#fff
+                    style WR fill:#dc3545,color:#fff
+                    style SS fill:#6f42c1,color:#fff
+                    style AR fill:#20c997,color:#fff
+            </div>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Service</th>
+                    <th>File</th>
+                    <th>Factory Function</th>
+                    <th>Key Methods</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>HubitatClient</strong></td>
+                    <td><code>services/hubitat_client.py</code></td>
+                    <td><code>get_default_client()</code></td>
+                    <td><code>get_all_devices()</code>, <code>send_command()</code>, <code>get_modes()</code>, <code>is_connected()</code></td>
+                </tr>
+                <tr>
+                    <td><strong>DeviceCache</strong></td>
+                    <td><code>services/device_cache.py</code></td>
+                    <td><code>get_default_cache()</code></td>
+                    <td><code>get_all()</code>, <code>get_devices_by_capability()</code>, <code>update_device_attribute()</code></td>
+                </tr>
+                <tr>
+                    <td><strong>InstanceManager</strong></td>
+                    <td><code>services/instance_manager.py</code></td>
+                    <td><code>get_instance_manager()</code></td>
+                    <td><code>create_instance()</code>, <code>pause_instance()</code>, <code>resume_instance()</code>, <code>get_running_instance()</code></td>
+                </tr>
+                <tr>
+                    <td><strong>WebhookRouter</strong></td>
+                    <td><code>services/webhook_router.py</code></td>
+                    <td><code>get_webhook_router()</code></td>
+                    <td><code>route_event()</code>, <code>route_mode_change()</code></td>
+                </tr>
+                <tr>
+                    <td><strong>SchedulerService</strong></td>
+                    <td><code>services/scheduler_service.py</code></td>
+                    <td><code>get_scheduler()</code></td>
+                    <td><code>schedule_once()</code>, <code>reschedule()</code>, <code>cancel_for_instance()</code></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 6: DATABASE SCHEMA                                     -->
+        <!-- ============================================================ -->
+        <h2>Level 6: Database Schema</h2>
+
+        <div class="architecture-note">
+            <strong>Database Design:</strong> PostgreSQL 16 with PostgREST providing automatic REST endpoints. All application writes go through PostgREST (no raw SQL in the app). The schema centers on three core tables: <code>app_types</code> (blueprints), <code>app_instances</code> (user automations), and <code>device_subscriptions</code> (event routing). Supporting tables handle caching, logging, scheduling, hub config, and location modes.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                erDiagram
+                    app_types ||--o{ app_instances : "blueprint for"
+                    app_instances ||--o{ device_subscriptions : "subscribes to"
+                    app_instances ||--o{ scheduled_jobs : "schedules"
+                    app_instances ||--o{ event_log : "receives events"
+
+                    app_types {
+                        serial id PK
+                        varchar type_name UK
+                        varchar display_name
+                        text description
+                        jsonb settings_schema
+                        jsonb device_categories
+                        varchar version
+                    }
+
+                    app_instances {
+                        serial id PK
+                        int app_type_id FK
+                        varchar label
+                        jsonb settings
+                        jsonb device_selections
+                        boolean is_paused
+                        jsonb memoization_state
+                        timestamp last_activity_at
+                    }
+
+                    device_subscriptions {
+                        varchar hubitat_device_id
+                        int instance_id FK
+                        varchar event_type
+                    }
+
+                    device_cache {
+                        varchar hubitat_device_id PK
+                        varchar device_name
+                        jsonb capabilities
+                        jsonb attributes
+                        timestamp last_synced_at
+                    }
+
+                    event_log {
+                        serial id PK
+                        varchar hubitat_device_id
+                        varchar event_type
+                        varchar event_value
+                        jsonb routed_to_instances
+                        jsonb raw_payload
+                        timestamp received_at
+                    }
+
+                    scheduled_jobs {
+                        varchar job_id PK
+                        int instance_id FK
+                        varchar job_type
+                        timestamp execute_at
+                        jsonb payload
+                        varchar status
+                    }
+
+                    hub_config {
+                        serial id PK
+                        varchar hub_name UK
+                        varchar hub_ip
+                        int maker_api_app_number
+                        varchar maker_api_token_env
+                    }
+
+                    location_modes {
+                        int mode_id PK
+                        varchar mode_name
+                        boolean is_active
+                    }
+            </div>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Table</th>
+                    <th>Purpose</th>
+                    <th>Key Columns</th>
+                    <th>PostgREST Endpoint</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>app_types</strong></td>
+                    <td>Available app blueprints</td>
+                    <td>type_name, settings_schema (JSONB), device_categories (JSONB)</td>
+                    <td><code>GET/POST /app_types</code></td>
+                </tr>
+                <tr>
+                    <td><strong>app_instances</strong></td>
+                    <td>User-created automation instances</td>
+                    <td>label, settings (JSONB), device_selections (JSONB), memoization_state (JSONB)</td>
+                    <td><code>GET/POST/PATCH/DELETE /app_instances</code></td>
+                </tr>
+                <tr>
+                    <td><strong>device_subscriptions</strong></td>
+                    <td>Maps devices to instances for event routing</td>
+                    <td>hubitat_device_id, instance_id, event_type (unique constraint)</td>
+                    <td><code>GET/POST/DELETE /device_subscriptions</code></td>
+                </tr>
+                <tr>
+                    <td><strong>device_cache</strong></td>
+                    <td>Cached device state (reduces API polling)</td>
+                    <td>capabilities (JSONB), attributes (JSONB), last_synced_at</td>
+                    <td><code>GET/POST/PATCH /device_cache</code></td>
+                </tr>
+                <tr>
+                    <td><strong>event_log</strong></td>
+                    <td>Audit trail of all webhook events</td>
+                    <td>routed_to_instances (JSONB), raw_payload (JSONB)</td>
+                    <td><code>GET/POST /event_log</code></td>
+                </tr>
+                <tr>
+                    <td><strong>scheduled_jobs</strong></td>
+                    <td>Persistent background tasks</td>
+                    <td>job_type (timeout/pause_expire/health_check), execute_at, status</td>
+                    <td><code>GET/POST/PATCH /scheduled_jobs</code></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 7: APP CLASS HIERARCHY                                 -->
+        <!-- ============================================================ -->
+        <h2>Level 7: App Class Hierarchy</h2>
+
+        <div class="architecture-note">
+            <strong>Extensibility Pattern:</strong> All app types inherit from <code>BaseApp</code>, which provides the common lifecycle (initialize, event handling, scheduling, memoization, pause/resume). Subclasses implement the abstract methods: <code>initialize()</code>, <code>on_event()</code>, <code>master()</code>, and class methods <code>get_settings_schema()</code> and <code>get_device_categories()</code>. Adding a new app type means creating a subclass and registering it in <code>app_registry.py</code>.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                classDiagram
+                    class BaseApp {
+                        +str TYPE_NAME
+                        +str DISPLAY_NAME
+                        +str VERSION
+                        -dict _memoization
+                        -RuntimeInstanceState _runtime
+                        -bool _is_paused
+                        +initialize()* void
+                        +on_event(event)* void
+                        +master(**kwargs)* void
+                        +get_settings_schema()$ dict
+                        +get_device_categories()$ list
+                        +pause(duration_minutes) void
+                        +resume() void
+                        +on_mode_change(mode_name) void
+                        +schedule_timeout(delay) void
+                        +reschedule_timeout(delay) void
+                        +cancel_timeout() void
+                        +send_command(device_id, cmd, args) void
+                        +get_device_state(device_id) dict
+                        +get_setting(key, default) any
+                        +get_devices(category) list
+                        +get_memo(key) any
+                        +set_memo(key, value) void
+                    }
+
+                    class AdvancedMotionLightingApp {
+                        +str TYPE_NAME = "advanced_motion_lighting"
+                        +str VERSION = "2.0.0"
+                        -dict _functional_sensors
+                        +initialize() void
+                        +on_event(event) void
+                        +master(**kwargs) void
+                        -_handle_motion(event) void
+                        -_handle_switch(event) void
+                        -_handle_illuminance(event) void
+                        -_handle_button(event) void
+                        -_handle_contact(event) void
+                        -_control_lights(action) void
+                        -_check_illuminance() bool
+                        -_health_check() void
+                        -_get_timeout_seconds() int
+                    }
+
+                    class FutureAppType {
+                        +str TYPE_NAME = "thermostat_manager"
+                        +initialize() void
+                        +on_event(event) void
+                        +master(**kwargs) void
+                    }
+
+                    BaseApp <|-- AdvancedMotionLightingApp
+                    BaseApp <|-- FutureAppType
+
+                    class RuntimeInstanceState {
+                        +datetime last_motion_time
+                        +datetime last_switch_control
+                        +dict functional_sensors
+                        +str timeout_job_id
+                        +str health_check_job_id
+                    }
+
+                    class DeviceEvent {
+                        +str device_id
+                        +str event_type
+                        +str value
+                        +str device_name
+                        +bool is_motion_active
+                        +bool is_switch_on
+                        +float numeric_value
+                    }
+
+                    BaseApp --> RuntimeInstanceState : uses
+                    BaseApp --> DeviceEvent : receives
+            </div>
+        </div>
+
+        <div class="critical-note">
+            <h3>Adding a New App Type</h3>
+            <ol>
+                <li>Create <code>apps/{new_type}/app_logic.py</code> — subclass <code>BaseApp</code>, implement abstract methods</li>
+                <li>Set class attributes: <code>TYPE_NAME</code>, <code>DISPLAY_NAME</code>, <code>DESCRIPTION</code>, <code>VERSION</code></li>
+                <li>Implement <code>get_settings_schema()</code> (JSON Schema for UI form) and <code>get_device_categories()</code> (device picker definitions)</li>
+                <li>Register in <code>apps/app_registry.py</code>: <code>from apps.new_type.app_logic import NewApp; register_app_type(NewApp)</code></li>
+                <li>On startup, registry syncs to <code>app_types</code> table; users can immediately create instances via wizard</li>
+            </ol>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 8: STARTUP FLOW                                        -->
+        <!-- ============================================================ -->
+        <h2>Level 8: Application Startup Flow</h2>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                flowchart TB
+                    START([start.sh executed]) --> AWS[Pull AWS Secrets<br/>SMARTHOME + HUBITAT]
+                    AWS --> MAP[Map Hub Numbers<br/>AWS _4 → _MAIN<br/>AWS _1-3 → _OTHER_HUB_1-3]
+                    MAP --> CERT{SSL Certs<br/>Exist?}
+                    CERT -->|No| GEN[Generate Self-Signed<br/>nginx/certs/]
+                    CERT -->|Yes| SKIP[Skip Generation]
+                    GEN --> COMPOSE
+                    SKIP --> COMPOSE
+
+                    COMPOSE[docker compose up -d] --> PG_INIT[PostgreSQL Init<br/>psql/init-db.sql]
+                    PG_INIT --> PR_READY[PostgREST Connects<br/>to PostgreSQL]
+
+                    COMPOSE --> APP_START[FastAPI Lifespan Start]
+                    APP_START --> INIT_SVC[initialize_services<br/>Create singletons]
+                    INIT_SVC --> INIT_REG[initialize_registry<br/>Import + register app classes]
+                    INIT_REG --> SYNC_DB[Sync app_types to DB<br/>POST via PostgREST]
+                    SYNC_DB --> LOAD_INST[initialize_all_instances<br/>Load all enabled instances]
+                    LOAD_INST --> FOR_EACH[For each enabled instance]
+                    FOR_EACH --> INST_OBJ[Instantiate Python object<br/>app_class - instance_data, manager]
+                    INST_OBJ --> INIT_APP[Call app.initialize<br/>Schedule health checks etc.]
+                    INIT_APP --> READY([Application Ready<br/>Accepting webhooks + UI requests])
+
+                    style START fill:#28a745,color:#fff
+                    style AWS fill:#fff3cd
+                    style MAP fill:#fff3cd
+                    style COMPOSE fill:#667eea,color:#fff
+                    style READY fill:#28a745,color:#fff
+                    style INIT_SVC fill:#17a2b8,color:#fff
+                    style LOAD_INST fill:#fd7e14,color:#fff
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 9: REST API                                            -->
+        <!-- ============================================================ -->
+        <h2>Level 9: REST API Endpoints</h2>
+
+        <div class="architecture-note">
+            <strong>API Design:</strong> FastAPI with automatic OpenAPI docs at <code>/docs</code>. The API covers health checks, app type discovery, instance CRUD, device queries, webhook reception, and mode management. The frontend consumes these endpoints via jQuery AJAX and ES6 fetch calls.
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Method</th>
+                    <th>Endpoint</th>
+                    <th>Purpose</th>
+                    <th>Notes</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/health</code></td>
+                    <td>Health check</td>
+                    <td>Returns {status: "ok"}</td>
+                </tr>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/status</code></td>
+                    <td>Detailed status</td>
+                    <td>Instance count, Hubitat connectivity</td>
+                </tr>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/app-types</code></td>
+                    <td>List app blueprints</td>
+                    <td>For wizard type selection</td>
+                </tr>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/app-types/{type}/schema</code></td>
+                    <td>Settings + device schema</td>
+                    <td>JSON Schema for dynamic form</td>
+                </tr>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/instances</code></td>
+                    <td>List all instances</td>
+                    <td>Dashboard data</td>
+                </tr>
+                <tr>
+                    <td>POST</td>
+                    <td><code>/api/instances</code></td>
+                    <td>Create instance</td>
+                    <td>Body: app_type, label, devices, settings</td>
+                </tr>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/instances/{id}</code></td>
+                    <td>Get instance details</td>
+                    <td>Including current state</td>
+                </tr>
+                <tr>
+                    <td>PUT</td>
+                    <td><code>/api/instances/{id}</code></td>
+                    <td>Update instance</td>
+                    <td>Reloads runtime object</td>
+                </tr>
+                <tr>
+                    <td>DELETE</td>
+                    <td><code>/api/instances/{id}</code></td>
+                    <td>Delete instance</td>
+                    <td>Cascades subscriptions</td>
+                </tr>
+                <tr>
+                    <td>POST</td>
+                    <td><code>/api/instances/{id}/pause</code></td>
+                    <td>Pause automation</td>
+                    <td>Optional: duration_minutes, reason</td>
+                </tr>
+                <tr>
+                    <td>POST</td>
+                    <td><code>/api/instances/{id}/resume</code></td>
+                    <td>Resume automation</td>
+                    <td>Re-evaluates current state</td>
+                </tr>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/devices</code></td>
+                    <td>List devices</td>
+                    <td>Query: ?capability=motionSensor</td>
+                </tr>
+                <tr>
+                    <td>POST</td>
+                    <td><code>/api/devices/{id}/command</code></td>
+                    <td>Send device command</td>
+                    <td>Body: command, args</td>
+                </tr>
+                <tr>
+                    <td>POST</td>
+                    <td><code>/api/webhook/event</code></td>
+                    <td>Device event webhook</td>
+                    <td>From dispatcher</td>
+                </tr>
+                <tr>
+                    <td>POST</td>
+                    <td><code>/api/webhook/mode</code></td>
+                    <td>Mode change webhook</td>
+                    <td>Notifies all instances</td>
+                </tr>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/modes</code></td>
+                    <td>Available location modes</td>
+                    <td>From Hubitat</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>Web UI Routes</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Route</th>
+                    <th>Template</th>
+                    <th>Purpose</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>GET /</code></td>
+                    <td><code>dashboard.html</code></td>
+                    <td>Instance list with status cards</td>
+                </tr>
+                <tr>
+                    <td><code>GET /instance/new</code></td>
+                    <td><code>instance_wizard.html</code></td>
+                    <td>Multi-step creation wizard</td>
+                </tr>
+                <tr>
+                    <td><code>GET /instance/{id}</code></td>
+                    <td><code>instance_detail.html</code></td>
+                    <td>Edit instance devices/settings</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 10: FRONTEND ARCHITECTURE                              -->
+        <!-- ============================================================ -->
+        <h2>Level 10: Frontend Architecture</h2>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                flowchart TB
+                    subgraph Templates["Jinja2 Templates"]
+                        BASE[base.html<br/>Layout + nav + CSS/JS includes]
+                        DASH[dashboard.html<br/>Instance cards grid]
+                        WIZ[instance_wizard.html<br/>Multi-step creation]
+                        DET[instance_detail.html<br/>Edit instance]
+                    end
+
+                    subgraph JS["ES6 JavaScript Modules"]
+                        MAIN[main.js<br/>Entry point + utilities]
+                        DC[dashboard-controller.js<br/>Instance list, status polling]
+                        IC[instance-controller.js<br/>Instance CRUD, device picker]
+                    end
+
+                    subgraph CSS["Stylesheets"]
+                        MCSS[main.css<br/>Component-based styles]
+                    end
+
+                    subgraph API["FastAPI Backend"]
+                        REST[REST API Endpoints]
+                    end
+
+                    BASE --> DASH
+                    BASE --> WIZ
+                    BASE --> DET
+                    DASH --> DC
+                    WIZ --> IC
+                    DET --> IC
+                    DC -->|jQuery AJAX| REST
+                    IC -->|jQuery AJAX| REST
+                    BASE --> MAIN
+                    BASE --> MCSS
+
+                    style BASE fill:#667eea,color:#fff
+                    style DC fill:#28a745,color:#fff
+                    style IC fill:#28a745,color:#fff
+                    style REST fill:#fd7e14,color:#fff
+            </div>
+        </div>
+
+        <div class="architecture-note">
+            <h3>Frontend Patterns</h3>
+            <ul>
+                <li><strong>ES6 Modules:</strong> <code>import</code>/<code>export</code> for code organization; controllers in <code>static/js/controllers/</code></li>
+                <li><strong>jQuery DOM:</strong> <code>$().on()</code> for events, <code>$.ajax()</code> for API calls</li>
+                <li><strong>Jinja2 Templates:</strong> Server-side rendering with <code>url_for(path=)</code> (Starlette convention)</li>
+                <li><strong>Instance Wizard:</strong> Multi-step flow: Select App Type → Name Instance → Pick Devices → Configure Settings → Review & Create</li>
+                <li><strong>Device Picker:</strong> Dynamic device list from <code>/api/devices?capability=X</code>, supports multiple selection per category</li>
+                <li><strong>Dashboard Polling:</strong> Periodic status refresh to show instance activity</li>
+            </ul>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 11: SECRETS & CONFIGURATION                            -->
+        <!-- ============================================================ -->
+        <h2>Level 11: Secrets &amp; Configuration Flow</h2>
+
+        <div class="architecture-note">
+            <strong>AWS-Only Policy:</strong> No <code>.env</code> files. All configuration lives in AWS Secrets Manager. <code>start.sh</code> pulls secrets, exports them as environment variables, and Docker Compose inherits them. The <code>docker-compose.yml</code> uses <code>${VAR:-default}</code> syntax with no file-based env.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                flowchart LR
+                    subgraph AWS["AWS Secrets Manager"]
+                        SM[SMARTHOME Secret<br/>Ports, DB creds, API token]
+                        HB[HUBITAT Secret<br/>Hub tokens, IPs, app numbers<br/>Shared with 0_TILES, 0_NVR]
+                    end
+
+                    subgraph StartSH["start.sh"]
+                        PULL[pull_aws_secrets]
+                        MAP_HUB[Map Hub Numbers<br/>_4 → _MAIN<br/>_1 → _OTHER_HUB_1<br/>_2 → _OTHER_HUB_2<br/>_3 → _OTHER_HUB_3]
+                        EXPORT[export ENV VARS]
+                    end
+
+                    subgraph Docker["Docker Compose"]
+                        ENV["environment:<br/>POSTGRES_PASSWORD: &#36;{POSTGRES_PASSWORD}<br/>HUBITAT_API_TOKEN_MAIN: &#36;{...}<br/>APP_API_TOKEN: &#36;{...}"]
+                    end
+
+                    subgraph Containers["Running Containers"]
+                        APP_C[smarthome-app<br/>os.environ access]
+                        PG_C[smarthome-postgres<br/>POSTGRES_PASSWORD]
+                        PR_C[smarthome-postgrest<br/>PGRST_DB_URI]
+                    end
+
+                    SM --> PULL
+                    HB --> PULL
+                    PULL --> MAP_HUB
+                    MAP_HUB --> EXPORT
+                    EXPORT --> ENV
+                    ENV --> APP_C
+                    ENV --> PG_C
+                    ENV --> PR_C
+
+                    style SM fill:#fff3cd
+                    style HB fill:#fff3cd
+                    style PULL fill:#667eea,color:#fff
+                    style MAP_HUB fill:#fd7e14,color:#fff
+            </div>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>AWS Secret</th>
+                    <th>Key Fields</th>
+                    <th>Shared?</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>SMARTHOME</strong></td>
+                    <td>APP_EXTERNAL_PORT, APP_INTERNAL_PORT, NGINX_HTTPS_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, POSTGREST_EXTERNAL_PORT, SERVER_IP, APP_API_TOKEN, WEBHOOK_PORT</td>
+                    <td>This project only</td>
+                </tr>
+                <tr>
+                    <td><strong>HUBITAT</strong></td>
+                    <td>HUBITAT_API_TOKEN_1-4, HUBITAT_HUB_IP_1-4, HUBITAT_API_NUMBER_1-4</td>
+                    <td>Shared with 0_TILES, 0_NVR</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="alert-note">
+            <h3>Hub Number Mapping</h3>
+            <p>AWS stores numbered hubs (1-4). <code>start.sh</code> translates to descriptive names:</p>
+            <ul>
+                <li><code>HUBITAT_*_4</code> (AWS) → <code>HUBITAT_*_MAIN</code> (app) — Primary hub: <LAN_IP>, app 268</li>
+                <li><code>HUBITAT_*_1</code> (AWS) → <code>HUBITAT_*_OTHER_HUB_1</code> (app) — <LAN_IP>, app 1717</li>
+                <li><code>HUBITAT_*_2</code> (AWS) → <code>HUBITAT_*_OTHER_HUB_2</code> (app) — <LAN_IP>, app 2151</li>
+                <li><code>HUBITAT_*_3</code> (AWS) → <code>HUBITAT_*_OTHER_HUB_3</code> (app) — <LAN_IP>, app 1269</li>
+            </ul>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 12: KEY DESIGN PATTERNS                                -->
+        <!-- ============================================================ -->
+        <h2>Level 12: Key Design Patterns</h2>
+
+        <div class="critical-note">
+            <h3>Patterns Used Throughout the System</h3>
+            <ul>
+                <li><strong>Singleton Services:</strong> Global factory functions (<code>get_instance_manager()</code>, <code>get_scheduler()</code>, etc.) ensure single instances across the application</li>
+                <li><strong>Template Method (BaseApp):</strong> Abstract base class defines lifecycle skeleton; subclasses implement specific behavior</li>
+                <li><strong>Observer/Pub-Sub:</strong> Device subscriptions table acts as a subscription registry; webhook router dispatches events to observers</li>
+                <li><strong>PostgREST as Data Layer:</strong> All CRUD goes through REST API — uniform pattern, no raw SQL in Python code</li>
+                <li><strong>Memoization:</strong> Persistent state (saved to DB) tracks user manual overrides to avoid fighting user control</li>
+                <li><strong>TTL-Based Caching:</strong> Device cache expires after 5 minutes; webhook events reset TTL</li>
+                <li><strong>Timeout Rescheduling:</strong> On motion re-trigger, reschedule existing timeout instead of creating new one (prevents light flickering)</li>
+                <li><strong>Health Monitoring:</strong> Periodic sensor health checks with configurable fail-safe behavior</li>
+            </ul>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- ARCHITECTURE SUMMARY                                         -->
+        <!-- ============================================================ -->
+        <h2>Architecture Summary</h2>
+
+        <div class="critical-note">
+            <h3>0_SMART_HOME Engineering Overview</h3>
+            <ul>
+                <li><strong>Multi-Instance Core:</strong> Each automation is an independent instance with its own devices, settings, memoization, and runtime state</li>
+                <li><strong>Event-Driven:</strong> Hubitat webhooks flow through dispatcher → router → subscribed instances → automation logic</li>
+                <li><strong>PostgREST Data Layer:</strong> Automatic REST API from PostgreSQL schema — no ORM, no raw SQL in app code</li>
+                <li><strong>Extensible App System:</strong> New app types require only a BaseApp subclass and registry entry</li>
+                <li><strong>Persistent Scheduling:</strong> APScheduler with database backup for reliable timeout and health check jobs</li>
+                <li><strong>AWS-Only Config:</strong> All secrets in AWS Secrets Manager, no .env files, start.sh handles injection</li>
+                <li><strong>Single Worker SSE:</strong> Uvicorn with one worker for SSE compatibility; async event loop for concurrency</li>
+                <li><strong>Shared Webhook Dispatcher:</strong> One dispatcher serves multiple projects (0_SMART_HOME, 0_TILES) via fan-out</li>
+                <li><strong>Docker-First:</strong> 5 containers orchestrated by docker-compose.yml; full rebuild via deploy.sh</li>
+            </ul>
+        </div>
+
+        <div class="architecture-note">
+            <h3>File Structure Reference</h3>
+            <ul>
+                <li><strong>Entry Point:</strong> <code>app.py</code> — FastAPI application, routes, lifespan</li>
+                <li><strong>Services:</strong> <code>services/hubitat_client.py</code>, <code>device_cache.py</code>, <code>instance_manager.py</code>, <code>webhook_router.py</code>, <code>scheduler_service.py</code></li>
+                <li><strong>App Logic:</strong> <code>apps/base_app.py</code> (abstract base), <code>apps/app_registry.py</code> (registration + DB sync)</li>
+                <li><strong>App Implementations:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code></li>
+                <li><strong>Models:</strong> <code>models/event.py</code> (DeviceEvent), <code>models/instance.py</code> (RuntimeInstanceState), <code>models/device.py</code> (HubitatDevice)</li>
+                <li><strong>Database Schema:</strong> <code>psql/init-db.sql</code></li>
+                <li><strong>Frontend:</strong> <code>static/js/controllers/</code>, <code>static/css/main.css</code></li>
+                <li><strong>Templates:</strong> <code>templates/base.html</code>, <code>dashboard.html</code>, <code>instance_wizard.html</code>, <code>instance_detail.html</code></li>
+                <li><strong>Infrastructure:</strong> <code>docker-compose.yml</code>, <code>Dockerfile</code>, <code>start.sh</code>, <code>deploy.sh</code>, <code>nginx/nginx.conf</code></li>
+                <li><strong>Webhook Dispatcher:</strong> <code>services/webhook_dispatcher.py</code>, <code>Dockerfile.dispatcher</code> (hardlinks from <code>~/0_SCRIPTS/webhook_dispatcher/</code>)</li>
+            </ul>
+        </div>
+
+        <div class="alert-note">
+            <h3>Access Points</h3>
+            <ul>
+                <li><strong>HTTPS (primary):</strong> <code>https://<LAN_IP>:8444/</code></li>
+                <li><strong>Direct (no proxy):</strong> <code>http://<LAN_IP>:5001/</code></li>
+                <li><strong>OpenAPI docs:</strong> <code>https://<LAN_IP>:8444/docs</code></li>
+                <li><strong>Webhook endpoint:</strong> <code>http://<LAN_IP>:5050/api/webhook/event</code></li>
+                <li><strong>PostgREST API:</strong> <code>http://localhost:3003/</code></li>
+                <li><strong>Database:</strong> <code>docker exec -it smarthome-postgres psql -U smarthome_api -d smarthome</code></li>
+            </ul>
+        </div>
+
+        <div class="danger-note">
+            <h3>Known Constraints</h3>
+            <ul>
+                <li><strong>Single Worker:</strong> SSE requires shared memory — cannot scale to multiple Uvicorn workers without switching to Redis pub/sub</li>
+                <li><strong>PostgREST Dependency:</strong> All CRUD goes through PostgREST; if it's down, the app cannot persist state</li>
+                <li><strong>Webhook Dispatcher Singleton:</strong> Only one instance runs system-wide (Docker container name collision); whichever project starts first wins</li>
+                <li><strong>Self-Signed Certs:</strong> Browsers show warnings; not suitable for public-facing deployment without proper CA certs</li>
+                <li><strong>Memoization Heuristic:</strong> User manual control detection uses timing (less than 3s = app echo); edge cases with very fast manual interactions</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'default',
+            flowchart: {
+                useMaxWidth: true,
+                htmlLabels: true,
+                curve: 'basis',
+                padding: 5,
+                nodeSpacing: 25,
+                rankSpacing: 35
+            }
+        });
+        mermaid.run()
+    </script>
+</body>
+</html>

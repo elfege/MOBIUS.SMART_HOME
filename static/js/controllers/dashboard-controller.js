@@ -13,6 +13,10 @@ export class DashboardController {
     constructor(containerId) {
         this.container = document.getElementById(containerId);
         this.instances = [];
+        // Restore debug panel state from localStorage
+        const saved = JSON.parse(localStorage.getItem('debugPanels') || '{}');
+        this.openDebugPanels = new Set(saved.open || []);
+        this.debugSizes = saved.sizes || {};
     }
 
     /**
@@ -58,6 +62,29 @@ export class DashboardController {
 
         // Bind event handlers
         this.bindEvents();
+
+        // Restore open debug panels and saved sizes
+        for (const id of this.openDebugPanels) {
+            const panel = document.getElementById(`debug-${id}`);
+            if (panel) {
+                panel.style.display = 'block';
+                const output = document.getElementById(`debug-output-${id}`);
+                if (output && this.debugSizes[id]) {
+                    output.style.height = this.debugSizes[id];
+                }
+                this.refreshDebug(id);
+            }
+        }
+
+        // Bind resize observer for debug outputs
+        this.container.querySelectorAll('.debug-output').forEach(output => {
+            const observer = new ResizeObserver(() => {
+                const id = output.id.replace('debug-output-', '');
+                this.debugSizes[id] = output.style.height;
+                this.saveDebugState();
+            });
+            observer.observe(output);
+        });
     }
 
     /**
@@ -84,15 +111,31 @@ export class DashboardController {
                     </div>
                 </div>
                 <div class="card-actions">
+                    <button class="btn btn-secondary btn-small" onclick="dashboard.runInstance(${inst.id})">
+                        Run
+                    </button>
+                    <button class="btn btn-secondary btn-small" onclick="dashboard.updateInstance(${inst.id})">
+                        Update
+                    </button>
                     <button class="btn btn-secondary btn-small" onclick="dashboard.togglePause(${inst.id}, ${isPaused})">
                         ${isPaused ? 'Resume' : 'Pause'}
                     </button>
                     <button class="btn btn-secondary btn-small" onclick="location.href='/instance/${inst.id}'">
                         Edit
                     </button>
+                    <button class="btn btn-secondary btn-small" onclick="dashboard.toggleDebug(${inst.id})">
+                        Debug
+                    </button>
                     <button class="btn btn-danger btn-small" onclick="dashboard.deleteInstance(${inst.id})">
                         Delete
                     </button>
+                </div>
+                <div class="debug-panel" id="debug-${inst.id}" style="display:none;">
+                    <div class="debug-toolbar">
+                        <span class="debug-title">Event Log</span>
+                        <button class="btn btn-secondary btn-small" onclick="dashboard.refreshDebug(${inst.id})">Refresh</button>
+                    </div>
+                    <div class="debug-output" id="debug-output-${inst.id}"></div>
                 </div>
             </div>
         `;
@@ -158,6 +201,98 @@ export class DashboardController {
             await this.loadInstances();
         } catch (error) {
             utils.notify(`Failed to ${isPaused ? 'resume' : 'pause'} instance: ${error.message}`, 'error');
+        }
+    }
+
+    /**
+     * Start an instance
+     * @param {number} instanceId - Instance ID
+     */
+    async runInstance(instanceId) {
+        try {
+            await api.post(`/instances/${instanceId}/run`);
+            utils.notify('Instance started');
+            await this.loadInstances();
+        } catch (error) {
+            utils.notify(`Failed to start: ${error.message}`, 'error');
+        }
+    }
+
+    /**
+     * Reload an instance (stop + start with current config)
+     * @param {number} instanceId - Instance ID
+     */
+    async updateInstance(instanceId) {
+        try {
+            await api.post(`/instances/${instanceId}/update`);
+            utils.notify('Instance reloaded');
+            await this.loadInstances();
+        } catch (error) {
+            utils.notify(`Failed to reload: ${error.message}`, 'error');
+        }
+    }
+
+    /**
+     * Toggle debug panel for an instance
+     * @param {number} instanceId - Instance ID
+     */
+    /**
+     * Persist debug panel state to localStorage
+     */
+    saveDebugState() {
+        localStorage.setItem('debugPanels', JSON.stringify({
+            open: [...this.openDebugPanels],
+            sizes: this.debugSizes
+        }));
+    }
+
+    async toggleDebug(instanceId) {
+        const panel = document.getElementById(`debug-${instanceId}`);
+        if (!panel) return;
+
+        const isVisible = panel.style.display !== 'none';
+        panel.style.display = isVisible ? 'none' : 'block';
+
+        if (isVisible) {
+            this.openDebugPanels.delete(instanceId);
+        } else {
+            this.openDebugPanels.add(instanceId);
+            await this.refreshDebug(instanceId);
+        }
+        this.saveDebugState();
+    }
+
+    /**
+     * Load recent events into the debug panel
+     * @param {number} instanceId - Instance ID
+     */
+    async refreshDebug(instanceId) {
+        const output = document.getElementById(`debug-output-${instanceId}`);
+        if (!output) return;
+
+        output.innerHTML = '<span class="debug-loading">Loading events...</span>';
+
+        try {
+            const events = await api.get(`/instances/${instanceId}/events`);
+            if (!events || events.length === 0) {
+                output.innerHTML = '<span class="debug-empty">No events routed to this instance yet.</span>';
+                return;
+            }
+
+            output.innerHTML = events.map(evt => {
+                const time = new Date(evt.received_at).toLocaleTimeString();
+                return `<div class="debug-line">`
+                    + `<span class="debug-time">${time}</span> `
+                    + `<span class="debug-device">${utils.escapeHtml(evt.device_name || evt.hubitat_device_id)}</span> `
+                    + `<span class="debug-event">${utils.escapeHtml(evt.event_type)}</span>`
+                    + `<span class="debug-value">= ${utils.escapeHtml(evt.event_value || '')}</span>`
+                    + `</div>`;
+            }).join('');
+
+            // Scroll to bottom
+            output.scrollTop = output.scrollHeight;
+        } catch (error) {
+            output.innerHTML = `<span class="debug-error">Error: ${error.message}</span>`;
         }
     }
 

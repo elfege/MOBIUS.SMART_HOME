@@ -1,0 +1,1051 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Motion Lighting - App Architecture (February 21, 2026)</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 15px;
+            background: #f5f5f5;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1800px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 2.2em;
+            border-bottom: 3px solid #e67e22;
+            padding-bottom: 10px;
+        }
+
+        h2 {
+            color: #34495e;
+            border-left: 4px solid #e67e22;
+            padding-left: 15px;
+            margin-top: 40px;
+            font-size: 1.6em;
+        }
+
+        h3 {
+            color: #d35400;
+            font-size: 1.2em;
+            margin-top: 20px;
+        }
+
+        .diagram-container {
+            background: #fafafa;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 40px 15px 15px 15px;
+            margin: 20px 0;
+            overflow-x: auto;
+        }
+
+        .mermaid {
+            font-size: 11px;
+        }
+
+        .key-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 25px 0;
+        }
+
+        .metric-card {
+            background: linear-gradient(135deg, #e67e22 0%, #d35400 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .metric-value {
+            font-size: 2em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .metric-label {
+            font-size: 0.9em;
+            opacity: 0.9;
+        }
+
+        .architecture-note {
+            background: #fef5e7;
+            color: #2c3e50;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            border-left: 4px solid #e67e22;
+            font-size: 14px;
+        }
+
+        .critical-note {
+            background: #d1ecf1;
+            color: #0c5460;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            border-left: 4px solid #17a2b8;
+            font-size: 14px;
+        }
+
+        .alert-note {
+            background: #fff3cd;
+            color: #856404;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            border-left: 4px solid #ffc107;
+            font-size: 14px;
+        }
+
+        .danger-note {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            border-left: 4px solid #dc3545;
+            font-size: 14px;
+        }
+
+        .legend {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px;
+            margin: 20px 0;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            background: #ecf0f1;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+
+        .legend-color {
+            width: 18px;
+            height: 18px;
+            border-radius: 3px;
+            margin-right: 10px;
+        }
+
+        ul {
+            line-height: 1.8;
+            margin-left: 20px;
+        }
+
+        li {
+            margin: 8px 0;
+        }
+
+        strong {
+            color: #2c3e50;
+        }
+
+        code {
+            background: #f5f5f5;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            color: #d63384;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+
+        th {
+            background: #e67e22;
+            color: white;
+        }
+
+        tr:nth-child(even) {
+            background: #f9f9f9;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Advanced Motion Lighting - App Architecture</h1>
+
+        <div class="critical-note">
+            <strong>App Overview:</strong> Advanced Motion Lighting Management (v2.0.0) is the first app ported from Hubitat Groovy to the 0_SMART_HOME platform. It provides motion-triggered lighting automation with memoization (detects and respects user manual overrides), health monitoring for motion sensors, illuminance-based exception handling, color/dimming control, mode-aware timeouts, and pause/resume via physical buttons. Each instance operates independently with its own device set, settings, and state.
+            <br/><br/>
+            <strong>Source:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code> (413 lines)
+            <br/>
+            <strong>Original Groovy source:</strong> <code>~/HUBITAT/SMARTHOME_MAIN/APPS/LIGHTING/</code>
+            <br/><br/>
+            <em>Last updated: February 21, 2026.</em>
+        </div>
+
+        <div class="key-metrics">
+            <div class="metric-card">
+                <div class="metric-value">5</div>
+                <div class="metric-label">Device Categories</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">13</div>
+                <div class="metric-label">Configurable Settings</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">5</div>
+                <div class="metric-label">Event Handlers</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">10 min</div>
+                <div class="metric-label">Health Check Interval</div>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 1: HIGH-LEVEL FLOW                                     -->
+        <!-- ============================================================ -->
+        <h2>Level 1: High-Level Automation Flow</h2>
+
+        <div class="architecture-note">
+            <strong>Core Automation Cycle:</strong> Motion sensors detect movement and send events via Hubitat. The app turns on configured switches (with optional dimming and color control), starts a timeout timer, and waits. If motion re-triggers, the timeout resets. When the timeout expires with no motion, lights turn off. Throughout this cycle, the app monitors for user manual overrides (memoization) and respects them by not fighting the user's control.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                flowchart TB
+                    MOTION_ON([Motion Detected]) --> CHECK_PAUSE{Instance<br/>Paused?}
+                    CHECK_PAUSE -->|Yes| IGNORE([Ignore Event])
+                    CHECK_PAUSE -->|No| CHECK_LUX{Illuminance<br/>Threshold?}
+                    CHECK_LUX -->|Too Bright| IGNORE2([Skip - Room Bright Enough])
+                    CHECK_LUX -->|Dark / Disabled| MASTER[master - motion_active=True]
+
+                    MASTER --> LIGHTS_ON[Turn On Lights]
+                    LIGHTS_ON --> CHECK_MEMO{Memoized<br/>Override?}
+                    CHECK_MEMO -->|Yes, User Overrode| SKIP_DEV([Skip This Device])
+                    CHECK_MEMO -->|No| SET_LEVEL[Set Dim Level]
+                    SET_LEVEL --> SET_COLOR[Set Color if Enabled]
+                    SET_COLOR --> SCHED[Schedule / Reschedule<br/>Timeout Timer]
+
+                    SCHED --> WAIT([Waiting for Timeout...])
+
+                    MOTION_AGAIN([Motion Re-Triggered]) --> RESCHED[Reschedule Timeout<br/>Reset Timer]
+                    RESCHED --> WAIT
+
+                    TIMEOUT([Timeout Expires]) --> CHECK_MOTION{Any Sensor<br/>Still Active?}
+                    CHECK_MOTION -->|Yes| RESCHED2[Reschedule Timeout]
+                    RESCHED2 --> WAIT
+                    CHECK_MOTION -->|No| LIGHTS_OFF[Turn Off Lights]
+                    LIGHTS_OFF --> IDLE([Idle - Waiting for Motion])
+
+                    style MOTION_ON fill:#28a745,color:#fff
+                    style MOTION_AGAIN fill:#28a745,color:#fff
+                    style TIMEOUT fill:#dc3545,color:#fff
+                    style MASTER fill:#667eea,color:#fff
+                    style LIGHTS_ON fill:#fd7e14,color:#fff
+                    style LIGHTS_OFF fill:#6c757d,color:#fff
+                    style CHECK_PAUSE fill:#ffc107
+                    style CHECK_LUX fill:#ffc107
+                    style CHECK_MEMO fill:#ffc107
+                    style CHECK_MOTION fill:#ffc107
+                    style SCHED fill:#6f42c1,color:#fff
+            </div>
+        </div>
+
+        <div class="legend">
+            <div class="legend-item">
+                <div class="legend-color" style="background: #28a745;"></div>
+                Motion Events (Triggers)
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #dc3545;"></div>
+                Timeout Expiry
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #667eea;"></div>
+                Core Logic (master)
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #fd7e14;"></div>
+                Light Control
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #ffc107;"></div>
+                Decision Points
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #6f42c1;"></div>
+                Scheduler
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 2: EVENT ROUTING                                       -->
+        <!-- ============================================================ -->
+        <h2>Level 2: Event Routing &amp; Handlers</h2>
+
+        <div class="architecture-note">
+            <strong>Event Dispatch:</strong> The <code>on_event()</code> method receives all device events routed by the webhook router. It first checks the pause state, then marks the sensor as functional (for health monitoring), and dispatches to the appropriate handler based on event type. Each handler implements specific logic for its device category.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                flowchart LR
+                    EVENT([DeviceEvent]) --> ON_EVENT[on_event]
+                    ON_EVENT --> PAUSED{Paused?}
+                    PAUSED -->|Yes| DROP([Drop])
+                    PAUSED -->|No| FUNC[Mark Sensor Functional]
+                    FUNC --> ROUTE{event.event_type}
+
+                    ROUTE -->|motion| HM[_handle_motion]
+                    ROUTE -->|switch| HS[_handle_switch]
+                    ROUTE -->|illuminance| HI[_handle_illuminance]
+                    ROUTE -->|pushed| HB[_handle_button]
+                    ROUTE -->|contact| HC[_handle_contact]
+
+                    HM --> M_ACT{value?}
+                    M_ACT -->|active| RECORD_TIME[Record last_motion_time]
+                    RECORD_TIME --> CALL_MASTER[master - motion_active=True]
+                    M_ACT -->|inactive| SCHED_TO[Schedule Timeout]
+
+                    HS --> MEMO[Record Memoization<br/>Detect manual override]
+
+                    HI --> REEVAL[Re-evaluate master]
+
+                    HB --> TOGGLE[Toggle Pause/Resume]
+
+                    HC --> CONTACT_ON[Turn On Lights<br/>Door opened]
+
+                    style EVENT fill:#28a745,color:#fff
+                    style HM fill:#fd7e14,color:#fff
+                    style HS fill:#17a2b8,color:#fff
+                    style HI fill:#6f42c1,color:#fff
+                    style HB fill:#dc3545,color:#fff
+                    style HC fill:#20c997,color:#fff
+                    style CALL_MASTER fill:#667eea,color:#fff
+            </div>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Handler</th>
+                    <th>Event Type</th>
+                    <th>Device Category</th>
+                    <th>Behavior</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>_handle_motion</strong></td>
+                    <td><code>motion</code></td>
+                    <td>motion_sensors</td>
+                    <td><code>active</code>: Record time, call <code>master()</code>. <code>inactive</code>: Schedule timeout</td>
+                </tr>
+                <tr>
+                    <td><strong>_handle_switch</strong></td>
+                    <td><code>switch</code></td>
+                    <td>switches</td>
+                    <td>Detect manual override via timing heuristic. Record in memoization</td>
+                </tr>
+                <tr>
+                    <td><strong>_handle_illuminance</strong></td>
+                    <td><code>illuminance</code></td>
+                    <td>illuminance_sensor</td>
+                    <td>Re-evaluate <code>master()</code> — may turn off lights if now bright enough</td>
+                </tr>
+                <tr>
+                    <td><strong>_handle_button</strong></td>
+                    <td><code>pushed</code></td>
+                    <td>pause_buttons</td>
+                    <td>Toggle pause/resume state. Useful for physical "don't automate" buttons</td>
+                </tr>
+                <tr>
+                    <td><strong>_handle_contact</strong></td>
+                    <td><code>contact</code></td>
+                    <td>contacts</td>
+                    <td><code>open</code>: Turn on lights (door opened in dark room)</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 3: MEMOIZATION SYSTEM                                  -->
+        <!-- ============================================================ -->
+        <h2>Level 3: Memoization System</h2>
+
+        <div class="architecture-note">
+            <strong>Purpose:</strong> Memoization prevents the app from "fighting" the user. When a user manually turns a switch on or off (detected by timing), the app remembers this override and stops controlling that specific device until conditions reset (mode change, or new motion cycle). This is the key differentiator from simple motion-triggered automations.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                sequenceDiagram
+                    participant User as User (Physical)
+                    participant Hub as Hubitat Hub
+                    participant App as AdvancedMotionLighting
+                    participant Memo as Memoization State
+                    participant Switch as Light Switch 456
+
+                    Note over App,Switch: Normal Operation
+                    App->>Switch: send_command(456, 'on')
+                    App->>Memo: Record: last_command_time = now
+                    Hub-->>App: switch event: 456 = 'on'
+                    App->>App: _handle_switch(event)
+                    App->>App: Time since command < 3s?
+                    Note over App: YES — This is our own echo. Ignore.
+
+                    Note over User,Switch: User Manual Override
+                    User->>Switch: Physically turns off switch
+                    Hub-->>App: switch event: 456 = 'off'
+                    App->>App: _handle_switch(event)
+                    App->>App: Time since command > 3s?
+                    Note over App: YES — This is a USER action!
+                    App->>Memo: set_memo('switch_456', 'off')
+                    Note over Memo: Device 456 memoized as 'off'
+
+                    Note over App,Switch: Next Motion Event
+                    Hub-->>App: motion event: active
+                    App->>App: master(motion_active=True)
+                    App->>App: _control_lights('on')
+                    App->>Memo: get_memo('switch_456')
+                    Memo-->>App: 'off' (user override)
+                    Note over App: SKIP device 456 — user wants it off
+
+                    Note over App,Switch: Mode Change Resets Memoization
+                    Hub-->>App: mode change: 'Night' → 'Day'
+                    App->>App: on_mode_change('Day')
+                    App->>Memo: Clear all memoization
+                    Note over Memo: All overrides reset
+                    App->>App: master() — full re-evaluation
+            </div>
+        </div>
+
+        <div class="critical-note">
+            <h3>Memoization Rules</h3>
+            <ul>
+                <li><strong>Detection Heuristic:</strong> If a switch event arrives more than 3 seconds after the app's last command to that device, it's a user manual action</li>
+                <li><strong>Scope:</strong> Per-device — memoizing switch 456 doesn't affect switch 457</li>
+                <li><strong>Stored Values:</strong> Switch state (<code>"on"</code>/<code>"off"</code>) and dim level per device</li>
+                <li><strong>Persistence:</strong> Saved to <code>app_instances.memoization_state</code> (JSONB) via PostgREST</li>
+                <li><strong>Reset Triggers:</strong> Location mode change clears all memoization for the instance</li>
+                <li><strong>Edge Case:</strong> Very fast manual interactions (under 3s) may be misclassified as app echoes</li>
+            </ul>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 4: LIGHT CONTROL PIPELINE                              -->
+        <!-- ============================================================ -->
+        <h2>Level 4: Light Control Pipeline</h2>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                flowchart TB
+                    MASTER([master called]) --> ACTION{Determine<br/>Action}
+                    ACTION -->|Motion Active| ON[_control_lights - 'on']
+                    ACTION -->|No Motion + Timeout| OFF[_control_lights - 'off']
+
+                    ON --> FOR_EACH_ON[For each switch in device_selections]
+                    FOR_EACH_ON --> CHECK_MEMO_ON{Memoized<br/>Override?}
+                    CHECK_MEMO_ON -->|Yes| SKIP_ON([Skip Device])
+                    CHECK_MEMO_ON -->|No| SEND_ON[send_command - device, 'on']
+
+                    SEND_ON --> DIM_CHECK{useDim<br/>Enabled?}
+                    DIM_CHECK -->|Yes| SET_DIM[send_command - device, 'setLevel', level]
+                    DIM_CHECK -->|No| COLOR_CHECK
+
+                    SET_DIM --> COLOR_CHECK{useColor<br/>Enabled?}
+                    COLOR_CHECK -->|Yes| COLOR_TYPE{Color<br/>Type?}
+                    COLOR_CHECK -->|No| DONE_ON([Device Done])
+
+                    COLOR_TYPE -->|Temperature Preset| SET_CT[send_command - 'setColorTemperature'<br/>2700K-6500K]
+                    COLOR_TYPE -->|RGB Preset| SET_RGB[send_command - 'setColor'<br/>Hue + Saturation]
+                    COLOR_TYPE -->|Custom Kelvin| SET_CUSTOM[send_command - 'setColorTemperature'<br/>customColorTemperature]
+
+                    SET_CT --> DONE_ON
+                    SET_RGB --> DONE_ON
+                    SET_CUSTOM --> DONE_ON
+
+                    OFF --> FOR_EACH_OFF[For each switch in device_selections]
+                    FOR_EACH_OFF --> CHECK_MEMO_OFF{Memoized<br/>Override?}
+                    CHECK_MEMO_OFF -->|Yes| SKIP_OFF([Skip Device])
+                    CHECK_MEMO_OFF -->|No| SEND_OFF[send_command - device, 'off']
+                    SEND_OFF --> DONE_OFF([Device Done])
+
+                    style MASTER fill:#667eea,color:#fff
+                    style ON fill:#28a745,color:#fff
+                    style OFF fill:#dc3545,color:#fff
+                    style SEND_ON fill:#fd7e14,color:#fff
+                    style SEND_OFF fill:#6c757d,color:#fff
+                    style SET_DIM fill:#17a2b8,color:#fff
+                    style SET_CT fill:#e67e22,color:#fff
+                    style SET_RGB fill:#e67e22,color:#fff
+                    style SET_CUSTOM fill:#e67e22,color:#fff
+            </div>
+        </div>
+
+        <div class="architecture-note">
+            <h3>Color Presets</h3>
+            <table>
+                <tr>
+                    <th>Category</th>
+                    <th>Preset Name</th>
+                    <th>Value</th>
+                    <th>Command</th>
+                </tr>
+                <tr>
+                    <td rowspan="4"><strong>Temperature</strong></td>
+                    <td>Soft White</td>
+                    <td>2700K</td>
+                    <td><code>setColorTemperature(2700)</code></td>
+                </tr>
+                <tr>
+                    <td>Warm White</td>
+                    <td>3000K</td>
+                    <td><code>setColorTemperature(3000)</code></td>
+                </tr>
+                <tr>
+                    <td>Cool White</td>
+                    <td>4000K</td>
+                    <td><code>setColorTemperature(4000)</code></td>
+                </tr>
+                <tr>
+                    <td>Daylight</td>
+                    <td>6500K</td>
+                    <td><code>setColorTemperature(6500)</code></td>
+                </tr>
+                <tr>
+                    <td rowspan="4"><strong>RGB</strong></td>
+                    <td>Red</td>
+                    <td>H:0 S:100</td>
+                    <td><code>setColor({hue:0, saturation:100, level:N})</code></td>
+                </tr>
+                <tr>
+                    <td>Blue</td>
+                    <td>H:66 S:100</td>
+                    <td><code>setColor({hue:66, saturation:100, level:N})</code></td>
+                </tr>
+                <tr>
+                    <td>Purple</td>
+                    <td>H:75 S:100</td>
+                    <td><code>setColor({hue:75, saturation:100, level:N})</code></td>
+                </tr>
+                <tr>
+                    <td>Pink</td>
+                    <td>H:83 S:50</td>
+                    <td><code>setColor({hue:83, saturation:50, level:N})</code></td>
+                </tr>
+                <tr>
+                    <td><strong>Custom</strong></td>
+                    <td>User-Specified</td>
+                    <td>2000-6500K</td>
+                    <td><code>setColorTemperature(customValue)</code></td>
+                </tr>
+            </table>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 5: TIMEOUT & SCHEDULING                                -->
+        <!-- ============================================================ -->
+        <h2>Level 5: Timeout &amp; Scheduling</h2>
+
+        <div class="architecture-note">
+            <strong>Timeout Pattern:</strong> When motion becomes inactive, a timeout is scheduled. If motion re-triggers before the timeout, the timer resets (reschedule, not create new). When the timeout fires, the app checks if any sensor is still active — if so, it reschedules. Only when all sensors report inactive does it turn off lights. This prevents flickering and handles multi-sensor scenarios.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                stateDiagram-v2
+                    [*] --> Idle
+                    Idle --> MotionActive : Motion detected
+                    MotionActive --> TimerRunning : Start/reschedule timeout
+                    TimerRunning --> TimerRunning : Motion re-triggers<br/>(reschedule)
+                    TimerRunning --> CheckSensors : Timeout expires
+                    CheckSensors --> TimerRunning : Any sensor active<br/>(reschedule)
+                    CheckSensors --> LightsOff : All sensors inactive
+                    LightsOff --> Idle : Lights turned off
+
+                    MotionActive --> Paused : Button press
+                    TimerRunning --> Paused : Button press
+                    Paused --> MotionActive : Resume<br/>(re-evaluate state)
+                    Paused --> Idle : Resume<br/>(no motion)
+
+                    note right of TimerRunning
+                        Timeout = noMotionTime * timeUnit
+                        (e.g., 5 minutes)
+                        Stored in SchedulerService
+                        Persisted in scheduled_jobs table
+                    end note
+
+                    note right of Paused
+                        All timeouts cancelled
+                        Optional auto-resume
+                        via scheduled pause_expire job
+                    end note
+            </div>
+        </div>
+
+        <div class="critical-note">
+            <h3>Timeout Configuration</h3>
+            <ul>
+                <li><strong>noMotionTime:</strong> The timeout value (integer, default varies by mode)</li>
+                <li><strong>timeUnit:</strong> <code>"seconds"</code> or <code>"minutes"</code> — multiplier for the timeout</li>
+                <li><strong>Calculation:</strong> <code>noMotionTime * (60 if timeUnit == "minutes" else 1)</code></li>
+                <li><strong>Reschedule vs. New:</strong> <code>reschedule_timeout()</code> updates the existing job in APScheduler rather than canceling and creating a new one</li>
+                <li><strong>Job ID Format:</strong> <code>timeout_{instance_id}</code> — one timeout per instance, always overwritten</li>
+                <li><strong>Persistence:</strong> Jobs are backed up to <code>scheduled_jobs</code> table; restored on app restart (skipping missed ones)</li>
+            </ul>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 6: HEALTH MONITORING                                   -->
+        <!-- ============================================================ -->
+        <h2>Level 6: Sensor Health Monitoring</h2>
+
+        <div class="architecture-note">
+            <strong>Problem:</strong> Motion sensors can silently fail (battery dies, wireless interference, physical obstruction). Without health monitoring, the app would never receive motion events and lights would stay off (or on) forever.
+            <br/><br/>
+            <strong>Solution:</strong> A recurring health check job runs every 10 minutes. It tracks which sensors have reported events recently. If a sensor hasn't reported in the check interval, it's marked as non-functional. If all sensors fail and <code>considerActiveWhenFail</code> is enabled, the app assumes motion is active (fail-safe: lights stay on).
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                flowchart TB
+                    subgraph HealthCheck["Health Check (every 10 min)"]
+                        HC_START([_health_check fires]) --> CHECK_EACH[For each motion sensor]
+                        CHECK_EACH --> REPORTED{Reported event<br/>since last check?}
+                        REPORTED -->|Yes| MARK_OK[Mark functional<br/>_functional_sensors - id: true]
+                        REPORTED -->|No| MARK_FAIL[Mark non-functional<br/>_functional_sensors - id: false]
+                    end
+
+                    MARK_OK --> ASSESS
+                    MARK_FAIL --> ASSESS
+
+                    ASSESS{All sensors<br/>non-functional?}
+                    ASSESS -->|No| NORMAL([Normal operation<br/>At least one sensor works])
+                    ASSESS -->|Yes| FAILSAFE{considerActiveWhenFail<br/>setting?}
+                    FAILSAFE -->|true| ASSUME_ACTIVE[Assume motion active<br/>Keep lights ON]
+                    FAILSAFE -->|false| NO_ACTION([No action<br/>Lights may be stuck])
+
+                    subgraph EventTracking["During Normal Events"]
+                        EVT([on_event called]) --> MARK_FUNC[Mark sensor as functional<br/>Reset health timer for sensor]
+                    end
+
+                    style HC_START fill:#17a2b8,color:#fff
+                    style MARK_OK fill:#28a745,color:#fff
+                    style MARK_FAIL fill:#dc3545,color:#fff
+                    style ASSUME_ACTIVE fill:#fd7e14,color:#fff
+                    style ASSESS fill:#ffc107
+                    style FAILSAFE fill:#ffc107
+            </div>
+        </div>
+
+        <div class="alert-note">
+            <h3>Health Check Details</h3>
+            <ul>
+                <li><strong>Interval:</strong> Every 10 minutes (recurring APScheduler job)</li>
+                <li><strong>Job ID:</strong> <code>health_check_{instance_id}</code></li>
+                <li><strong>Tracking:</strong> <code>_functional_sensors</code> dict in <code>RuntimeInstanceState</code> (in-memory, not persisted)</li>
+                <li><strong>Fail-Safe Behavior:</strong> Configurable per-instance via <code>considerActiveWhenFail</code> setting (default: false)</li>
+                <li><strong>Reset on Event:</strong> Any event from a sensor immediately marks it functional — health check only downgrades</li>
+                <li><strong>Startup:</strong> All sensors assumed functional until first health check runs</li>
+            </ul>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 7: DEVICE CATEGORIES & SETTINGS                        -->
+        <!-- ============================================================ -->
+        <h2>Level 7: Device Categories &amp; Settings Schema</h2>
+
+        <div class="architecture-note">
+            <strong>UI Wizard Integration:</strong> The app defines its device categories and settings schema as class methods. The UI wizard reads these definitions to dynamically render device pickers and settings forms. This means adding new device categories or settings to the app automatically updates the wizard — no frontend changes needed.
+        </div>
+
+        <h3>Device Categories</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Category</th>
+                    <th>Required</th>
+                    <th>Multiple</th>
+                    <th>Hubitat Capability</th>
+                    <th>Purpose</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>motion_sensors</strong></td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                    <td><code>motionSensor</code></td>
+                    <td>Primary triggers — detect movement to start automation</td>
+                </tr>
+                <tr>
+                    <td><strong>switches</strong></td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                    <td><code>switch</code></td>
+                    <td>Controlled lights/switches that turn on/off based on motion</td>
+                </tr>
+                <tr>
+                    <td><strong>illuminance_sensor</strong></td>
+                    <td>No</td>
+                    <td>No (single)</td>
+                    <td><code>illuminanceMeasurement</code></td>
+                    <td>Lux reading for "don't turn on if bright enough" logic</td>
+                </tr>
+                <tr>
+                    <td><strong>pause_buttons</strong></td>
+                    <td>No</td>
+                    <td>Yes</td>
+                    <td><code>pushableButton</code></td>
+                    <td>Physical buttons to toggle pause/resume state</td>
+                </tr>
+                <tr>
+                    <td><strong>contacts</strong></td>
+                    <td>No</td>
+                    <td>Yes</td>
+                    <td><code>contactSensor</code></td>
+                    <td>Door/window sensors — turn on lights when opened</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>Settings Schema</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Setting</th>
+                    <th>Type</th>
+                    <th>Default</th>
+                    <th>Description</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>memoize</strong></td>
+                    <td>boolean</td>
+                    <td>true</td>
+                    <td>Remember manual switch changes (avoid fighting user)</td>
+                </tr>
+                <tr>
+                    <td><strong>useDim</strong></td>
+                    <td>boolean</td>
+                    <td>false</td>
+                    <td>Enable dimming control when turning on</td>
+                </tr>
+                <tr>
+                    <td><strong>defaultDimLevel</strong></td>
+                    <td>integer (0-100)</td>
+                    <td>75</td>
+                    <td>Brightness percentage when dimming is enabled</td>
+                </tr>
+                <tr>
+                    <td><strong>useColor</strong></td>
+                    <td>boolean</td>
+                    <td>false</td>
+                    <td>Enable color/temperature control</td>
+                </tr>
+                <tr>
+                    <td><strong>colorPreset</strong></td>
+                    <td>string</td>
+                    <td>"Soft White"</td>
+                    <td>Color preset name or "Custom"</td>
+                </tr>
+                <tr>
+                    <td><strong>customColorTemperature</strong></td>
+                    <td>integer (2000-6500)</td>
+                    <td>3000</td>
+                    <td>Custom Kelvin value (used when preset = "Custom")</td>
+                </tr>
+                <tr>
+                    <td><strong>timeUnit</strong></td>
+                    <td>string</td>
+                    <td>"minutes"</td>
+                    <td><code>"seconds"</code> or <code>"minutes"</code></td>
+                </tr>
+                <tr>
+                    <td><strong>noMotionTime</strong></td>
+                    <td>integer</td>
+                    <td>5</td>
+                    <td>Timeout value (in selected timeUnit)</td>
+                </tr>
+                <tr>
+                    <td><strong>useIlluminance</strong></td>
+                    <td>boolean</td>
+                    <td>false</td>
+                    <td>Enable illuminance threshold checking</td>
+                </tr>
+                <tr>
+                    <td><strong>illuminanceThreshold</strong></td>
+                    <td>integer</td>
+                    <td>50</td>
+                    <td>Lux level above which lights won't turn on</td>
+                </tr>
+                <tr>
+                    <td><strong>considerActiveWhenFail</strong></td>
+                    <td>boolean</td>
+                    <td>false</td>
+                    <td>Fail-safe: assume motion active if all sensors fail</td>
+                </tr>
+                <tr>
+                    <td><strong>pauseDuration</strong></td>
+                    <td>integer</td>
+                    <td>30</td>
+                    <td>How long to pause when button pressed</td>
+                </tr>
+                <tr>
+                    <td><strong>pauseDurationUnit</strong></td>
+                    <td>string</td>
+                    <td>"Minutes"</td>
+                    <td><code>"Minutes"</code> or <code>"Hours"</code></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 8: COMPLETE EVENT LIFECYCLE                            -->
+        <!-- ============================================================ -->
+        <h2>Level 8: Complete Event Lifecycle (Sequence)</h2>
+
+        <div class="architecture-note">
+            <strong>Full Trace:</strong> This sequence diagram shows the complete lifecycle of a motion event from physical sensor activation through to light control and timeout scheduling, including all service interactions.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                sequenceDiagram
+                    participant Sensor as Motion Sensor 123
+                    participant Hub as Hubitat Hub
+                    participant Disp as Webhook Dispatcher
+                    participant API as FastAPI
+                    participant Router as WebhookRouter
+                    participant Cache as DeviceCache
+                    participant DB as PostgREST
+                    participant App as AML Instance 1<br/>"Office Lights"
+                    participant Sched as SchedulerService
+                    participant Light as Switch 456
+
+                    Note over Sensor,Light: Phase 1: Event Arrival
+                    Sensor->>Hub: Motion detected!
+                    Hub->>Disp: POST {content: {deviceId:123, name:motion, value:active}}
+                    Disp->>Disp: Unwrap content envelope
+                    Disp->>API: POST /api/webhook/event {deviceId:123, name:motion, value:active}
+
+                    Note over API,DB: Phase 2: Routing
+                    API->>Router: route_event(payload)
+                    Router->>Router: Create DeviceEvent(123, 'motion', 'active')
+                    par
+                        Router->>Cache: update_device_attribute(123, 'motion', 'active')
+                        Router->>DB: GET /device_subscriptions?device_id=123&event_type=motion
+                    end
+                    DB-->>Router: [{instance_id: 1}]
+
+                    Note over Router,Light: Phase 3: App Logic
+                    Router->>App: on_event(DeviceEvent)
+                    App->>App: Not paused? OK
+                    App->>App: Mark sensor 123 functional
+                    App->>App: _handle_motion(event)
+                    App->>App: Record last_motion_time = now
+                    App->>App: master(motion_active_event=True)
+
+                    Note over App,Light: Phase 4: Light Control
+                    App->>App: _check_illuminance() → OK (or disabled)
+                    App->>App: _control_lights('on')
+                    App->>App: Check memo for switch 456 → No override
+                    App->>Hub: send_command(456, 'on')
+                    Hub->>Light: Turn on
+                    App->>App: useDim? Yes → level 75
+                    App->>Hub: send_command(456, 'setLevel', 75)
+                    App->>App: useColor? Yes → Soft White 2700K
+                    App->>Hub: send_command(456, 'setColorTemperature', 2700)
+                    App->>App: Record last_command_time for memo
+
+                    Note over App,Sched: Phase 5: Scheduling
+                    App->>Sched: schedule_timeout(300s)
+                    Sched->>Sched: APScheduler: add_job(timeout_1, 300s)
+                    Sched->>DB: POST /scheduled_jobs {job_id:timeout_1, execute_at:+5min}
+
+                    Note over Router,DB: Phase 6: Logging
+                    Router->>DB: POST /event_log {device:123, type:motion, routed_to:[1]}
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 9: PAUSE/RESUME                                        -->
+        <!-- ============================================================ -->
+        <h2>Level 9: Pause &amp; Resume Workflow</h2>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                flowchart TB
+                    subgraph Triggers["Pause Triggers"]
+                        BTN([Physical Button Press<br/>pushableButton event])
+                        API_P([API Call<br/>POST /instances/id/pause])
+                    end
+
+                    subgraph PauseFlow["Pause Flow"]
+                        PAUSE[pause - duration_minutes]
+                        CANCEL_TO[Cancel active timeout<br/>cancel_timeout]
+                        SET_PAUSED[is_paused = true<br/>Update DB]
+                        SCHED_RESUME{duration<br/>specified?}
+                        SCHED_YES[Schedule pause_expire job<br/>Auto-resume after duration]
+                        SCHED_NO[Paused indefinitely<br/>Manual resume required]
+                    end
+
+                    subgraph ResumeFlow["Resume Flow"]
+                        RESUME_TRIG([Resume Trigger<br/>Button / API / Auto-expire])
+                        RESUME[resume]
+                        SET_ACTIVE[is_paused = false<br/>Update DB]
+                        EVAL[Re-evaluate current state]
+                        MASTER_R[Call master<br/>Check sensor states]
+                        RESULT{Any motion<br/>active?}
+                        LIGHTS_ON_R[Turn on lights<br/>+ schedule timeout]
+                        IDLE_R([Idle — no motion])
+                    end
+
+                    BTN --> PAUSE
+                    API_P --> PAUSE
+                    PAUSE --> CANCEL_TO
+                    CANCEL_TO --> SET_PAUSED
+                    SET_PAUSED --> SCHED_RESUME
+                    SCHED_RESUME -->|Yes| SCHED_YES
+                    SCHED_RESUME -->|No| SCHED_NO
+
+                    SCHED_YES -.->|After duration| RESUME_TRIG
+                    RESUME_TRIG --> RESUME
+                    RESUME --> SET_ACTIVE
+                    SET_ACTIVE --> EVAL
+                    EVAL --> MASTER_R
+                    MASTER_R --> RESULT
+                    RESULT -->|Yes| LIGHTS_ON_R
+                    RESULT -->|No| IDLE_R
+
+                    style BTN fill:#dc3545,color:#fff
+                    style API_P fill:#667eea,color:#fff
+                    style PAUSE fill:#6c757d,color:#fff
+                    style RESUME fill:#28a745,color:#fff
+                    style MASTER_R fill:#667eea,color:#fff
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 10: MODE CHANGE                                        -->
+        <!-- ============================================================ -->
+        <h2>Level 10: Location Mode Change Handling</h2>
+
+        <div class="architecture-note">
+            <strong>Mode Changes:</strong> Hubitat location modes (Day, Night, Away, etc.) affect automation behavior. When the mode changes, all running instances are notified. The Advanced Motion Lighting app resets memoization (user overrides no longer apply in the new context) and re-evaluates its state from scratch. Future enhancement: mode-specific timeout values and dim levels.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                flowchart LR
+                    MODE_EVT([Mode Change Event<br/>Night → Day]) --> WR[WebhookRouter<br/>route_mode_change]
+                    WR --> UPDATE_DB[Update location_modes<br/>table via PostgREST]
+                    WR --> NOTIFY[Notify ALL running instances]
+
+                    NOTIFY --> INST1[Instance 1: on_mode_change - 'Day']
+                    NOTIFY --> INST2[Instance 2: on_mode_change - 'Day']
+                    NOTIFY --> INST_N[Instance N: on_mode_change - 'Day']
+
+                    INST1 --> RESET[Clear memoization state]
+                    RESET --> REEVAL[Call master<br/>Full re-evaluation]
+                    REEVAL --> PERSIST[Save cleared memoization<br/>to DB]
+
+                    style MODE_EVT fill:#e67e22,color:#fff
+                    style WR fill:#dc3545,color:#fff
+                    style RESET fill:#fd7e14,color:#fff
+                    style REEVAL fill:#667eea,color:#fff
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- ARCHITECTURE SUMMARY                                         -->
+        <!-- ============================================================ -->
+        <h2>App Architecture Summary</h2>
+
+        <div class="critical-note">
+            <h3>Advanced Motion Lighting Key Characteristics</h3>
+            <ul>
+                <li><strong>Memoization-First Design:</strong> The app always checks for user manual overrides before controlling any device — this is the core differentiator from basic motion automations</li>
+                <li><strong>Multi-Sensor Support:</strong> Multiple motion sensors per instance, with independent health tracking and functional status per sensor</li>
+                <li><strong>Timeout Rescheduling:</strong> Motion re-triggers reset the timer rather than creating new timers, preventing light flickering</li>
+                <li><strong>Health Monitoring:</strong> 10-minute recurring checks detect silent sensor failures with configurable fail-safe behavior</li>
+                <li><strong>5 Device Categories:</strong> Motion sensors (required), switches (required), illuminance sensor, pause buttons, contact sensors</li>
+                <li><strong>Rich Light Control:</strong> On/off, dimming (0-100%), color temperature presets (2700-6500K), RGB presets, custom Kelvin</li>
+                <li><strong>Pause/Resume:</strong> Physical button toggle or API call, with optional auto-resume via scheduled job</li>
+                <li><strong>Mode-Aware:</strong> Memoization resets on mode change; future: mode-specific timeouts and dim levels</li>
+                <li><strong>413 Lines of Logic:</strong> Compact but feature-rich — ported from the Hubitat Groovy original</li>
+            </ul>
+        </div>
+
+        <div class="danger-note">
+            <h3>Known Limitations &amp; Future Work</h3>
+            <ul>
+                <li><strong>Mode-Specific Timeouts:</strong> Not yet implemented — currently uses single timeout value regardless of mode</li>
+                <li><strong>Mode-Specific Dim Levels:</strong> Not yet implemented — same dim level across all modes</li>
+                <li><strong>Memoization Timing Edge Case:</strong> The 3-second heuristic may misclassify very fast manual interactions as app echoes</li>
+                <li><strong>No Occupancy Sensor Support:</strong> Currently only handles motion sensors; occupancy sensors (which distinguish presence vs. motion) are not yet supported</li>
+                <li><strong>Health Check Not Persistent:</strong> <code>_functional_sensors</code> is in-memory only (RuntimeInstanceState); resets on restart</li>
+                <li><strong>Single Illuminance Sensor:</strong> Only one lux sensor per instance; no averaging across multiple sensors</li>
+            </ul>
+        </div>
+
+        <div class="architecture-note">
+            <h3>File Reference</h3>
+            <ul>
+                <li><strong>App Logic:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code> (413 lines)</li>
+                <li><strong>Base Class:</strong> <code>apps/base_app.py</code></li>
+                <li><strong>Router:</strong> <code>apps/advanced_motion_lighting/blueprint.py</code> (26 lines)</li>
+                <li><strong>Models:</strong> <code>models/event.py</code>, <code>models/instance.py</code>, <code>models/device.py</code></li>
+                <li><strong>Groovy Original:</strong> <code>~/HUBITAT/SMARTHOME_MAIN/APPS/LIGHTING/</code></li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'default',
+            flowchart: {
+                useMaxWidth: true,
+                htmlLabels: true,
+                curve: 'basis',
+                padding: 5,
+                nodeSpacing: 25,
+                rankSpacing: 35
+            },
+            sequence: {
+                useMaxWidth: true,
+                showSequenceNumbers: false,
+                actorMargin: 30,
+                messageFontSize: 12
+            }
+        });
+        mermaid.run()
+    </script>
+</body>
+</html>

@@ -43,6 +43,10 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: smarthome-app
+    # Dev override: enable hot reload (Dockerfile CMD is production-clean)
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "5000",
+              "--workers", "1", "--timeout-keep-alive", "120",
+              "--reload", "--reload-dir", "/app"]
     ports:
       - "${APP_EXTERNAL_PORT:-5001}:${APP_INTERNAL_PORT:-5000}"
     environment:
@@ -79,14 +83,14 @@ services:
       # Server configuration
       SERVER_IP: ${SERVER_IP:-<LAN_IP>}
     volumes:
-      # Mount source for development (hot reload)
-      - ./app.py:/app/app.py:ro
-      - ./apps:/app/apps:ro
-      - ./services:/app/services:ro
-      - ./models:/app/models:ro
-      - ./config:/app/config:ro
-      - ./templates:/app/templates:ro
-      - ./static:/app/static:ro
+      # Mount source for development (hot reload via uvicorn --reload)
+      - ./app.py:/app/app.py
+      - ./apps:/app/apps
+      - ./services:/app/services
+      - ./models:/app/models
+      - ./config:/app/config
+      - ./templates:/app/templates
+      - ./static:/app/static
     depends_on:
       postgres:
         condition: service_healthy

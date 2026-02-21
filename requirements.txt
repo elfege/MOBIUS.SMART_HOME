@@ -19,6 +19,9 @@ pydantic==2.5.2
 requests==2.31.0
 urllib3==2.1.0
 
+# Async HTTP Client (for E2E test webhook injection)
+httpx==0.27.0
+
 # Background Tasks
 APScheduler==3.10.4
 

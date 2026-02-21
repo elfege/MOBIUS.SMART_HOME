@@ -1,23 +1,25 @@
 /* =============================================================================
-   0_SMART_HOME Main Stylesheet
+   MOBIUS.HOME Main Stylesheet
    ============================================================================= */
 
 /* CSS Variables */
 :root {
-    --color-primary: #2563eb;
-    --color-primary-hover: #1d4ed8;
+    --color-primary: #4A9FD8;
+    --color-primary-hover: #3a8cc2;
+    --color-accent: #E89B3C;
     --color-secondary: #64748b;
     --color-success: #22c55e;
     --color-warning: #f59e0b;
     --color-danger: #ef4444;
-    --color-bg: #f8fafc;
-    --color-card: #ffffff;
-    --color-text: #1e293b;
-    --color-text-muted: #64748b;
-    --color-border: #e2e8f0;
+    --color-bg: #0f0f1a;
+    --color-card: #1a1a2e;
+    --color-text: rgba(255, 255, 255, 0.9);
+    --color-text-muted: rgba(255, 255, 255, 0.5);
+    --color-border: rgba(255, 255, 255, 0.1);
+    --color-header-bg: rgba(20, 20, 28, 0.95);
     --radius: 8px;
-    --shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06);
-    --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05);
+    --shadow: 0 1px 3px rgba(0,0,0,0.3), 0 1px 2px rgba(0,0,0,0.2);
+    --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.4), 0 4px 6px -2px rgba(0,0,0,0.3);
 }
 
 /* Reset */
@@ -38,10 +40,14 @@ body {
    Layout
    ============================================================================= */
 
+/* === Header / Navbar === */
 .app-header {
-    background: var(--color-card);
+    background: var(--color-header-bg);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--color-border);
-    padding: 1rem 2rem;
+    padding: 0 2rem;
+    height: 55px;
     position: sticky;
     top: 0;
     z-index: 100;
@@ -53,15 +59,41 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    height: 100%;
 }
 
+/* Logo: image + MOBIUS.HOME text */
 .logo a {
-    color: var(--color-text);
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
     text-decoration: none;
-    font-size: 1.25rem;
-    font-weight: 600;
+    color: var(--color-text);
 }
 
+.logo-img {
+    height: 34px;
+    width: auto;
+    border-radius: 4px;
+}
+
+.logo-text {
+    font-size: 1.15rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: var(--color-text);
+}
+
+.logo-dot {
+    color: var(--color-accent);
+}
+
+.logo a:hover .logo-img {
+    transform: scale(1.05);
+    transition: transform 0.2s;
+}
+
+/* Navigation links */
 .main-nav {
     display: flex;
     gap: 1.5rem;
@@ -91,6 +123,28 @@ body {
     color: white;
 }
 
+/* Separator between local nav and cross-app links */
+.nav-sep {
+    width: 1px;
+    height: 1.2rem;
+    background: var(--color-border);
+    margin: 0 0.25rem;
+}
+
+/* Cross-app links — dimmer, smaller, distinct from local nav */
+.nav-link.nav-app {
+    font-size: 0.8rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    opacity: 0.45;
+    transition: opacity 0.2s, color 0.2s;
+}
+
+.nav-link.nav-app:hover {
+    opacity: 1;
+    color: var(--color-accent);
+}
+
 .app-main {
     max-width: 1400px;
     margin: 0 auto;
@@ -99,12 +153,13 @@ body {
 }
 
 .app-footer {
-    background: var(--color-card);
+    background: var(--color-header-bg);
     border-top: 1px solid var(--color-border);
-    padding: 1rem 2rem;
+    padding: 0.75rem 2rem;
     text-align: center;
     color: var(--color-text-muted);
-    font-size: 0.875rem;
+    font-size: 0.75rem;
+    letter-spacing: 0.1em;
 }
 
 /* =============================================================================
@@ -598,6 +653,15 @@ body {
     white-space: nowrap;
 }
 
+.device-tag-name {
+    cursor: pointer;
+    transition: text-decoration 0.15s;
+}
+
+.device-tag-name:hover {
+    text-decoration: underline;
+}
+
 .device-tag-remove {
     color: var(--color-danger);
     font-weight: bold;
@@ -780,6 +844,62 @@ body {
     color: var(--color-text-muted);
     font-size: 1.125rem;
     margin: 0 0 2rem;
+}
+
+/* =============================================================================
+   Copy-to-Clipboard & Cursor Utilities
+   ============================================================================= */
+
+/* Copy button shared styles */
+.btn-copy {
+    cursor: copy;
+    min-width: 50px;
+    text-align: center;
+}
+
+/* Flash feedback when copy succeeds */
+.copy-flash {
+    color: var(--color-success) !important;
+    border-color: var(--color-success) !important;
+    transition: color 0.15s, border-color 0.15s;
+}
+
+/* Clickable values that copy on click */
+.copyable {
+    cursor: copy;
+    border-bottom: 1px dashed transparent;
+    transition: border-color 0.2s, color 0.2s;
+}
+
+.copyable:hover {
+    border-bottom-color: var(--color-primary);
+    color: var(--color-primary);
+}
+
+/* Cursor: pointer on all interactive elements */
+.btn,
+.nav-link,
+.back-link,
+.device-item,
+.app-type-card,
+.device-tag-name,
+.device-tag-remove,
+.device-category-header {
+    cursor: pointer;
+}
+
+/* Cursor: not-allowed on disabled buttons */
+.btn:disabled,
+.btn[disabled] {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+/* Debug toolbar flex layout fix */
+.debug-toolbar-actions {
+    display: flex;
+    gap: 0.35rem;
+    align-items: center;
 }
 
 /* =============================================================================

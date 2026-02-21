@@ -85,6 +85,11 @@ $(document).ready(function () {
                     }
                 }
                 $panel.html(html);
+
+                // Bind copy on click for status values
+                $panel.find('.status-value').addClass('copyable').on('click', function () {
+                    copyToClipboard($(this).text().trim(), this);
+                });
             })
             .fail(function () {
                 $('#status-panel').html(
@@ -585,6 +590,9 @@ $(document).ready(function () {
                         <button class="btn-link btn-change-match" data-unique-id="${uid}" title="Change match">edit</button>
                     </div>
                     <div class="device-card-details" style="display:none;">
+                        <div class="detail-toolbar">
+                            <button class="btn btn-secondary btn-small btn-copy btn-copy-details" title="Copy details">Copy</button>
+                        </div>
                         <table class="detail-table">
                             <tr><td>MAC Address</td><td>${mac}</td></tr>
                             <tr><td>IP Address</td><td>${ip}</td></tr>
@@ -631,6 +639,12 @@ $(document).ready(function () {
         // Bind match-change buttons
         $container.find('.btn-change-match').on('click', function () {
             openMatchEditor($(this).data('unique-id'), $(this).closest('.device-card-match'));
+        });
+
+        // Bind copy-details buttons
+        $container.find('.btn-copy-details').on('click', function () {
+            const $table = $(this).closest('.device-card-details').find('.detail-table');
+            copyToClipboard($table[0].innerText, this, 'Copy');
         });
     }
 
@@ -880,6 +894,36 @@ $(document).ready(function () {
         }
 
         return parts.join('') || '<span>No details available</span>';
+    }
+
+    /**
+     * Copy text to clipboard with visual feedback on the button.
+     * @param {string} text - Text to copy
+     * @param {HTMLElement} btn - Button element for feedback
+     * @param {string} [label] - Label to restore (default: btn's current text)
+     */
+    async function copyToClipboard(text, btn, label) {
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+        }
+        if (btn) {
+            const saved = label || btn.textContent;
+            btn.textContent = 'Copied!';
+            btn.classList.add('copy-flash');
+            setTimeout(() => {
+                btn.textContent = saved;
+                btn.classList.remove('copy-flash');
+            }, 1200);
+        }
     }
 
     /**

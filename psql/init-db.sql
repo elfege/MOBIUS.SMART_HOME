@@ -310,6 +310,52 @@ CREATE INDEX IF NOT EXISTS idx_device_matter_map_node
     ON device_matter_map(matter_node_id);
 
 -- =============================================================================
+-- HUBITAT MATTER DEVICES TABLE
+-- =============================================================================
+-- Discovered Matter devices from Hubitat hubs.
+-- Populated by scanning all hubs via /hub/matterDetails/json.
+-- Deduplicated by unique_id (same physical device may appear on multiple hubs).
+
+CREATE TABLE IF NOT EXISTS hubitat_matter_devices (
+    -- Matter unique ID from the device (globally unique across hubs)
+    unique_id VARCHAR(100) PRIMARY KEY,
+
+    -- Device info from Hubitat
+    device_name VARCHAR(255),
+    manufacturer VARCHAR(100),
+    model VARCHAR(100),
+    ip_address VARCHAR(100),
+    is_online BOOLEAN DEFAULT false,
+
+    -- Hubitat hub info (which hub reported this device)
+    hub_ip VARCHAR(50) NOT NULL,
+    hub_name VARCHAR(100),
+    hubitat_node_id INTEGER NOT NULL,
+    hubitat_device_id VARCHAR(50),          -- Hubitat internal device ID (the 'id' field)
+    hubitat_dni VARCHAR(50),                -- Hubitat Device Network ID (e.g., 'M3052')
+
+    -- Matched Maker API device (by name matching)
+    -- This is the device ID from Hubitat's Maker API, NOT the internal Matter node ID.
+    -- Used for dual-command: Maker API device ID → device_matter_map → our Matter node
+    maker_api_device_id VARCHAR(50),        -- NULL until matched
+    maker_api_device_name VARCHAR(255),     -- Name from Maker API (for verification)
+    match_confidence VARCHAR(20) DEFAULT 'none',  -- 'exact', 'fuzzy', 'manual', 'none'
+
+    -- Commissioning state in OUR matter-server
+    our_node_id INTEGER,                    -- NULL until commissioned into our fabric
+    is_commissioned BOOLEAN DEFAULT false,
+
+    -- Tracking
+    discovered_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_hubitat_matter_devices_hub
+    ON hubitat_matter_devices(hub_ip);
+CREATE INDEX IF NOT EXISTS idx_hubitat_matter_devices_commissioned
+    ON hubitat_matter_devices(is_commissioned) WHERE is_commissioned = false;
+
+-- =============================================================================
 -- GRANT PERMISSIONS TO ANONYMOUS ROLE (for PostgREST)
 -- =============================================================================
 
@@ -360,3 +406,4 @@ COMMENT ON TABLE scheduled_jobs IS 'Persistent scheduled tasks (timeouts, health
 COMMENT ON TABLE hub_config IS 'Hubitat hub connection configuration';
 COMMENT ON TABLE location_modes IS 'Cached Hubitat location modes';
 COMMENT ON TABLE device_matter_map IS 'Maps Hubitat devices to Matter protocol nodes for dual-command control';
+COMMENT ON TABLE hubitat_matter_devices IS 'Discovered Matter devices from Hubitat hubs, deduplicated by unique_id';

@@ -3,7 +3,7 @@
         "primary": {
             "hub_ip": "<LAN_IP>",
             "app_number": "268",
-            "token_env": "TOKEN_HUB_4"
+            "token_env": "HUBITAT_API_TOKEN_MAIN"
         }
     },
     "other_hubs": {

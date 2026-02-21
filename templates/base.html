@@ -9,7 +9,7 @@
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 
     <!-- Main CSS -->
-    <link rel="stylesheet" href="{{ url_for('static', path='css/main.css') }}">
+    <link rel="stylesheet" href="/static/css/main.css">
 
     {% block extra_css %}{% endblock %}
 </head>
@@ -35,7 +35,7 @@
     </footer>
 
     <!-- Main JS -->
-    <script type="module" src="{{ url_for('static', path='js/main.js') }}"></script>
+    <script type="module" src="/static/js/main.js"></script>
 
     {% block extra_js %}{% endblock %}
 </body>

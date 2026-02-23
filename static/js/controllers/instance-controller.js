@@ -509,6 +509,12 @@ export class InstanceWizardController {
             keys: ['buttonEventType', 'pauseDuration', 'pauseDurationUnit', 'pauseSwitchAction']
         },
         {
+            id: 'keep',
+            title: 'Always Off / Always On',
+            description: 'Mode restrictions for keep-off and keep-on enforcement',
+            keys: ['keepOffModes', 'keepOnModes']
+        },
+        {
             id: 'advanced',
             title: 'Advanced',
             description: 'Memoization and fail-safe options',
@@ -598,6 +604,90 @@ export class InstanceWizardController {
         container.querySelectorAll('input, select').forEach(el => {
             el.addEventListener('change', (e) => this.handleSettingChange(e));
         });
+
+        // Populate mode checkboxes for array-type settings
+        this._populateModeCheckboxes(container);
+    }
+
+    /**
+     * Fetch Hubitat modes and populate dropdown-checkbox selectors.
+     * @param {HTMLElement} container - Settings form container
+     */
+    async _populateModeCheckboxes(container) {
+        const dropdowns = container.querySelectorAll('.mode-dropdown');
+        if (dropdowns.length === 0) return;
+
+        let modes = [];
+        try {
+            const resp = await $.get('/api/modes');
+            modes = resp || [];
+        } catch (e) {
+            console.error('Failed to fetch modes:', e);
+            dropdowns.forEach(dd => {
+                dd.querySelector('.mode-dropdown-menu').innerHTML =
+                    '<span class="error-text">Failed to load modes</span>';
+            });
+            return;
+        }
+
+        dropdowns.forEach(dd => {
+            const key = dd.dataset.modeKey;
+            const selected = this.settings[key] || [];
+            const menu = dd.querySelector('.mode-dropdown-menu');
+            const toggle = dd.querySelector('.mode-dropdown-toggle');
+            const labelSpan = dd.querySelector('.mode-dropdown-label');
+
+            const checkboxes = modes.map(mode => {
+                const name = mode.name || mode;
+                const checked = selected.includes(name) ? 'checked' : '';
+                const badge = mode.active ? ' <span class="mode-active-badge">(current)</span>' : '';
+                return `
+                    <label class="mode-dropdown-item">
+                        <input type="checkbox" value="${utils.escapeHtml(name)}" ${checked}>
+                        ${utils.escapeHtml(name)}${badge}
+                    </label>
+                `;
+            }).join('');
+
+            menu.innerHTML = checkboxes;
+
+            // Update label text showing selection count
+            const updateLabel = () => {
+                const checked = Array.from(menu.querySelectorAll('input:checked'));
+                if (checked.length === 0) {
+                    labelSpan.textContent = 'All modes';
+                } else {
+                    labelSpan.textContent = checked.map(c => c.value).join(', ');
+                }
+                this.settings[key] = checked.map(c => c.value);
+            };
+            updateLabel();
+
+            // Toggle dropdown open/close
+            toggle.addEventListener('click', (e) => {
+                e.preventDefault();
+                const isOpen = menu.style.display !== 'none';
+                // Close all other dropdowns first
+                container.querySelectorAll('.mode-dropdown-menu').forEach(m => {
+                    m.style.display = 'none';
+                });
+                menu.style.display = isOpen ? 'none' : 'block';
+            });
+
+            // Checkbox change updates settings
+            menu.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                cb.addEventListener('change', updateLabel);
+            });
+        });
+
+        // Close dropdowns on click outside
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.mode-dropdown')) {
+                container.querySelectorAll('.mode-dropdown-menu').forEach(m => {
+                    m.style.display = 'none';
+                });
+            }
+        });
     }
 
     /**
@@ -635,6 +725,20 @@ export class InstanceWizardController {
                        value="${defaultVal || ''}"
                        ${prop.minimum !== undefined ? `min="${prop.minimum}"` : ''}
                        ${prop.maximum !== undefined ? `max="${prop.maximum}"` : ''}>
+            `;
+        } else if (prop.type === 'array' && prop.items && prop.items.type === 'string') {
+            // Dropdown with checkboxes for multi-select
+            input = `
+                <label>${utils.escapeHtml(title)}</label>
+                <div class="mode-dropdown" data-mode-key="${key}">
+                    <button type="button" class="mode-dropdown-toggle">
+                        <span class="mode-dropdown-label">All modes</span>
+                        <span class="mode-dropdown-arrow">&#9662;</span>
+                    </button>
+                    <div class="mode-dropdown-menu" style="display:none;">
+                        <span class="help-text">Loading modes...</span>
+                    </div>
+                </div>
             `;
         } else {
             input = `

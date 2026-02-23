@@ -17,6 +17,7 @@ The cache serves two purposes:
 
 import os
 import logging
+import traceback
 import requests
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
@@ -123,7 +124,7 @@ class DeviceCache:
                     self._memory_cache[device_id] = device
                     return device
         except Exception as e:
-            self.logger.error(f"Failed to get device from cache: {e}")
+            self.logger.error(f"Failed to get device from cache: {e}", exc_info=True)
 
         return None
 
@@ -156,7 +157,7 @@ class DeviceCache:
             if response.status_code == 200:
                 return response.json()
         except Exception as e:
-            self.logger.error(f"Failed to filter devices by capability: {e}")
+            self.logger.error(f"Failed to filter devices by capability: {e}", exc_info=True)
 
         return []
 
@@ -219,7 +220,7 @@ class DeviceCache:
                 return False
 
         except Exception as e:
-            self.logger.error(f"Failed to update device cache: {e}")
+            self.logger.error(f"Failed to update device cache: {e}", exc_info=True)
             return False
 
     def update_device(self, device_id: str, device_data: Dict[str, Any]) -> bool:
@@ -260,7 +261,7 @@ class DeviceCache:
             )
             return response.status_code in (200, 201)
         except Exception as e:
-            self.logger.error(f"Failed to update device in cache: {e}")
+            self.logger.error(f"Failed to update device in cache: {e}", exc_info=True)
             return False
 
     def update_device_attribute(
@@ -314,7 +315,7 @@ class DeviceCache:
                 )
                 return response.status_code in (200, 204)
         except Exception as e:
-            self.logger.error(f"Failed to update device attribute: {e}")
+            self.logger.error(f"Failed to update device attribute: {e}", exc_info=True)
 
         return False
 
@@ -353,7 +354,7 @@ class DeviceCache:
             )
             return response.status_code in (200, 204)
         except Exception as e:
-            self.logger.error(f"Failed to clear device cache: {e}")
+            self.logger.error(f"Failed to clear device cache: {e}", exc_info=True)
             return False
 
     # =========================================================================
@@ -378,7 +379,7 @@ class DeviceCache:
             if response.status_code == 200:
                 return response.json()
         except Exception as e:
-            self.logger.error(f"Failed to load devices from database: {e}")
+            self.logger.error(f"Failed to load devices from database: {e}", exc_info=True)
         return []
 
     def _extract_attributes(self, device_data: Dict[str, Any]) -> Dict[str, Any]:

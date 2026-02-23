@@ -24,6 +24,7 @@ Endpoints reference:
 
 import os
 import logging
+import traceback
 import requests
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
@@ -133,17 +134,21 @@ class HubitatClient:
 
             except requests.exceptions.Timeout:
                 self.logger.warning(
-                    f"Request timeout (attempt {attempt + 1}/{retries + 1}): {endpoint}"
+                    f"Request timeout (attempt {attempt + 1}/{retries + 1}): {endpoint}",
+                    exc_info=True
                 )
             except requests.exceptions.ConnectionError as e:
                 self.logger.warning(
-                    f"Connection error (attempt {attempt + 1}/{retries + 1}): {e}"
+                    f"Connection error (attempt {attempt + 1}/{retries + 1}): {e}",
+                    exc_info=True
                 )
             except requests.exceptions.HTTPError as e:
-                self.logger.error(f"HTTP error: {e}")
+                self.logger.error(f"HTTP error: {e}", exc_info=True)
                 return None
             except requests.exceptions.JSONDecodeError:
-                self.logger.error(f"Invalid JSON response from: {endpoint}")
+                self.logger.error(
+                    f"Invalid JSON response from: {endpoint}", exc_info=True
+                )
                 return None
 
         self.logger.error(f"All retry attempts failed for: {endpoint}")
@@ -321,15 +326,13 @@ class HubitatClient:
             for arg in args:
                 endpoint += f"/{arg}"
 
-        self.logger.info(f"Sending command: device={device_id}, cmd={command}, args={args}")
+        self.logger.debug(f"API → {device_id}/{command}" + (f"/{args}" if args else ""))
 
         result = self._make_request(endpoint)
 
         if result is None:
-            self.logger.error(f"Command failed: {device_id}/{command}")
+            self.logger.error(f"API FAIL → {device_id}/{command}")
             return False
-
-        self.logger.debug(f"Command response: {result}")
         return True
 
     def turn_on(self, device_id: str) -> bool:
@@ -446,7 +449,8 @@ class HubitatClient:
                 timeout=5
             )
             return response.status_code == 200
-        except Exception:
+        except Exception as e:
+            self.logger.error(f"Hub connectivity check failed: {e}", exc_info=True)
             return False
 
     # =========================================================================

@@ -1,5 +1,5 @@
 # =============================================================================
-# 0_SMART_HOME Docker Compose Configuration
+# 0_MOBIUS.SMART_HOME Docker Compose Configuration
 # Multi-service orchestration for Hubitat automation system
 #
 # ALL configuration comes from environment variables exported by start.sh
@@ -9,8 +9,8 @@
 services:
   # ---------------------------------------------------------------------------
   # Webhook Dispatcher - Central hub for Hubitat events
-  # Receives from Hubitat, forwards to all apps (0_TILES, 0_SMART_HOME, etc.)
-  # container_name is IDENTICAL to 0_TILES — Docker runs only one.
+  # Receives from Hubitat, forwards to all apps (0_MOBIUS.TILES, 0_MOBIUS.SMART_HOME, etc.)
+  # container_name is IDENTICAL to 0_MOBIUS.TILES — Docker runs only one.
   # start.sh skips this if already running from another project.
   # ---------------------------------------------------------------------------
   webhook-dispatcher:
@@ -23,7 +23,7 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       WEBHOOK_PORT: "5050"
-      WEBHOOK_TARGETS: ${WEBHOOK_TARGETS:-http://smarthome-app:${APP_INTERNAL_PORT:-5000}/api/webhook/event,http://host.docker.internal:80/api/webhook/event}
+      WEBHOOK_TARGETS: ${WEBHOOK_TARGETS:-http://smarthome-app:${APP_INTERNAL_PORT:-5000}/api/webhook/event,http://tiles-app:80/api/webhook/event}
     restart: unless-stopped
     networks:
       - smarthome-net
@@ -44,9 +44,8 @@ services:
       dockerfile: Dockerfile
     container_name: smarthome-app
     # Dev override: enable hot reload (Dockerfile CMD is production-clean)
-    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "5000",
-              "--workers", "1", "--timeout-keep-alive", "120",
-              "--reload", "--reload-dir", "/app"]
+    # Output piped through tee so nginx can serve startup.log on the reloading page
+    command: ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port 5000 --workers 1 --timeout-keep-alive 120 --reload --reload-dir /app 2>&1 | tee /app/logs/startup.log"]
     ports:
       - "${APP_EXTERNAL_PORT:-5001}:${APP_INTERNAL_PORT:-5000}"
     environment:
@@ -82,6 +81,16 @@ services:
 
       # Server configuration
       SERVER_IP: ${SERVER_IP:-<LAN_IP>}
+
+      # Device Commander configuration (defensive command execution)
+      DEVICE_CMD_TIMEOUT: "${DEVICE_CMD_TIMEOUT:-30}"
+      DEVICE_CMD_VERIFY_RETRIES: "${DEVICE_CMD_VERIFY_RETRIES:-3}"
+      DEVICE_CMD_VERIFY_DELAY: "${DEVICE_CMD_VERIFY_DELAY:-1.0}"
+      DEVICE_CMD_OPERATION_RETRIES: "${DEVICE_CMD_OPERATION_RETRIES:-2}"
+      DEVICE_CMD_OPERATION_DELAY: "${DEVICE_CMD_OPERATION_DELAY:-2.0}"
+
+      # Device cache refresh (background verification against live state)
+      DEVICE_CACHE_REFRESH_INTERVAL: "${DEVICE_CACHE_REFRESH_INTERVAL:-120}"
     volumes:
       # Mount source for development (hot reload via uvicorn --reload)
       - ./app.py:/app/app.py
@@ -91,6 +100,7 @@ services:
       - ./config:/app/config
       - ./templates:/app/templates
       - ./static:/app/static
+      - app_logs:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -165,6 +175,7 @@ services:
       - ./nginx/certs:/etc/nginx/certs:ro
       - ./nginx/html:/etc/nginx/html:ro
       - ./static:/usr/share/nginx/html/static:ro
+      - app_logs:/var/log/app:ro
     depends_on:
       - smart-home
     restart: unless-stopped
@@ -187,7 +198,7 @@ services:
       - matter_data:/data/
       - /run/dbus:/run/dbus
     environment:
-      MATTER_SERVER__INSTANCE_NAME: "0_SMART_HOME"
+      MATTER_SERVER__INSTANCE_NAME: "0_MOBIUS.SMART_HOME"
       MATTER_SERVER__PORT: "${MATTER_PORT:-5580}"
       MATTER_SERVER__VENDORID: "65521"
       MATTER_SERVER__FABRICID: "1"
@@ -204,6 +215,9 @@ networks:
 # =============================================================================
 volumes:
   postgres_data:
+    external: true
+    name: 0_smart_home_postgres_data
+  app_logs:
     driver: local
   matter_data:
     driver: local

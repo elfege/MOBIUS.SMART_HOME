@@ -1,5 +1,5 @@
 """
-0_SMART_HOME FastAPI Application
+0_MOBIUS.SMART_HOME FastAPI Application
 
 Main entry point for the smart home automation system.
 Provides REST API for instance management, device access, and webhook handling.
@@ -8,6 +8,7 @@ Serves Jinja2 templates for the web UI.
 
 import os
 import logging
+import traceback
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -91,17 +92,68 @@ def initialize_services():
 # ---------------------------------------------------------------------------
 
 
+def run_db_migrations():
+    """
+    Run lightweight ALTER TABLE migrations on startup via psycopg2.
+
+    These are idempotent (IF NOT EXISTS) so safe to run every boot.
+    Needed because init-db.sql only runs on first DB creation.
+    """
+    import psycopg2
+
+    db_host = os.environ.get('POSTGRES_HOST', 'postgres')
+    db_port = os.environ.get('POSTGRES_PORT', '5432')
+    db_name = os.environ.get('POSTGRES_DB', 'smarthome')
+    db_user = os.environ.get('POSTGRES_USER', 'smarthome_api')
+    db_pass = os.environ.get('POSTGRES_PASSWORD', '')
+
+    migrations = [
+        # Commission retry tracking columns (added 2026-02-22)
+        "ALTER TABLE hubitat_matter_devices "
+        "ADD COLUMN IF NOT EXISTS commission_attempts INTEGER DEFAULT 0",
+        "ALTER TABLE hubitat_matter_devices "
+        "ADD COLUMN IF NOT EXISTS last_commission_attempt TIMESTAMPTZ",
+        "ALTER TABLE hubitat_matter_devices "
+        "ADD COLUMN IF NOT EXISTS last_commission_error TEXT",
+    ]
+
+    try:
+        conn = psycopg2.connect(
+            host=db_host, port=db_port,
+            dbname=db_name, user=db_user, password=db_pass,
+            connect_timeout=5
+        )
+        conn.autocommit = True
+        cur = conn.cursor()
+        for sql in migrations:
+            cur.execute(sql)
+        cur.close()
+        conn.close()
+        logger.info("DB migrations applied successfully")
+    except Exception as e:
+        logger.warning(f"DB migration skipped: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle: initialize services on startup, cleanup on shutdown."""
     initialize_services()
 
+    # Apply any pending schema migrations
+    run_db_migrations()
+
     # Start Matter discovery background service (scans hubs every 5 min)
     from services.matter_discovery import start_matter_discovery, stop_matter_discovery
     start_matter_discovery(scan_interval=300)
 
+    # Start device cache refresh (Matter-first, Maker API fallback)
+    from services.device_cache_refresh import start_cache_refresh, stop_cache_refresh
+    refresh_interval = int(os.environ.get('DEVICE_CACHE_REFRESH_INTERVAL', '120'))
+    start_cache_refresh(refresh_interval=refresh_interval)
+
     yield
 
+    stop_cache_refresh()
     stop_matter_discovery()
     logger.info("Shutting down...")
 
@@ -403,31 +455,51 @@ async def get_device(device_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get device: {e}")
+        logger.error(f"Failed to get device: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/devices/{device_id}/command", tags=["devices"])
 async def send_device_command(device_id: str, body: DeviceCommandRequest):
     """
-    Send command to a device.
+    Send command to a device via the DeviceCommander.
+
+    Uses threaded execution with nested retries and state verification.
 
     Args:
         device_id: Hubitat device ID
         body: Command name and optional arguments
     """
-    from services.hubitat_client import get_default_client
+    from services.device_commander import get_device_commander
 
     try:
-        client = get_default_client()
-        if client.send_command(device_id, body.command, body.args):
-            return {"message": "Command sent"}
-        raise HTTPException(status_code=500, detail="Command failed")
+        commander = get_device_commander()
+        result = await commander.send_command(
+            device_id=device_id,
+            command=body.command,
+            args=body.args,
+            verify=True,
+        )
+
+        if result.success:
+            return {
+                "message": "Command sent",
+                "verified": result.verified,
+                "status": result.status.value,
+                "actual_state": result.actual_state,
+                "expected_state": result.expected_state,
+                "retries_used": result.retries_used,
+                "elapsed_ms": round(result.elapsed_ms, 1),
+            }
+        raise HTTPException(
+            status_code=500,
+            detail=f"Command failed: {result.error}"
+        )
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to send command: {e}")
+        logger.error(f"Failed to send command: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -446,13 +518,17 @@ async def handle_event_webhook(request: Request):
     """
     from services.webhook_router import get_webhook_router
 
-    payload = await request.json()
-    logger.debug(f"Webhook received: {payload}")
+    try:
+        payload = await request.json()
+        logger.debug(f"Webhook received: {payload}")
 
-    router = get_webhook_router()
-    routed_count = router.route_event(payload)
+        router = get_webhook_router()
+        routed_count = router.route_event(payload)
 
-    return {"routed_to": routed_count}
+        return {"routed_to": routed_count}
+    except Exception as e:
+        logger.error(f"Webhook event processing failed: {e}", exc_info=True)
+        return {"routed_to": 0, "error": str(e)}
 
 
 @app.post("/api/webhook/mode", tags=["webhooks"])
@@ -460,13 +536,17 @@ async def handle_mode_webhook(request: Request):
     """Handle mode change webhook from Hubitat."""
     from services.webhook_router import get_webhook_router
 
-    payload = await request.json()
-    logger.info(f"Mode change webhook: {payload}")
+    try:
+        payload = await request.json()
+        logger.info(f"Mode change webhook: {payload}")
 
-    router = get_webhook_router()
-    notified = router.route_mode_change(payload)
+        router = get_webhook_router()
+        notified = router.route_mode_change(payload)
 
-    return {"notified": notified}
+        return {"notified": notified}
+    except Exception as e:
+        logger.error(f"Mode webhook processing failed: {e}", exc_info=True)
+        return {"notified": 0, "error": str(e)}
 
 
 # =============================================================================
@@ -1246,13 +1326,27 @@ async def run_all_test_scenarios(instance_id: int):
     await runner.initialize()
 
     async def run_all():
-        """Run all scenarios sequentially."""
-        for scenario in runner.get_scenarios():
+        """Run all scenarios with device state save/restore."""
+        try:
+            # Snapshot device states before any tests run
+            await runner.save_device_states()
+
+            # Run all scenarios sequentially
+            for scenario in runner.get_scenarios():
+                try:
+                    await runner.run_scenario(scenario["id"])
+                except Exception as e:
+                    logger.error(
+                        f"E2E scenario '{scenario['id']}' failed: {e}",
+                        exc_info=True
+                    )
+        finally:
+            # Restore devices to their original states regardless of test outcome
             try:
-                await runner.run_scenario(scenario["id"])
+                await runner.restore_device_states()
             except Exception as e:
                 logger.error(
-                    f"E2E scenario '{scenario['id']}' failed: {e}",
+                    f"E2E device state restore failed: {e}",
                     exc_info=True
                 )
 

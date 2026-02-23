@@ -21,10 +21,16 @@ Key behaviors:
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 import logging
+import traceback
 
 from apps.base_app import BaseApp
 from models.event import DeviceEvent
+from models.command import CommandResult
 from services.hubitat_client import HubitatClient
+
+# ANSI color for device names in logs
+_C = "\033[96m"   # bright cyan
+_R = "\033[0m"    # reset
 
 
 class AdvancedMotionLightingApp(BaseApp):
@@ -80,14 +86,56 @@ class AdvancedMotionLightingApp(BaseApp):
         self._functional_sensors: Dict[str, bool] = {}
 
     def _init_memoization_keys(self) -> None:
-        """Ensure memoization dict has required keys for this app type."""
+        """
+        Ensure memoization dict has required keys for this app type.
+
+        Seeds keep_off/keep_on devices with their expected state and
+        source='app' so enforcement knows to enforce after a reset.
+        Uses setdefault — won't overwrite existing entries.
+        """
         self._memoization.setdefault('switch_state', {})
         self._memoization.setdefault('dim_level', {})
+        # Seed keep devices with expected states
+        switch_state = self._memoization['switch_state']
+        for device_id in self.get_devices('keep_off_switches'):
+            name = self._resolve_device_name(device_id)
+            if name and name not in switch_state:
+                switch_state[name] = {'state': 'off', 'source': 'app'}
+        for device_id in self.get_devices('keep_on_switches'):
+            name = self._resolve_device_name(device_id)
+            if name and name not in switch_state:
+                switch_state[name] = {'state': 'on', 'source': 'app'}
 
     def _reset_memoization(self) -> None:
         """Reset memoization and reinitialize required keys."""
         super()._reset_memoization()
         self._init_memoization_keys()
+
+    def resume(self) -> None:
+        """
+        Resume from paused state.
+
+        Overrides base class to ensure keep-switch enforcement runs
+        immediately. Calls master() which:
+        1. Evaluates motion → _control_lights (excludes keep devices)
+        2. _enforce_keep_switches() — forces keep_off OFF, keep_on ON
+        3. _schedule_next_run()
+        """
+        self._is_paused = False
+        self.logger.info("Resumed")
+
+        # Cancel auto-resume if manually resumed
+        if self._runtime.auto_resume_job_id:
+            from services.scheduler_service import get_scheduler
+            scheduler = get_scheduler()
+            scheduler.cancel(self._runtime.auto_resume_job_id)
+            self._runtime.auto_resume_job_id = None
+
+        # Reset memoization (seeds keep devices with source='app')
+        self._reset_memoization()
+
+        # Evaluate motion state + enforce keep switches immediately
+        self.master()
 
     # =========================================================================
     # Lifecycle
@@ -116,8 +164,13 @@ class AdvancedMotionLightingApp(BaseApp):
         )
         self._runtime.health_check_job_id = health_job_id
 
-        # Initial state check
-        self.master()
+        # Groovy parity: initialize() does NOT call master().
+        # Calling master() on startup/save turns off all lights because
+        # no motion event has arrived yet → _is_motion_active() = False
+        # → _control_lights('off') on every switch. Instead, only enforce
+        # keep-on/keep-off rules and schedule the periodic run.
+        self._enforce_keep_switches()
+        self._schedule_next_run()
 
     # =========================================================================
     # Event Handling
@@ -125,25 +178,32 @@ class AdvancedMotionLightingApp(BaseApp):
 
     def on_event(self, event: DeviceEvent) -> None:
         """Handle device events."""
-        # Button events ALWAYS processed — they're the unpause mechanism
-        if event.event_type in ('pushed', 'held', 'doubleTapped'):
-            self._handle_button(event)
-            return
+        try:
+            # Button events ALWAYS processed — they're the unpause mechanism
+            if event.event_type in ('pushed', 'held', 'doubleTapped'):
+                self._handle_button(event)
+                return
 
-        if self.is_paused:
-            self.logger.debug(f"Paused, ignoring event: {event}")
-            return
+            if self.is_paused:
+                self.logger.debug(f"Paused, ignoring event: {event}")
+                return
 
-        self.update_last_activity()
+            self.update_last_activity()
 
-        if event.event_type == 'motion':
-            self._handle_motion(event)
-        elif event.event_type == 'switch':
-            self._handle_switch(event)
-        elif event.event_type == 'illuminance':
-            self._handle_illuminance(event)
-        elif event.event_type == 'contact':
-            self._handle_contact(event)
+            if event.event_type == 'motion':
+                self._handle_motion(event)
+            elif event.event_type == 'switch':
+                self._handle_switch(event)
+            elif event.event_type == 'illuminance':
+                self._handle_illuminance(event)
+            elif event.event_type == 'contact':
+                self._handle_contact(event)
+        except Exception as e:
+            self.logger.error(
+                f"on_event() failed for instance {self.label}, "
+                f"event={event}: {e}",
+                exc_info=True
+            )
 
     def _handle_motion(self, event: DeviceEvent) -> None:
         """Handle motion sensor event."""
@@ -151,11 +211,11 @@ class AdvancedMotionLightingApp(BaseApp):
         self._functional_sensors[event.device_id] = True
 
         if event.is_motion_active:
-            self.logger.debug(f"Motion active: {event.device_name}")
+            self.logger.debug(f"Motion active: {_C}{event.device_name}{_R}")
             self._runtime.last_motion_time = datetime.now()
             self.master(motion_active_event=True)
         else:
-            self.logger.debug(f"Motion inactive: {event.device_name}")
+            self.logger.debug(f"Motion inactive: {_C}{event.device_name}{_R}")
             # Schedule check for timeout
             timeout = self._get_timeout_seconds()
             self.schedule_timeout(timeout)
@@ -164,13 +224,41 @@ class AdvancedMotionLightingApp(BaseApp):
         """
         Handle switch event.
 
-        NOTE: Memoization is NOT updated from external switch events.
-        The Groovy pattern only records memo when the APP sends commands.
-        User overrides are detected at command time by comparing memo
-        vs desired action: if memo == action, it means "I already did this;
-        if the device is now different, user overrode me — skip."
+        For keep_off/keep_on devices: only tag as source='manual' when the
+        event CONTRADICTS the expected state. This distinguishes a genuine
+        user override from an echo of our own enforcement command.
+
+        - keep_off + event='on' → override (expected off, user turned on)
+        - keep_off + event='off' → echo of our command → ignore
+        - keep_on  + event='off' → override (expected on, user turned off)
+        - keep_on  + event='on'  → echo of our command → ignore
+
+        For regular switches: no memo update.
         """
-        self.logger.debug(f"Switch event: {event.device_name} -> {event.value}")
+        self.logger.debug(f"Switch: {_C}{event.device_name}{_R} → {event.value}")
+
+        keep_off_ids = set(self.get_devices('keep_off_switches'))
+        keep_on_ids = set(self.get_devices('keep_on_switches'))
+
+        # keep_off device received 'on' → contradicts expected 'off' → user override
+        is_keep_off_override = (
+            event.device_id in keep_off_ids and event.value == 'on'
+        )
+        # keep_on device received 'off' → contradicts expected 'on' → user override
+        is_keep_on_override = (
+            event.device_id in keep_on_ids and event.value == 'off'
+        )
+
+        if is_keep_off_override or is_keep_on_override:
+            self._memoization.setdefault('switch_state', {})
+            self._memoization['switch_state'][event.device_name] = {
+                'state': event.value, 'source': 'manual'
+            }
+            self._save_memoization()
+            self.logger.info(
+                f"Override: {_C}{event.device_name}{_R}"
+                f" → {event.value} (source=manual)"
+            )
 
     def _handle_illuminance(self, event: DeviceEvent) -> None:
         """Handle illuminance change."""
@@ -182,10 +270,18 @@ class AdvancedMotionLightingApp(BaseApp):
         """
         Handle button event (pause/resume toggle).
 
-        Triggers on pushed, held, or doubleTapped based on buttonEventType setting.
-        Also controls pause switches if configured.
+        Only responds to the configured buttonEventType (default: 'held').
+        Ignores other button event types to prevent double-toggle when
+        Hubitat sends both 'pushed' and 'held' on a long press.
         """
-        self.logger.info(f"Button {event.event_type}: {event.device_name}")
+        expected_type = self.get_setting('buttonEventType', 'held')
+        if event.event_type != expected_type:
+            self.logger.debug(
+                f"Button {event.event_type}: {_C}{event.device_name}{_R}"
+                f" — ignoring (configured for {expected_type})"
+            )
+            return
+        self.logger.info(f"Button {event.event_type}: {_C}{event.device_name}{_R}")
 
         pause_duration = self.get_setting('pauseDuration', 60)
         if self.get_setting('pauseDurationUnit', 'Minutes') == 'Hours':
@@ -220,8 +316,12 @@ class AdvancedMotionLightingApp(BaseApp):
         Control pause switches when pausing/resuming.
 
         These switches get actuated on pause/resume events. They can overlap
-        with motion-controlled switches. Each device is handled independently
-        so one failure doesn't block the rest.
+        with motion-controlled switches and keep_off/keep_on switches.
+        Each device is handled independently so one failure doesn't block
+        the rest.
+
+        Updates memo with source='pause' for any keep devices so enforcement
+        knows this was an app-initiated action (not a user override).
 
         Args:
             resuming: True if resuming (un-pausing), False if pausing
@@ -231,27 +331,39 @@ class AdvancedMotionLightingApp(BaseApp):
             return
 
         action = self.get_setting('pauseSwitchAction', 'toggle')
+        # Build keep sets for memo tagging
+        keep_off_ids = set(self.get_devices('keep_off_switches'))
+        keep_on_ids = set(self.get_devices('keep_on_switches'))
 
         for device_id in switch_ids:
             try:
+                # On resume: skip keep_off (must stay off, enforcement handles)
+                # On pause:  skip keep_on (must stay on, enforcement handles)
+                if resuming and device_id in keep_off_ids:
+                    continue
+                if not resuming and device_id in keep_on_ids:
+                    continue
+
+                cmd = None
                 if action == 'toggle':
-                    # Toggle: read current state and invert
                     device = self.get_device_state(device_id)
                     if device:
                         current = device.get('attributes', {}).get('switch', 'off')
                         cmd = 'off' if current == 'on' else 'on'
                     else:
-                        # Can't read state — default: on when pausing, off when resuming
                         cmd = 'off' if resuming else 'on'
-                    self.send_command(device_id, cmd)
                 elif action == 'on':
-                    # "on" means: turn ON when pausing, OFF when resuming
-                    self.send_command(device_id, 'off' if resuming else 'on')
+                    cmd = 'off' if resuming else 'on'
                 elif action == 'off':
-                    # "off" means: turn OFF when pausing, ON when resuming
-                    self.send_command(device_id, 'on' if resuming else 'off')
+                    cmd = 'on' if resuming else 'off'
+
+                if cmd:
+                    self.send_command(device_id, cmd, verify=False)
             except Exception as e:
-                self.logger.error(f"Failed to control pause switch {device_id}: {e}")
+                self.logger.error(
+                    f"Failed to control pause switch {device_id}: {e}",
+                    exc_info=True
+                )
 
     def _handle_contact(self, event: DeviceEvent) -> None:
         """Handle contact sensor (door open → lights on)."""
@@ -274,28 +386,44 @@ class AdvancedMotionLightingApp(BaseApp):
         - Mode changes
         - Resume from pause
         """
-        if self.is_paused:
-            return
+        try:
+            if self.is_paused:
+                return
 
-        # Check exceptions (restricted mode, time, illuminance)
-        if self._in_exception_state():
-            self.logger.debug("In exception state, scheduling next check")
+            # Check exceptions (restricted mode, time, illuminance)
+            if self._in_exception_state():
+                self.logger.debug("In exception state, scheduling next check")
+                self._schedule_next_run()
+                return
+
+            # Decide action
+            if motion_active_event or self._is_motion_active():
+                self._control_lights('on')
+            else:
+                self._control_lights('off')
+
+            # Enforce keep-on/keep-off AFTER normal motion-based control
+            self._enforce_keep_switches()
+
             self._schedule_next_run()
-            return
-
-        # Decide action
-        if motion_active_event or self._is_motion_active():
-            self._control_lights('on')
-        else:
-            self._control_lights('off')
-
-        self._schedule_next_run()
+        except Exception as e:
+            self.logger.error(
+                f"master() failed for instance {self.label}: {e}",
+                exc_info=True
+            )
 
     def _is_motion_active(self) -> bool:
         """
         Check if any motion sensor is currently active.
 
-        Also checks event history for recent motion within timeout period.
+        Groovy-parity three-tier check (mirrors Active() in Groovy source):
+        1. In-memory timestamp: fastest, covers normal runtime operation
+        2. Live device state: query Hubitat currentValue('motion') per sensor
+        3. Event history: query eventsSince(timeout) from Hubitat API
+
+        Tiers 2 and 3 are essential on startup/reload when the in-memory
+        timestamp is None, so the app doesn't falsely assume "no motion"
+        and turn off all lights.
         """
         # Check functional sensors
         functional = [
@@ -304,19 +432,68 @@ class AdvancedMotionLightingApp(BaseApp):
         ]
 
         if not functional:
-            # No functional sensors - use fail-safe setting
+            # No functional sensors — use fail-safe setting
             consider_active = self.get_setting('considerActiveWhenFail', False)
             if consider_active:
                 self.logger.warning("No functional sensors, assuming active")
                 return True
             return False
 
-        # Check if motion was recent (within timeout)
         timeout_seconds = self._get_timeout_seconds()
+
+        # --- Tier 1: in-memory timestamp (fast path, normal runtime) ---
         if self._runtime.last_motion_time:
             age = (datetime.now() - self._runtime.last_motion_time).total_seconds()
             if age < timeout_seconds:
                 return True
+
+        # --- Tier 2: live device state from Hubitat (Groovy: currentValue) ---
+        # Queries each functional sensor's current attributes via the API.
+        try:
+            for sensor_id in functional:
+                device = self.hubitat.get_device(sensor_id)
+                if device and 'attributes' in device:
+                    for attr in device['attributes']:
+                        if attr.get('name') == 'motion' and attr.get('currentValue') == 'active':
+                            self.logger.debug(
+                                f"Sensor {sensor_id} currently reports motion=active (live)"
+                            )
+                            return True
+        except Exception as e:
+            self.logger.warning(f"Failed to check live device state: {e}")
+
+        # --- Tier 3: event history from Hubitat (Groovy: eventsSince) ---
+        # Queries recent events within the timeout window. Catches the case
+        # where motion went active→inactive recently but is still within
+        # the configured timeout period.
+        try:
+            for sensor_id in functional:
+                events = self.hubitat.get_device_events(sensor_id, max_events=20)
+                for event in events:
+                    if event.get('name') == 'motion' and event.get('value') == 'active':
+                        # Parse the event date and check if within timeout
+                        event_date_str = event.get('date', '')
+                        if event_date_str:
+                            try:
+                                # Hubitat event dates: "2026-02-23T04:15:30+0000"
+                                event_time = datetime.fromisoformat(
+                                    event_date_str.replace('+0000', '+00:00')
+                                )
+                                # Compare in UTC-aware or naive depending on what we get
+                                now = datetime.now(event_time.tzinfo) if event_time.tzinfo else datetime.now()
+                                age = (now - event_time).total_seconds()
+                                if age < timeout_seconds:
+                                    self.logger.debug(
+                                        f"Sensor {sensor_id} had motion=active "
+                                        f"{age:.0f}s ago (within {timeout_seconds}s timeout)"
+                                    )
+                                    return True
+                            except (ValueError, TypeError) as parse_err:
+                                self.logger.debug(
+                                    f"Could not parse event date '{event_date_str}': {parse_err}"
+                                )
+        except Exception as e:
+            self.logger.warning(f"Failed to check event history: {e}")
 
         return False
 
@@ -351,9 +528,15 @@ class AdvancedMotionLightingApp(BaseApp):
             action: 'on' or 'off'
         """
         switch_ids = self.get_devices('switches')
+        # Exclude devices managed by keep-off/keep-on enforcement
+        keep_off_ids = set(self.get_devices('keep_off_switches'))
+        keep_on_ids = set(self.get_devices('keep_on_switches'))
         memo_dirty = False
 
         for device_id in switch_ids:
+            # Skip devices handled by _enforce_keep_switches()
+            if device_id in keep_off_ids or device_id in keep_on_ids:
+                continue  # Handled by _enforce_keep_switches()
             device = self.get_device_state(device_id)
             device_name = device.get('device_label', device.get('device_name', device_id)) if device else device_id
 
@@ -402,42 +585,68 @@ class AdvancedMotionLightingApp(BaseApp):
         Checks actual device state first. If device is already on,
         skips command AND does not update memo (preserves override detection).
         Only sends setLevel/setColorTemperature if device has the capability.
-        Only updates memo if the command succeeds (send_command returns True).
+        Only updates memo if the command is VERIFIED (device state confirmed).
 
         Returns:
             True if memo was updated (caller should batch-save), False otherwise.
         """
-        # Check actual device state — if already on, skip to preserve memo
-        if device:
-            actual_state = device.get('attributes', {}).get('switch')
-            if actual_state == 'on':
-                self.logger.debug(f"Skip ON for {device_name}: already on")
+        try:
+            # Check cached device state — kept fresh by DeviceCacheRefreshService
+            # (background thread polls Matter/API every ~2 min, webhooks update
+            # in real-time, commander writes back after verified commands).
+            if device:
+                actual_state = device.get('attributes', {}).get('switch')
+                if actual_state == 'on':
+                    self.logger.debug(f"Skip ON {_C}{device_name}{_R}: already on")
+                    return False
+
+            self.logger.info(f"Turning on: {_C}{device_name}{_R}")
+
+            use_dim = self.get_setting('useDim', False)
+            has_level = self._device_has_capability(device, 'SwitchLevel')
+
+            if use_dim and has_level:
+                level = self._get_current_dim_level()
+                result = self.send_command(device_id, 'setLevel', [level])
+            else:
+                result = self.send_command(device_id, 'on')
+
+            if not result.success:
+                self.logger.warning(
+                    f"Command failed for {device_name}: {result.error}",
+                    exc_info=True
+                )
                 return False
 
-        self.logger.info(f"Turning on: {device_name}")
+            if not result.verified:
+                self.logger.warning(
+                    f"Command sent but NOT verified for {device_name}: "
+                    f"expected={result.expected_state}, "
+                    f"actual={result.actual_state}, "
+                    f"retries={result.retries_used}, "
+                    f"elapsed={result.elapsed_ms:.0f}ms"
+                )
+                # DO NOT update memoization for unverified commands —
+                # the device may not have actually changed state
+                return False
 
-        use_dim = self.get_setting('useDim', False)
-        has_level = self._device_has_capability(device, 'SwitchLevel')
+            # Set color only if device supports it (best-effort, no memo impact)
+            if self.get_setting('useColor', False):
+                self._set_color(device_id, device)
 
-        if use_dim and has_level:
-            level = self._get_current_dim_level()
-            ok = self.send_command(device_id, 'setLevel', [level])
-        else:
-            ok = self.send_command(device_id, 'on')
+            # Update memo ONLY on VERIFIED command
+            self._memoization['switch_state'][device_name] = {'state': 'on', 'source': 'app'}
+            if use_dim and has_level:
+                self._memoization['dim_level'][device_name] = level
+            return True
 
-        if not ok:
-            self.logger.warning(f"Command failed for {device_name}, skipping memo update")
+        except Exception as e:
+            self.logger.error(
+                f"_turn_on_switch failed for {device_name} "
+                f"(id={device_id}): {e}",
+                exc_info=True
+            )
             return False
-
-        # Set color only if device supports it (best-effort, doesn't affect memo)
-        if self.get_setting('useColor', False):
-            self._set_color(device_id, device)
-
-        # Update memo ONLY on successful command
-        self._memoization['switch_state'][device_name] = 'on'
-        if use_dim and has_level:
-            self._memoization['dim_level'][device_name] = level
-        return True
 
     def _turn_off_switch(
         self, device_id: str, device_name: str,
@@ -448,38 +657,66 @@ class AdvancedMotionLightingApp(BaseApp):
 
         Checks actual device state first. If device is already off,
         skips command AND does not update memo (preserves override detection).
-        Only updates memo if the command succeeds.
+        Only updates memo if the command is VERIFIED (device state confirmed).
 
         Returns:
             True if memo was updated (caller should batch-save), False otherwise.
         """
-        # Check actual device state — if already off, skip to preserve memo
-        if device:
-            actual_state = device.get('attributes', {}).get('switch')
-            if actual_state == 'off':
-                self.logger.debug(f"Skip OFF for {device_name}: already off")
+        try:
+            # Check cached device state — kept fresh by DeviceCacheRefreshService
+            if device:
+                actual_state = device.get('attributes', {}).get('switch')
+                if actual_state == 'off':
+                    self.logger.debug(f"Skip OFF {_C}{device_name}{_R}: already off")
+                    return False
+
+            self.logger.info(f"Turning off: {_C}{device_name}{_R}")
+            result = self.send_command(device_id, 'off')
+
+            if not result.success:
+                self.logger.warning(
+                    f"OFF command failed for {device_name}: {result.error}",
+                    exc_info=True
+                )
                 return False
 
-        self.logger.info(f"Turning off: {device_name}")
-        ok = self.send_command(device_id, 'off')
+            if not result.verified:
+                self.logger.warning(
+                    f"OFF command sent but NOT verified for {device_name}: "
+                    f"expected={result.expected_state}, "
+                    f"actual={result.actual_state}, "
+                    f"retries={result.retries_used}, "
+                    f"elapsed={result.elapsed_ms:.0f}ms"
+                )
+                # DO NOT update memoization for unverified commands
+                return False
 
-        if not ok:
-            self.logger.warning(f"Command failed for {device_name}, skipping memo update")
+            # Update memo ONLY on VERIFIED command
+            self._memoization['switch_state'][device_name] = {'state': 'off', 'source': 'app'}
+            return True
+
+        except Exception as e:
+            self.logger.error(
+                f"_turn_off_switch failed for {device_name} "
+                f"(id={device_id}): {e}",
+                exc_info=True
+            )
             return False
-
-        # Update memo ONLY on successful command
-        self._memoization['switch_state'][device_name] = 'off'
-        return True
 
     def _should_skip_due_to_memo(self, device_name: str, action: str) -> bool:
         """Check if we should skip this device due to memoization."""
         if not self.get_setting('memoize', False):
             return False
 
-        memo_state = self._memoization.get('switch_state', {}).get(device_name)
+        memo_entry = self._memoization.get('switch_state', {}).get(device_name)
+        # Handle both new dict format and old string format (backward compat)
+        if isinstance(memo_entry, dict):
+            memo_state = memo_entry.get('state')
+        else:
+            memo_state = memo_entry
         if memo_state == action:
             # Already in desired state per our memo
-            self.logger.debug(f"Skipping {device_name}: memoized as {action}")
+            self.logger.debug(f"Skip {_C}{device_name}{_R}: memo={action}")
             return True
 
         return False
@@ -496,26 +733,53 @@ class AdvancedMotionLightingApp(BaseApp):
         Set color on a device, only if it has the required capability.
 
         Checks for ColorTemperature or ColorControl capability before sending.
+        Color commands are best-effort (verify=False) — they don't affect
+        memoization or the overall command success status.
         """
-        preset_name = self.get_setting('colorPreset', 'Warm White')
-        has_ct = self._device_has_capability(device, 'ColorTemperature')
-        has_color = self._device_has_capability(device, 'ColorControl')
+        try:
+            preset_name = self.get_setting('colorPreset', 'Warm White')
+            has_ct = self._device_has_capability(device, 'ColorTemperature')
+            has_color = self._device_has_capability(device, 'ColorControl')
 
-        if preset_name == 'Custom':
-            if has_ct:
-                temp = self.get_setting('customColorTemperature', 2700)
-                self.send_command(device_id, 'setColorTemperature', [temp])
-        elif preset_name in self.COLOR_PRESETS:
-            preset = self.COLOR_PRESETS[preset_name]
-            if 'temperature' in preset and has_ct:
-                self.send_command(
-                    device_id, 'setColorTemperature', [preset['temperature']]
-                )
-            elif 'hue' in preset and has_color:
-                self.send_command(
-                    device_id, 'setColor',
-                    [f"{{'hue':{preset['hue']},'saturation':{preset['saturation']}}}"]
-                )
+            if preset_name == 'Custom':
+                if has_ct:
+                    temp = self.get_setting('customColorTemperature', 2700)
+                    result = self.send_command(
+                        device_id, 'setColorTemperature', [temp],
+                        verify=False
+                    )
+                    if not result.success:
+                        self.logger.warning(
+                            f"setColorTemperature failed for {device_id}: "
+                            f"{result.error}"
+                        )
+            elif preset_name in self.COLOR_PRESETS:
+                preset = self.COLOR_PRESETS[preset_name]
+                if 'temperature' in preset and has_ct:
+                    result = self.send_command(
+                        device_id, 'setColorTemperature',
+                        [preset['temperature']], verify=False
+                    )
+                    if not result.success:
+                        self.logger.warning(
+                            f"setColorTemperature failed for {device_id}: "
+                            f"{result.error}"
+                        )
+                elif 'hue' in preset and has_color:
+                    result = self.send_command(
+                        device_id, 'setColor',
+                        [f"{{'hue':{preset['hue']},'saturation':{preset['saturation']}}}"],
+                        verify=False
+                    )
+                    if not result.success:
+                        self.logger.warning(
+                            f"setColor failed for {device_id}: {result.error}"
+                        )
+        except Exception as e:
+            self.logger.error(
+                f"_set_color failed for device {device_id}: {e}",
+                exc_info=True
+            )
 
     def _get_current_illuminance(self) -> Optional[int]:
         """Get current illuminance reading."""
@@ -532,6 +796,182 @@ class AdvancedMotionLightingApp(BaseApp):
                     return int(lux)
                 except (ValueError, TypeError):
                     pass
+        return None
+
+    # =========================================================================
+    # Always Off / Always On Enforcement
+    # =========================================================================
+
+    def _enforce_keep_switches(self) -> None:
+        """
+        Enforce always-off and always-on switch states.
+
+        Called on every master() cycle. Uses source tracking in memoization
+        to determine WHO changed a device and whether to enforce.
+
+        Sources and enforcement rules:
+        +----------+----------------------------------------------------+
+        | Source   | Action                                             |
+        +----------+----------------------------------------------------+
+        | 'app'    | ENFORCE (app or Update seeded expected state)      |
+        | 'pause'  | ENFORCE (pause/resume is app-initiated)            |
+        | 'manual' | SKIP (user turned it on/off via physical/Hubitat)  |
+        | 'unknown'| SKIP (no info, conservative)                       |
+        +----------+----------------------------------------------------+
+
+        Always-Off example flow:
+          1. Update → memo seeded: {'state': 'off', 'source': 'app'}
+          2. User turns on → webhook → memo: {'state': 'on', 'source': 'manual'}
+          3. Next cycle → source='manual' → SKIP (user override)
+          4. Update again → memo re-seeded: {'state': 'off', 'source': 'app'}
+          5. Run → source='app', device=ON → FORCE OFF
+
+        Mode changes / Update reset memo and re-seed expected states,
+        clearing all overrides.
+        """
+        memo = self._memoization or {}
+        switch_memo = memo.get('switch_state', {})
+        current_mode = self._get_current_mode()
+
+        # Mode gate: empty list = all modes, non-empty = only listed modes
+        keep_off_modes = self.get_setting('keepOffModes', [])
+        enforce_off = not keep_off_modes or current_mode in keep_off_modes
+        if not enforce_off:
+            self.logger.debug(
+                f"Always-Off: skipped (mode={current_mode},"
+                f" active={keep_off_modes})"
+            )
+
+        for device_id in self.get_devices('keep_off_switches'):
+            if not enforce_off:
+                break
+            try:
+                live_device = self.hubitat.get_device(device_id)
+                if not live_device:
+                    continue
+                device_name = self._extract_device_name(live_device, device_id)
+                actual = self._extract_switch_state(live_device)
+                if actual == 'on':
+                    device_entry = switch_memo.get(device_name)
+                    if isinstance(device_entry, dict):
+                        source = device_entry.get('source', 'unknown')
+                    else:
+                        source = 'unknown'
+                    if source in ('manual', 'unknown'):
+                        self.logger.debug(
+                            f"Always-Off: {_C}{device_name}{_R} ON,"
+                            f" source={source} — respecting override"
+                        )
+                        continue
+                    self.logger.info(
+                        f"Always-Off: {_C}{device_name}{_R} → off"
+                        f" (source={source})"
+                    )
+                    self.send_command(device_id, 'off', verify=False)
+                    self._memoization.setdefault('switch_state', {})[device_name] = {
+                        'state': 'off', 'source': 'app'
+                    }
+                    self._save_memoization()
+            except Exception as e:
+                self.logger.error(
+                    f"Always-Off failed for {device_id}: {e}",
+                    exc_info=True
+                )
+
+        keep_on_modes = self.get_setting('keepOnModes', [])
+        enforce_on = not keep_on_modes or current_mode in keep_on_modes
+        if not enforce_on:
+            self.logger.debug(
+                f"Always-On: skipped (mode={current_mode},"
+                f" active={keep_on_modes})"
+            )
+
+        for device_id in self.get_devices('keep_on_switches'):
+            if not enforce_on:
+                break
+            try:
+                live_device = self.hubitat.get_device(device_id)
+                if not live_device:
+                    continue
+                device_name = self._extract_device_name(live_device, device_id)
+                actual = self._extract_switch_state(live_device)
+                if actual == 'off':
+                    device_entry = switch_memo.get(device_name)
+                    if isinstance(device_entry, dict):
+                        source = device_entry.get('source', 'unknown')
+                    else:
+                        source = 'unknown'
+                    if source in ('manual', 'unknown'):
+                        self.logger.debug(
+                            f"Always-On: {_C}{device_name}{_R} OFF,"
+                            f" source={source} — respecting override"
+                        )
+                        continue
+                    self.logger.info(
+                        f"Always-On: {_C}{device_name}{_R} → on"
+                        f" (source={source})"
+                    )
+                    self.send_command(device_id, 'on', verify=False)
+                    self._memoization.setdefault('switch_state', {})[device_name] = {
+                        'state': 'on', 'source': 'app'
+                    }
+                    self._save_memoization()
+            except Exception as e:
+                self.logger.error(
+                    f"Always-On failed for {device_id}: {e}",
+                    exc_info=True
+                )
+
+    @staticmethod
+    def _extract_switch_state(device_data: Dict[str, Any]) -> Optional[str]:
+        """
+        Extract switch state from Hubitat API response.
+
+        Hubitat returns attributes as a list:
+            [{"name": "switch", "currentValue": "on"}, ...]
+        Cache stores them as a dict:
+            {"switch": "on", ...}
+        This handles both formats.
+        """
+        attrs = device_data.get('attributes', {})
+        if isinstance(attrs, list):
+            for attr in attrs:
+                if attr.get('name') == 'switch':
+                    return attr.get('currentValue')
+        elif isinstance(attrs, dict):
+            return attrs.get('switch')
+        return None
+
+    @staticmethod
+    def _extract_device_name(
+        device_data: Dict[str, Any], fallback: str = ''
+    ) -> str:
+        """Extract human-readable device name from Hubitat API or cache data."""
+        return (
+            device_data.get('label')
+            or device_data.get('device_label')
+            or device_data.get('name')
+            or device_data.get('device_name')
+            or fallback
+        )
+
+    def _resolve_device_name(self, device_id: str) -> str:
+        """Get device name from cache without hitting live API."""
+        device = self.get_device_state(device_id)
+        if device:
+            return device.get('device_label', device.get('device_name', device_id))
+        return device_id
+
+    def _get_current_mode(self) -> Optional[str]:
+        """Get current Hubitat location mode name."""
+        try:
+            modes = self.hubitat.get_modes()
+            if modes:
+                for mode in modes:
+                    if mode.get('active'):
+                        return mode.get('name')
+        except Exception as e:
+            self.logger.warning(f"Failed to get current mode: {e}", exc_info=True)
         return None
 
     # =========================================================================
@@ -559,15 +999,27 @@ class AdvancedMotionLightingApp(BaseApp):
     # =========================================================================
 
     def _health_check(self) -> None:
-        """Check sensor health (called periodically)."""
-        motion_ids = self.get_devices('motion_sensors')
+        """Check sensor health and enforce keep-on/keep-off (called periodically)."""
+        try:
+            motion_ids = self.get_devices('motion_sensors')
 
-        for device_id in motion_ids:
-            # Check if sensor has been heard from recently
-            is_functional = self._functional_sensors.get(device_id, False)
+            for device_id in motion_ids:
+                # Check if sensor has been heard from recently
+                is_functional = self._functional_sensors.get(device_id, False)
 
-            if not is_functional:
-                self.logger.warning(f"Sensor {device_id} may be unresponsive")
+                if not is_functional:
+                    self.logger.warning(
+                        f"Sensor {device_id} may be unresponsive"
+                    )
+
+            # Periodic keep-on/keep-off enforcement
+            if not self.is_paused:
+                self._enforce_keep_switches()
+        except Exception as e:
+            self.logger.error(
+                f"_health_check failed for instance {self.label}: {e}",
+                exc_info=True
+            )
 
     # =========================================================================
     # Settings Schema
@@ -681,6 +1133,20 @@ class AdvancedMotionLightingApp(BaseApp):
                     "description": "What to do with pause switches when pausing (reverses on resume)",
                     "enum": ["toggle", "on", "off"],
                     "default": "toggle"
+                },
+                "keepOffModes": {
+                    "type": "array",
+                    "title": "Always-Off: Active Modes",
+                    "description": "Modes where Always-Off is enforced. Empty = all modes.",
+                    "items": {"type": "string"},
+                    "default": []
+                },
+                "keepOnModes": {
+                    "type": "array",
+                    "title": "Always-On: Active Modes",
+                    "description": "Modes where Always-On is enforced. Empty = all modes.",
+                    "items": {"type": "string"},
+                    "default": []
                 }
             }
         }
@@ -736,5 +1202,21 @@ class AdvancedMotionLightingApp(BaseApp):
                 "multiple": True,
                 "required": False,
                 "description": "Optional: Switches to turn on/off when pausing or resuming (can overlap with motion switches)"
+            },
+            {
+                "key": "keep_off_switches",
+                "label": "Always Off",
+                "capability": "switch",
+                "multiple": True,
+                "required": False,
+                "description": "These switches will always be turned off"
+            },
+            {
+                "key": "keep_on_switches",
+                "label": "Always On",
+                "capability": "switch",
+                "multiple": True,
+                "required": False,
+                "description": "These switches will always be turned on"
             }
         ]

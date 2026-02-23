@@ -17,8 +17,10 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Any, Optional, TYPE_CHECKING
 from datetime import datetime
 import logging
+import traceback
 
 from models.event import DeviceEvent
+from models.command import CommandResult
 from models.instance import RuntimeInstanceState
 
 if TYPE_CHECKING:
@@ -295,6 +297,8 @@ class BaseApp(ABC):
 
         Resets memoization so the instance starts fresh.
         Cancels any pending auto-resume job.
+        Calls master() to re-evaluate state. Subclasses may override
+        to change resume behavior (e.g. enforce keep switches instead).
         """
         self._is_paused = False
         self.logger.info("Resumed")
@@ -309,7 +313,7 @@ class BaseApp(ABC):
         # Reset memoization on resume (Groovy pattern: resetStates on resume)
         self._reset_memoization()
 
-        # Re-evaluate state
+        # Re-evaluate state (subclasses may override for different behavior)
         self.master()
 
     @property
@@ -380,10 +384,17 @@ class BaseApp(ABC):
 
     def _save_memoization(self) -> None:
         """Save memoization state to database."""
-        self.instance_manager.update_memoization(
-            self.instance_id,
-            self._memoization
-        )
+        try:
+            self.instance_manager.update_memoization(
+                self.instance_id,
+                self._memoization
+            )
+        except Exception as e:
+            self.logger.error(
+                f"Failed to save memoization for instance "
+                f"{self.instance_id}: {e}",
+                exc_info=True
+            )
 
     # =========================================================================
     # Hubitat Integration
@@ -401,56 +412,75 @@ class BaseApp(ABC):
         self,
         device_id: str,
         command: str,
-        args: List = None
-    ) -> bool:
+        args: List = None,
+        verify: bool = True,
+    ) -> CommandResult:
         """
-        Send a command to a device via Hubitat AND Matter (if mapped).
+        Send a command to a device via the centralized DeviceCommander.
 
-        Hubitat is always the primary path. If the device has a row in
-        device_matter_map, the same command is also translated and sent
-        via the Matter protocol for faster local control.
+        The commander handles:
+        - Threaded execution (does not block asyncio event loop)
+        - Nested retries with state verification
+        - Matter dual-command dispatch (fire-and-forget)
+        - Full traceback logging on errors
 
         Args:
             device_id: Hubitat device ID
             command: Command name (e.g., 'on', 'off', 'setLevel')
             args: Optional command arguments
+            verify: Whether to verify device state after command (default: True)
 
         Returns:
-            True if Hubitat command succeeded (Matter is best-effort)
+            CommandResult with success, verified, actual_state, timing, etc.
         """
-        # Primary: send via Hubitat Maker API
-        hubitat_ok = self.hubitat.send_command(device_id, command, args)
+        from services.device_commander import get_device_commander
 
-        # Secondary: also send via Matter if device is mapped
         try:
-            from services.matter_client import get_matter_mapping, get_matter_client
-            mapping = get_matter_mapping(device_id)
-            if mapping:
-                import asyncio
-                client = get_matter_client()
-                # Fire-and-forget: don't block Hubitat flow on Matter
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(
-                        client.send_hubitat_command(
-                            node_id=mapping['matter_node_id'],
-                            endpoint_id=mapping['matter_endpoint_id'],
-                            hubitat_command=command,
-                            hubitat_args=args
-                        )
-                    )
-                    self.logger.debug(
-                        f"Matter command queued: node={mapping['matter_node_id']} "
-                        f"cmd={command}"
-                    )
-                except RuntimeError:
-                    # No running event loop (shouldn't happen in FastAPI)
-                    self.logger.debug("No event loop for Matter command")
+            commander = get_device_commander()
+            device_name = self._get_device_display_name(device_id)
+            return commander.send_command_sync(
+                device_id=device_id,
+                command=command,
+                args=args,
+                verify=verify,
+                device_name=device_name,
+            )
         except Exception as e:
-            # Matter failures must never break Hubitat command flow
-            self.logger.warning(f"Matter dual-command failed for device {device_id}: {e}")
+            self.logger.error(
+                f"send_command failed for device {device_id}, "
+                f"cmd={command}: {e}",
+                exc_info=True
+            )
+            return CommandResult(
+                device_id=device_id,
+                command=command,
+                args=args,
+                error=str(e),
+                traceback_str=traceback.format_exc(),
+            )
 
-        return hubitat_ok
+    def _get_device_display_name(self, device_id: str) -> str:
+        """
+        Get human-readable display name for a device, for logging context.
+
+        Falls back to the raw device_id if cache lookup fails.
+
+        Args:
+            device_id: Hubitat device ID
+
+        Returns:
+            Device label, name, or raw ID
+        """
+        try:
+            device = self.get_device_state(device_id)
+            if device:
+                return device.get(
+                    'device_label',
+                    device.get('device_name', device_id)
+                )
+        except Exception:
+            pass
+        return device_id
 
     def get_device_state(self, device_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -551,4 +581,6 @@ class BaseApp(ABC):
                 timeout=5
             )
         except Exception as e:
-            self.logger.warning(f"Failed to update last activity: {e}")
+            self.logger.warning(
+                f"Failed to update last activity: {e}", exc_info=True
+            )

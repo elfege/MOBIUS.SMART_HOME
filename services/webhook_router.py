@@ -186,6 +186,30 @@ class WebhookRouter:
         except Exception:
             pass  # E2E broadcast failure must never affect routing
 
+        # Broadcast to dashboard WebSocket clients (real-time card updates).
+        # Best-effort: failures here must never affect event routing.
+        try:
+            from services.dashboard_broadcaster import get_dashboard_broadcaster
+            import asyncio
+
+            dash_broadcaster = get_dashboard_broadcaster()
+            if dash_broadcaster.client_count > 0:
+                dash_event = {
+                    "type": "device_event",
+                    "instance_ids": routed_to,
+                    "device_id": device_id,
+                    "device_name": display_name,
+                    "event_name": event_name,
+                    "event_value": event_value
+                }
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(dash_broadcaster.broadcast(dash_event))
+                except RuntimeError:
+                    pass
+        except Exception:
+            pass  # Dashboard broadcast failure must never affect routing
+
         if routed_to:
             self.logger.info(
                 f"  {_MAGENTA}→ routed to {len(routed_to)} instance(s):{_R}"

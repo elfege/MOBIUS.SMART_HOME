@@ -211,6 +211,91 @@ body {
     margin-bottom: 1rem;
 }
 
+/* Clickable card body — opens KPI modal */
+.card-body-clickable {
+    cursor: pointer;
+    border-radius: var(--radius-small);
+    padding: 0.5rem;
+    margin: -0.5rem;
+    margin-bottom: 1rem;
+    transition: background 0.2s;
+}
+
+.card-body-clickable:hover {
+    background: rgba(74, 159, 216, 0.08);
+}
+
+.card-body-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.card-stats {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex-wrap: wrap;
+}
+
+.card-stat {
+    color: var(--color-text-muted);
+    font-size: 0.8rem;
+}
+
+.card-stat-sep {
+    color: var(--color-text-muted);
+    font-size: 0.7rem;
+    opacity: 0.5;
+}
+
+.card-stat-error {
+    color: var(--color-danger);
+}
+
+/* Mini-KPI section on card */
+.mini-kpi {
+    margin-top: 0.6rem;
+    padding-top: 0.5rem;
+    border-top: 1px dashed var(--color-border);
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 1.5rem;
+}
+
+.mini-kpi-hint {
+    font-style: italic;
+    opacity: 0.6;
+}
+
+.mini-kpi-count {
+    background: var(--color-primary-alpha-15);
+    color: var(--color-primary);
+    padding: 0.1rem 0.4rem;
+    border-radius: var(--radius-small);
+    font-weight: 600;
+    font-size: 0.7rem;
+}
+
+.mini-kpi-last {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+}
+
+.mini-kpi-time {
+    color: var(--color-terminal-muted);
+    font-size: 0.65rem;
+}
+
 .status-indicator {
     display: inline-block;
     padding: 0.25rem 0.75rem;

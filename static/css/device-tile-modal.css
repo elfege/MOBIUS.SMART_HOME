@@ -1,10 +1,10 @@
 /* =============================================================================
    Device Tile Modal - HomeKit-style tile control
-   Cherry-picked from 0_TILES visual design, self-contained.
+   Cherry-picked from 0_MOBIUS.TILES visual design, self-contained.
    Prefix: dtm- (device-tile-modal) to avoid collisions.
    ============================================================================= */
 
-/* === Scoped CSS Variables (not dependent on 0_TILES :root) === */
+/* === Scoped CSS Variables (not dependent on 0_MOBIUS.TILES :root) === */
 .dtm-backdrop {
     --dtm-tile-rgb: 58, 58, 60;
     --dtm-tile-hover-rgb: 70, 70, 72;
@@ -72,7 +72,7 @@
     color: rgba(255, 255, 255, 1);
 }
 
-/* === Device Tile (matching 0_TILES design) === */
+/* === Device Tile (matching 0_MOBIUS.TILES design) === */
 .dtm-tile {
     position: relative;
     display: inline-flex;

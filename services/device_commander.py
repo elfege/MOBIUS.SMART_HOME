@@ -177,12 +177,17 @@ class DeviceCommander:
         """
         Send a command to a device asynchronously (dispatched to thread).
 
-        This is the primary entry point for async callers (FastAPI endpoints).
-        The actual command execution runs in a ThreadPoolExecutor thread,
-        keeping the asyncio event loop unblocked.
+        Dual-command strategy (Matter-first when commissioned):
+        1. If device has a Matter mapping → fire Matter immediately (async,
+           non-blocking). Matter is lower-latency than Hubitat cloud relay.
+        2. Fire Hubitat command (full retry + verify cycle in thread).
+           Hubitat verification sees the actual device state — whether
+           it was changed by Matter or by the Hubitat command itself.
+        3. Memo updates are gated on Hubitat verification result, so
+           the memoization system stays consistent regardless of which
+           protocol changed the device.
 
-        After the Hubitat command completes, fires a Matter dual-command
-        if the device has a Matter mapping (fire-and-forget).
+        If the device is NOT commissioned to Matter, only Hubitat fires.
 
         Args:
             device_id: Hubitat device ID
@@ -194,6 +199,18 @@ class DeviceCommander:
         Returns:
             CommandResult with success, verified, actual_state, timing, etc.
         """
+        # 1. Fire Matter first (async, non-blocking) — fastest path
+        #    Set UPDATING status early so _handle_switch() knows a command
+        #    is in-flight and won't interpret the state change as a manual
+        #    override. See docs/dual_command_flow.html for full flow diagram.
+        try:
+            self._fire_matter_command(device_id, command, args)
+        except Exception as e:
+            logger.debug(
+                f"Matter pre-dispatch failed for device {device_id}: {e}"
+            )
+
+        # 2. Fire Hubitat command (full retry + verify cycle)
         try:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
@@ -217,17 +234,6 @@ class DeviceCommander:
                 status=CommandStatus.FAILED,
             )
 
-        # Fire Matter dual-command (best-effort, non-blocking)
-        if result.success:
-            try:
-                self._fire_matter_command(device_id, command, args)
-                result.matter_sent = True
-            except Exception as e:
-                logger.warning(
-                    f"Matter dual-command dispatch failed for device {device_id}: {e}",
-                    exc_info=True
-                )
-
         return result
 
     def send_command_sync(
@@ -241,8 +247,20 @@ class DeviceCommander:
         """
         Send a command to a device synchronously.
 
-        For callers not in an async context (scheduler callbacks, BaseApp methods).
-        Submits to the ThreadPoolExecutor and blocks on the result.
+        Dual-command strategy (Matter-first when commissioned):
+        1. If device has a Matter mapping → fire Matter immediately (async,
+           non-blocking). Matter is lower-latency than Hubitat cloud relay.
+        2. Fire Hubitat command (full retry + verify cycle in thread).
+           Hubitat verification sees the actual device state — whether
+           it was changed by Matter or by the Hubitat command itself.
+        3. Memo updates are gated on Hubitat verification result, so
+           the memoization system stays consistent regardless of which
+           protocol changed the device.
+
+        If the device is NOT commissioned to Matter, only Hubitat fires.
+
+        For callers not in an async context (scheduler callbacks, BaseApp
+        methods). Submits to the ThreadPoolExecutor and blocks on the result.
 
         Args:
             device_id: Hubitat device ID
@@ -254,6 +272,17 @@ class DeviceCommander:
         Returns:
             CommandResult with full execution details
         """
+        # 1. Fire Matter first (best-effort, non-blocking) — fastest path
+        #    _fire_matter_command uses create_task internally; if no event
+        #    loop is available (pure-thread context), it logs and skips.
+        try:
+            self._fire_matter_command(device_id, command, args)
+        except Exception as e:
+            logger.debug(
+                f"Matter pre-dispatch failed for device {device_id}: {e}"
+            )
+
+        # 2. Fire Hubitat command (full retry + verify cycle)
         try:
             future = self._executor.submit(
                 self._execute_command_sync,
@@ -277,17 +306,6 @@ class DeviceCommander:
                 if "TimeoutError" in str(type(e).__name__)
                 else CommandStatus.FAILED,
             )
-
-        # Fire Matter dual-command (best-effort)
-        if result.success:
-            try:
-                self._fire_matter_command(device_id, command, args)
-                result.matter_sent = True
-            except Exception as e:
-                logger.warning(
-                    f"Matter dual-command dispatch failed for device {device_id}: {e}",
-                    exc_info=True
-                )
 
         return result
 
@@ -624,14 +642,25 @@ class DeviceCommander:
             client = get_matter_client()
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(
-                    client.send_hubitat_command(
-                        node_id=mapping['matter_node_id'],
-                        endpoint_id=mapping['matter_endpoint_id'],
-                        hubitat_command=command,
-                        hubitat_args=args,
-                    )
-                )
+
+                async def _matter_fire_and_forget():
+                    """Wrapper that catches Matter exceptions so asyncio
+                    doesn't log 'Task exception was never retrieved'."""
+                    try:
+                        await client.send_hubitat_command(
+                            node_id=mapping['matter_node_id'],
+                            endpoint_id=mapping['matter_endpoint_id'],
+                            hubitat_command=command,
+                            hubitat_args=args,
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            f"Matter dual-command failed for device "
+                            f"{device_id} (node {mapping['matter_node_id']}): "
+                            f"{exc}"
+                        )
+
+                loop.create_task(_matter_fire_and_forget())
                 logger.debug(
                     f"Matter dual-command dispatched for device {device_id}: "
                     f"node={mapping['matter_node_id']}, cmd={command}"

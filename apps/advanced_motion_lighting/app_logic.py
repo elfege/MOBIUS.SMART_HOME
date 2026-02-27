@@ -92,19 +92,22 @@ class AdvancedMotionLightingApp(BaseApp):
         Seeds keep_off/keep_on devices with their expected state and
         source='app' so enforcement knows to enforce after a reset.
         Uses setdefault — won't overwrite existing entries.
+
+        Keep device memo keys use device_id (not name) to guarantee
+        consistency across webhook events, cache, and live API lookups.
         """
         self._memoization.setdefault('switch_state', {})
         self._memoization.setdefault('dim_level', {})
-        # Seed keep devices with expected states
+        # Seed keep devices with expected states (keyed by device_id)
         switch_state = self._memoization['switch_state']
         for device_id in self.get_devices('keep_off_switches'):
-            name = self._resolve_device_name(device_id)
-            if name and name not in switch_state:
-                switch_state[name] = {'state': 'off', 'source': 'app'}
+            key = f"keep:{device_id}"
+            if key not in switch_state:
+                switch_state[key] = {'state': 'off', 'source': 'app'}
         for device_id in self.get_devices('keep_on_switches'):
-            name = self._resolve_device_name(device_id)
-            if name and name not in switch_state:
-                switch_state[name] = {'state': 'on', 'source': 'app'}
+            key = f"keep:{device_id}"
+            if key not in switch_state:
+                switch_state[key] = {'state': 'on', 'source': 'app'}
 
     def _reset_memoization(self) -> None:
         """Reset memoization and reinitialize required keys."""
@@ -224,6 +227,13 @@ class AdvancedMotionLightingApp(BaseApp):
         """
         Handle switch event.
 
+        Guard: if DeviceCommander has an in-flight command for this device
+        (status == UPDATING), the event is likely an echo of our own command
+        (possibly from Matter succeeding before Hubitat's verify cycle). In
+        that case, skip override detection entirely. This prevents the
+        dual-command strategy from causing phantom memoization overrides.
+        See docs/dual_command_flow.html for the full timing diagram.
+
         For keep_off/keep_on devices: only tag as source='manual' when the
         event CONTRADICTS the expected state. This distinguishes a genuine
         user override from an echo of our own enforcement command.
@@ -236,6 +246,30 @@ class AdvancedMotionLightingApp(BaseApp):
         For regular switches: no memo update.
         """
         self.logger.debug(f"Switch: {_C}{event.device_name}{_R} → {event.value}")
+
+        # --- UPDATING guard ---
+        # If the DeviceCommander is currently executing a command for this
+        # device, this switch event is an echo of our own command (either
+        # from Hubitat or Matter). Do NOT interpret as a manual override.
+        try:
+            from services.device_commander import (
+                get_device_commander,
+                CommandStatus,
+            )
+            commander = get_device_commander()
+            status = commander.get_device_status(str(event.device_id))
+            if status == CommandStatus.UPDATING:
+                self.logger.debug(
+                    f"Switch event for {_C}{event.device_name}{_R} "
+                    f"(id:{event.device_id}) suppressed — command in-flight "
+                    f"(status=UPDATING)"
+                )
+                return
+        except Exception as e:
+            # If we can't check, proceed with normal logic (safe fallback)
+            self.logger.debug(
+                f"Could not check UPDATING guard for {event.device_id}: {e}"
+            )
 
         keep_off_ids = set(self.get_devices('keep_off_switches'))
         keep_on_ids = set(self.get_devices('keep_on_switches'))
@@ -250,14 +284,21 @@ class AdvancedMotionLightingApp(BaseApp):
         )
 
         if is_keep_off_override or is_keep_on_override:
+            # Use keep:{device_id} key — matches _init_memoization_keys
+            # and _enforce_keep_switches for guaranteed consistency
+            key = f"keep:{event.device_id}"
             self._memoization.setdefault('switch_state', {})
-            self._memoization['switch_state'][event.device_name] = {
+            self._memoization['switch_state'][key] = {
                 'state': event.value, 'source': 'manual'
             }
             self._save_memoization()
             self.logger.info(
-                f"Override: {_C}{event.device_name}{_R}"
-                f" → {event.value} (source=manual)"
+                f"\033[1;93m{'='*60}\033[0m\n"
+                f"\033[1;93m  OVERRIDE MEMOIZED — {_C}{event.device_name}{_R}"
+                f" \033[1;93m[id:{event.device_id}]\033[0m\n"
+                f"\033[1;93m  event={event.event_type}  value={event.value}"
+                f"  source=manual\033[0m\n"
+                f"\033[1;93m{'='*60}\033[0m"
             )
 
     def _handle_illuminance(self, event: DeviceEvent) -> None:
@@ -833,6 +874,11 @@ class AdvancedMotionLightingApp(BaseApp):
         switch_memo = memo.get('switch_state', {})
         current_mode = self._get_current_mode()
 
+        # Safety: a device in both keep_off AND keep_on is a config error.
+        # keep_off wins — exclude conflicts from keep_on.
+        keep_off_ids = set(self.get_devices('keep_off_switches'))
+        keep_on_ids = set(self.get_devices('keep_on_switches')) - keep_off_ids
+
         # Mode gate: empty list = all modes, non-empty = only listed modes
         keep_off_modes = self.get_setting('keepOffModes', [])
         enforce_off = not keep_off_modes or current_mode in keep_off_modes
@@ -851,8 +897,9 @@ class AdvancedMotionLightingApp(BaseApp):
                     continue
                 device_name = self._extract_device_name(live_device, device_id)
                 actual = self._extract_switch_state(live_device)
+                key = f"keep:{device_id}"
                 if actual == 'on':
-                    device_entry = switch_memo.get(device_name)
+                    device_entry = switch_memo.get(key)
                     if isinstance(device_entry, dict):
                         source = device_entry.get('source', 'unknown')
                     else:
@@ -868,7 +915,7 @@ class AdvancedMotionLightingApp(BaseApp):
                         f" (source={source})"
                     )
                     self.send_command(device_id, 'off', verify=False)
-                    self._memoization.setdefault('switch_state', {})[device_name] = {
+                    self._memoization.setdefault('switch_state', {})[key] = {
                         'state': 'off', 'source': 'app'
                     }
                     self._save_memoization()
@@ -886,7 +933,7 @@ class AdvancedMotionLightingApp(BaseApp):
                 f" active={keep_on_modes})"
             )
 
-        for device_id in self.get_devices('keep_on_switches'):
+        for device_id in keep_on_ids:
             if not enforce_on:
                 break
             try:
@@ -895,8 +942,9 @@ class AdvancedMotionLightingApp(BaseApp):
                     continue
                 device_name = self._extract_device_name(live_device, device_id)
                 actual = self._extract_switch_state(live_device)
+                key = f"keep:{device_id}"
                 if actual == 'off':
-                    device_entry = switch_memo.get(device_name)
+                    device_entry = switch_memo.get(key)
                     if isinstance(device_entry, dict):
                         source = device_entry.get('source', 'unknown')
                     else:
@@ -912,7 +960,7 @@ class AdvancedMotionLightingApp(BaseApp):
                         f" (source={source})"
                     )
                     self.send_command(device_id, 'on', verify=False)
-                    self._memoization.setdefault('switch_state', {})[device_name] = {
+                    self._memoization.setdefault('switch_state', {})[key] = {
                         'state': 'on', 'source': 'app'
                     }
                     self._save_memoization()

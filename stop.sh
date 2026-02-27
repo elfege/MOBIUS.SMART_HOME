@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# stop.sh - Stop 0_SMART_HOME containers
+# stop.sh - Stop 0_MOBIUS.SMART_HOME containers
 # =============================================================================
 
 # Get script directory
@@ -14,7 +14,7 @@ cd "$SCRIPT_DIR" &>/dev/null || true
 . ~/.env.colors 2>/dev/null || true
 
 echo "=========================================="
-echo "  0_SMART_HOME - Stopping"
+echo "  0_MOBIUS.SMART_HOME - Stopping"
 echo "=========================================="
 echo ""
 

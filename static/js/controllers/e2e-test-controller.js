@@ -23,12 +23,22 @@ import { api, utils } from '../main.js';
 /** Hub4 EventSocket URL (unauthenticated on LAN) */
 const HUB4_WS_URL = 'ws://<LAN_IP>/eventsocket';
 
+/** Hub4 base URL for device edit pages */
+const HUB4_DEVICE_URL = 'http://<LAN_IP>/device/edit';
+
 /** Max WebSocket reconnect attempts before giving up */
 const MAX_WS_RECONNECT = 10;
 
 /** Base delay for WebSocket reconnect (multiplied by attempt #) */
 const WS_RECONNECT_BASE_MS = 2000;
 
+
+/**
+ * Static cache: persists log lines and scenario results across
+ * close/reopen cycles. Keyed by instanceId.
+ * Structure: { [instanceId]: { logLines: [], scenarioResults: {} } }
+ */
+const _persistedState = {};
 
 export class E2ETestModal {
     /**
@@ -65,6 +75,11 @@ export class E2ETestModal {
 
         /** @type {number|null} WebSocket reconnect timer */
         this._wsReconnectTimer = null;
+
+        // Ensure persisted state bucket exists for this instance
+        if (!_persistedState[this.instanceId]) {
+            _persistedState[this.instanceId] = { logLines: [], scenarioResults: {} };
+        }
     }
 
     /**
@@ -80,9 +95,71 @@ export class E2ETestModal {
             this._loadScenarios()
         ]);
 
+        // Restore any persisted log lines and scenario results from prior session
+        this._restorePersistedState();
+
         // Connect real-time channels after device IDs are known
         this._connectHubWebSocket();
         this._connectSSE();
+    }
+
+    /**
+     * Restore persisted log lines and scenario step results from a
+     * prior modal session. This keeps test output visible across
+     * close/reopen cycles without losing history.
+     */
+    _restorePersistedState() {
+        const state = _persistedState[this.instanceId];
+        if (!state) return;
+
+        // Restore log lines
+        if (state.logLines.length > 0) {
+            const $log = $(`#e2e-log-${this.instanceId}`);
+            if ($log.length > 0) {
+                // Insert a separator so the user can see where old log ends
+                $log.append(
+                    '<div class="e2e-log-line e2e-log-info">'
+                    + '<span class="e2e-log-time">---</span> '
+                    + '(restored from previous session)'
+                    + '</div>'
+                );
+                $log.append(state.logLines.join(''));
+                const logEl = $log[0];
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+        }
+
+        // Restore scenario step indicators and summaries
+        const results = state.scenarioResults;
+        for (const [scenarioId, scenarioData] of Object.entries(results)) {
+            // Restore individual step indicators
+            for (const [stepIdx, stepData] of Object.entries(scenarioData.steps)) {
+                const $step = $(`#e2e-step-${scenarioId}-${stepIdx}`);
+                if ($step.length === 0) continue;
+
+                $step.find('.e2e-step-indicator')
+                    .removeClass('e2e-pending e2e-running e2e-pass e2e-fail e2e-skip')
+                    .addClass(`e2e-${stepData.result}`);
+                if (stepData.message) {
+                    $step.find('.e2e-step-message').text(stepData.message);
+                }
+            }
+
+            // Restore scenario summary
+            if (scenarioData.summary) {
+                const data = scenarioData.summary;
+                const $summary = $(`#e2e-summary-${scenarioId}`);
+                if (data.failed > 0) {
+                    $summary.html(
+                        `<span class="e2e-result-fail">${data.passed}/${data.total} passed</span>`
+                    );
+                } else {
+                    $summary.html(
+                        `<span class="e2e-result-pass">${data.passed}/${data.total} passed</span>`
+                    );
+                }
+            }
+        }
     }
 
     /**
@@ -150,12 +227,17 @@ export class E2ETestModal {
                                 <p class="e2e-loading">Loading devices...</p>
                             </div>
                         </div>
+                        <div class="e2e-gutter" data-gutter="left"></div>
                         <div class="e2e-panel e2e-tests-panel">
-                            <h3>Test Scenarios</h3>
+                            <div class="e2e-panel-toolbar">
+                                <h3>Test Scenarios</h3>
+                                <button class="btn btn-secondary btn-small btn-copy e2e-copy-scenarios">Copy</button>
+                            </div>
                             <div class="e2e-scenarios" id="e2e-scenarios-${this.instanceId}">
                                 <p class="e2e-loading">Loading scenarios...</p>
                             </div>
                         </div>
+                        <div class="e2e-gutter" data-gutter="right"></div>
                         <div class="e2e-panel e2e-log-panel">
                             <div class="e2e-panel-toolbar">
                                 <h3>Terminal</h3>
@@ -183,10 +265,8 @@ export class E2ETestModal {
         // Run All button
         $modal.find('.e2e-run-all').on('click', () => this._runAllScenarios());
 
-        // Close on overlay click (not on modal body)
-        $modal.on('click', (e) => {
-            if ($(e.target).hasClass('e2e-modal-overlay')) this.close();
-        });
+        // Backdrop click intentionally disabled — prevents accidental
+        // loss of test results. Use the Close button or Escape key instead.
 
         // Close on Escape key
         $(document).on('keydown.e2e', (e) => {
@@ -197,6 +277,121 @@ export class E2ETestModal {
         $modal.find('.e2e-copy-log').on('click', (e) => {
             const logEl = document.getElementById(`e2e-log-${this.instanceId}`);
             if (logEl) utils.copyToClipboard(logEl.innerText, e.currentTarget, 'Copy');
+        });
+
+        // Copy test scenarios
+        $modal.find('.e2e-copy-scenarios').on('click', (e) => {
+            const scenariosEl = document.getElementById(`e2e-scenarios-${this.instanceId}`);
+            if (scenariosEl) utils.copyToClipboard(scenariosEl.innerText, e.currentTarget, 'Copy');
+        });
+
+        // Draggable gutter splitters for panel resizing
+        this._initGutterDrag($modal);
+    }
+
+    /**
+     * Initialize draggable gutter handles between panels.
+     * Converts the fixed CSS grid to pixel-based columns on first drag.
+     * Stores sizes in localStorage for persistence across opens.
+     *
+     * @param {jQuery} $modal - The modal jQuery wrapper
+     */
+    _initGutterDrag($modal) {
+        const body = $modal.find('.e2e-modal-body')[0];
+        if (!body) return;
+
+        const storageKey = 'e2e-panel-sizes';
+
+        // Restore saved sizes if available
+        try {
+            const saved = localStorage.getItem(storageKey);
+            if (saved) {
+                const sizes = JSON.parse(saved);
+                if (sizes.length === 3) {
+                    body.style.gridTemplateColumns =
+                        `${sizes[0]}px 10px 1fr 10px ${sizes[2]}px`;
+                }
+            }
+        } catch (_) { /* ignore corrupt data */ }
+
+        /**
+         * Shared drag handler for both mouse and touch events.
+         * @param {number} startClientX - Initial pointer X
+         * @param {string} side - 'left' or 'right' gutter
+         * @param {string} moveEvent - 'mousemove' or 'touchmove'
+         * @param {string} endEvent - 'mouseup' or 'touchend'
+         */
+        const startDrag = (startClientX, side, moveEvent, endEvent) => {
+            const panels = body.querySelectorAll('.e2e-panel');
+            const leftPanel = panels[0];
+            const centerPanel = panels[1];
+            const rightPanel = panels[2];
+
+            const startLeftW = leftPanel.getBoundingClientRect().width;
+            const startCenterW = centerPanel.getBoundingClientRect().width;
+            const startRightW = rightPanel.getBoundingClientRect().width;
+
+            const MIN_W = 150;
+            const GUTTER_W = 10;
+
+            const onMove = (e) => {
+                const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                const dx = clientX - startClientX;
+
+                let leftW = startLeftW;
+                let centerW = startCenterW;
+                let rightW = startRightW;
+
+                if (side === 'left') {
+                    leftW = Math.max(MIN_W, startLeftW + dx);
+                    centerW = Math.max(MIN_W, startCenterW - dx);
+                    if (centerW <= MIN_W) {
+                        centerW = MIN_W;
+                        leftW = startLeftW + startCenterW - MIN_W;
+                    }
+                } else {
+                    centerW = Math.max(MIN_W, startCenterW + dx);
+                    rightW = Math.max(MIN_W, startRightW - dx);
+                    if (rightW <= MIN_W) {
+                        rightW = MIN_W;
+                        centerW = startCenterW + startRightW - MIN_W;
+                    }
+                }
+
+                body.style.gridTemplateColumns =
+                    `${leftW}px ${GUTTER_W}px ${centerW}px ${GUTTER_W}px ${rightW}px`;
+            };
+
+            const onEnd = () => {
+                document.removeEventListener(moveEvent, onMove);
+                document.removeEventListener(endEvent, onEnd);
+                body.classList.remove('e2e-resizing');
+
+                try {
+                    const lw = leftPanel.getBoundingClientRect().width;
+                    const rw = rightPanel.getBoundingClientRect().width;
+                    localStorage.setItem(storageKey, JSON.stringify([
+                        Math.round(lw), 0, Math.round(rw)
+                    ]));
+                } catch (_) { /* storage full — ignore */ }
+            };
+
+            body.classList.add('e2e-resizing');
+            document.addEventListener(moveEvent, onMove, { passive: false });
+            document.addEventListener(endEvent, onEnd);
+        };
+
+        // Mouse drag
+        $modal.find('.e2e-gutter').on('mousedown', (e) => {
+            e.preventDefault();
+            startDrag(e.clientX, e.currentTarget.dataset.gutter, 'mousemove', 'mouseup');
+        });
+
+        // Touch drag (tablet/phone)
+        $modal.find('.e2e-gutter').on('touchstart', (e) => {
+            e.preventDefault();
+            const touch = e.originalEvent.touches[0];
+            startDrag(touch.clientX, e.currentTarget.dataset.gutter, 'touchmove', 'touchend');
         });
     }
 
@@ -481,6 +676,7 @@ export class E2ETestModal {
                 this._deviceStateMap[did] = attrs;
 
                 html += `<div class="e2e-device-tile" data-device-id="${did}">`;
+                html += `  <a class="e2e-hub-link" href="${HUB4_DEVICE_URL}/${did}" target="_blank" rel="noopener" title="Open in Hubitat"></a>`;
                 html += `  <div class="e2e-device-header">`;
                 html += `    <span class="e2e-device-name" title="${utils.escapeHtml(label)}">${utils.escapeHtml(label)}</span>`;
                 html += `    <span class="e2e-device-id">#${did}</span>`;
@@ -698,6 +894,11 @@ export class E2ETestModal {
      * @param {string} message
      */
     _updateStepUI(scenarioId, stepIndex, result, message) {
+        // Persist step result for survival across close/reopen
+        const cache = _persistedState[this.instanceId].scenarioResults;
+        if (!cache[scenarioId]) cache[scenarioId] = { steps: {}, summary: null };
+        cache[scenarioId].steps[stepIndex] = { result, message };
+
         const $step = $(`#e2e-step-${scenarioId}-${stepIndex}`);
         if ($step.length === 0) return;
 
@@ -719,6 +920,11 @@ export class E2ETestModal {
      * @param {Object} data - { scenario_id, passed, total, failed }
      */
     _updateScenarioSummary(data) {
+        // Persist summary for survival across close/reopen
+        const cache = _persistedState[this.instanceId].scenarioResults;
+        if (!cache[data.scenario_id]) cache[data.scenario_id] = { steps: {}, summary: null };
+        cache[data.scenario_id].summary = data;
+
         const $summary = $(`#e2e-summary-${data.scenario_id}`);
         if (data.failed > 0) {
             $summary.html(
@@ -833,17 +1039,21 @@ export class E2ETestModal {
      *                        'warning', 'device', 'command', 'ws'
      */
     _appendLog(message, type) {
-        const $log = $(`#e2e-log-${this.instanceId}`);
-        if ($log.length === 0) return;
-
         const time = new Date().toLocaleTimeString();
         const cssClass = `e2e-log-${type}`;
-        $log.append(
+        const lineHtml =
             `<div class="e2e-log-line ${cssClass}">`
             + `<span class="e2e-log-time">${time}</span> `
             + `${utils.escapeHtml(message)}`
-            + `</div>`
-        );
+            + `</div>`;
+
+        // Persist for survival across close/reopen
+        _persistedState[this.instanceId].logLines.push(lineHtml);
+
+        const $log = $(`#e2e-log-${this.instanceId}`);
+        if ($log.length === 0) return;
+
+        $log.append(lineHtml);
 
         // Auto-scroll to bottom
         const logEl = $log[0];

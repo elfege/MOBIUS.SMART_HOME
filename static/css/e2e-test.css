@@ -12,7 +12,7 @@
     left: 0;
     width: 100%;
     height: 100%;
-    background: rgba(0, 0, 0, 0.6);
+    background: var(--color-overlay);
     z-index: 1000;
     display: flex;
     align-items: center;
@@ -67,7 +67,7 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: #94a3b8;
+    background: var(--color-neutral);
     transition: background 0.3s;
 }
 
@@ -79,13 +79,86 @@
     background: var(--color-danger);
 }
 
-/* === Modal Body — 3-panel layout === */
+/* === Modal Body — 3-panel layout with draggable gutters === */
 
 .e2e-modal-body {
     display: grid;
-    grid-template-columns: 280px 1fr 320px;
+    grid-template-columns: 280px 10px 1fr 10px 320px;
     flex: 1;
     overflow: hidden;
+}
+
+/* Disable text selection while dragging gutters */
+.e2e-modal-body.e2e-resizing,
+.e2e-modal-body.e2e-resizing * {
+    user-select: none !important;
+    cursor: col-resize !important;
+}
+
+/* === Gutter Splitter === */
+
+.e2e-gutter {
+    width: 10px;
+    cursor: col-resize;
+    background: transparent;
+    position: relative;
+    flex-shrink: 0;
+}
+
+/* Thin center line — the visible separator */
+.e2e-gutter::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 1px;
+    background: var(--color-border);
+    transition: width 0.15s, background 0.15s;
+    transform: translateX(-50%);
+}
+
+/* Hover: widen the line + blue highlight */
+.e2e-gutter:hover::before,
+.e2e-gutter:active::before {
+    width: 3px;
+    background: var(--color-primary);
+}
+
+/* === Scrollbars (dark-themed) === */
+
+.e2e-modal-body ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+.e2e-modal-body ::-webkit-scrollbar-track {
+    background: var(--color-scrollbar-track);
+    border-radius: 3px;
+}
+
+.e2e-modal-body ::-webkit-scrollbar-thumb {
+    background: var(--color-scrollbar-thumb);
+    border-radius: 3px;
+    min-height: 40px;
+}
+
+.e2e-modal-body ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-scrollbar-thumb-hover);
+}
+
+.e2e-modal-body ::-webkit-scrollbar-thumb:active {
+    background: var(--color-scrollbar-thumb-active);
+}
+
+.e2e-modal-body ::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+/* Firefox */
+.e2e-modal-body * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-scrollbar-thumb) var(--color-scrollbar-track);
 }
 
 /* === Panel Common === */
@@ -94,11 +167,7 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    border-right: 1px solid var(--color-border);
-}
-
-.e2e-panel:last-child {
-    border-right: none;
+    /* No border-right — gutters serve as visible panel separators */
 }
 
 .e2e-panel > h3 {
@@ -133,24 +202,25 @@
     margin: 0 0 0.35rem;
     padding: 0.2rem 0.4rem;
     background: var(--color-bg);
-    border-radius: 4px;
+    border-radius: var(--radius-small);
     font-weight: 600;
 }
 
 /* === Device Tile === */
 
 .e2e-device-tile {
+    position: relative;
     background: var(--color-bg);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
-    padding: 0.4rem 0.5rem;
+    padding: 0.4rem 0.5rem 0.4rem 1.2rem;
     margin-bottom: 0.35rem;
     transition: border-color 0.3s, box-shadow 0.3s;
 }
 
 .e2e-device-tile.e2e-flash {
     border-color: var(--color-primary);
-    box-shadow: 0 0 8px rgba(37, 99, 235, 0.3);
+    box-shadow: 0 0 8px var(--color-primary-alpha-30);
 }
 
 .e2e-device-header {
@@ -167,6 +237,27 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     max-width: 170px;
+}
+
+/* Blue dot link to Hubitat device page (matches TILES pattern) */
+.e2e-hub-link {
+    position: absolute;
+    top: 5px;
+    left: 5px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #3498db;
+    cursor: pointer;
+    z-index: 10;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    text-decoration: none;
+    display: block;
+}
+
+.e2e-hub-link:hover {
+    transform: scale(1.4);
+    box-shadow: 0 0 8px rgba(52, 152, 219, 0.8);
 }
 
 .e2e-device-id {
@@ -187,33 +278,33 @@
 .e2e-attr {
     font-size: 0.68rem;
     padding: 0.1rem 0.35rem;
-    border-radius: 4px;
+    border-radius: var(--radius-small);
     background: var(--color-card);
     border: 1px solid var(--color-border);
     transition: background 0.3s, color 0.3s, border-color 0.3s;
 }
 
 .e2e-state-on {
-    background: #dcfce7;
-    color: #166534;
-    border-color: #86efac;
+    background: var(--color-state-green-bg);
+    color: var(--color-state-green-text);
+    border-color: var(--color-state-green-border);
 }
 
 .e2e-state-off {
-    background: #f1f5f9;
-    color: #64748b;
+    background: var(--color-state-slate-bg);
+    color: var(--color-state-slate-text);
     border-color: var(--color-border);
 }
 
 .e2e-state-active {
-    background: #fef3c7;
-    color: #92400e;
-    border-color: #fcd34d;
+    background: var(--color-state-amber-bg);
+    color: var(--color-state-amber-text);
+    border-color: var(--color-state-amber-border);
 }
 
 .e2e-state-inactive {
-    background: #f1f5f9;
-    color: #64748b;
+    background: var(--color-state-slate-bg);
+    color: var(--color-state-slate-text);
     border-color: var(--color-border);
 }
 
@@ -304,7 +395,7 @@
     gap: 0.4rem;
     padding: 0.25rem 0;
     font-size: 0.78rem;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+    border-bottom: 1px solid var(--color-subtle-border);
 }
 
 .e2e-step:last-child {
@@ -322,7 +413,7 @@
 }
 
 .e2e-pending {
-    background: #94a3b8;
+    background: var(--color-neutral);
 }
 
 .e2e-running {
@@ -407,51 +498,51 @@
     overflow-y: auto;
     padding: 0.5rem;
     flex: 1;
-    background: #1e1e2e;
-    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    background: var(--color-terminal-bg);
+    font-family: var(--font-mono);
     font-size: 0.7rem;
     line-height: 1.6;
-    color: #cdd6f4;
+    color: var(--color-terminal-text);
 }
 
 .e2e-log-line {
     padding: 1px 4px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    border-bottom: 1px solid var(--color-terminal-line-border);
     word-break: break-all;
 }
 
 .e2e-log-time {
-    color: #6c7086;
+    color: var(--color-terminal-muted);
     margin-right: 0.4rem;
 }
 
 /* Color-coded log line types */
 .e2e-log-device {
-    color: #89b4fa;
+    color: var(--color-terminal-blue);
 }
 
 .e2e-log-command {
-    color: #a6e3a1;
+    color: var(--color-terminal-green);
 }
 
 .e2e-log-pass {
-    color: #a6e3a1;
+    color: var(--color-terminal-green);
 }
 
 .e2e-log-fail {
-    color: #f38ba8;
+    color: var(--color-terminal-red);
 }
 
 .e2e-log-warning {
-    color: #f9e2af;
+    color: var(--color-terminal-yellow);
 }
 
 .e2e-log-info {
-    color: #cdd6f4;
+    color: var(--color-terminal-text);
 }
 
 .e2e-log-ws {
-    color: #cba6f7;
+    color: var(--color-terminal-purple);
 }
 
 /* === Loading / Empty / Error === */
@@ -482,7 +573,8 @@
 .e2e-run-all,
 .e2e-scenario-actions .btn,
 .e2e-device-controls .btn,
-.e2e-copy-log {
+.e2e-copy-log,
+.e2e-copy-scenarios {
     cursor: pointer;
 }
 
@@ -495,20 +587,108 @@
     user-select: text;
 }
 
-/* === Responsive === */
+/* === Responsive — Tablet === */
 
 @media (max-width: 1024px) {
+    .e2e-modal {
+        width: 100vw;
+        height: 100vh;
+        border-radius: 0;
+    }
+
     .e2e-modal-body {
         grid-template-columns: 1fr;
-        grid-template-rows: 200px 1fr 200px;
+        grid-template-rows: auto 1fr auto;
+    }
+
+    .e2e-gutter {
+        display: none;
     }
 
     .e2e-panel {
-        border-right: none;
         border-bottom: 1px solid var(--color-border);
     }
 
     .e2e-panel:last-child {
         border-bottom: none;
+    }
+
+    /* Devices panel — collapsed by default, scrollable */
+    .e2e-devices-panel {
+        max-height: 30vh;
+    }
+
+    /* Tests panel — takes remaining space */
+    .e2e-tests-panel {
+        min-height: 0;
+    }
+
+    /* Terminal — fixed height at bottom */
+    .e2e-log-panel {
+        max-height: 30vh;
+    }
+
+    .e2e-modal-header {
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        padding: 0.5rem 1rem;
+    }
+
+    .e2e-modal-header h2 {
+        font-size: 0.95rem;
+        width: 100%;
+    }
+
+    .e2e-modal-actions {
+        width: 100%;
+        justify-content: flex-end;
+    }
+}
+
+/* === Responsive — Phone === */
+
+@media (max-width: 600px) {
+    .e2e-modal-body {
+        grid-template-rows: auto 1fr auto;
+    }
+
+    .e2e-devices-panel {
+        max-height: 25vh;
+    }
+
+    .e2e-log-panel {
+        max-height: 25vh;
+    }
+
+    .e2e-device-name {
+        max-width: 120px;
+        font-size: 0.72rem;
+    }
+
+    .e2e-device-tile {
+        padding: 0.3rem 0.4rem;
+    }
+
+    .e2e-scenario-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.3rem;
+    }
+
+    .e2e-scenario-actions {
+        width: 100%;
+        justify-content: flex-end;
+    }
+
+    .e2e-step {
+        font-size: 0.72rem;
+    }
+
+    .e2e-log {
+        font-size: 0.62rem;
+    }
+
+    .e2e-panel-toolbar h3 {
+        font-size: 0.7rem;
     }
 }

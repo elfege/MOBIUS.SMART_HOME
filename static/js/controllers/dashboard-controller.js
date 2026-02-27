@@ -2,6 +2,14 @@
  * Dashboard Controller
  *
  * Manages the main dashboard view showing all automation instances.
+ *
+ * Real-time updates via WebSocket (replaces 30s polling):
+ *   - On connect: receives full instances_snapshot
+ *   - On device_event: patches the affected card(s) with new event info
+ *   - On instance_update: patches the affected card's metadata
+ *   - Keepalive pings prevent stale connections
+ *
+ * Card body click → opens KPI modal (95vh detail view with charts).
  */
 
 import { api, utils } from '../main.js';
@@ -13,6 +21,14 @@ export class DashboardController {
     constructor(containerId) {
         this.container = document.getElementById(containerId);
         this.instances = [];
+        /** @type {WebSocket|null} */
+        this.ws = null;
+        /** Reconnect backoff timer */
+        this._reconnectDelay = 1000;
+        /** Max reconnect delay (30s) */
+        this._maxReconnectDelay = 30000;
+        /** Track recent events per instance (last 5, for mini-KPI on card) */
+        this.recentEvents = {};
         // Restore debug panel state from localStorage
         const saved = JSON.parse(localStorage.getItem('debugPanels') || '{}');
         this.openDebugPanels = new Set(saved.open || []);
@@ -23,12 +39,193 @@ export class DashboardController {
      * Initialize the dashboard
      */
     async init() {
-        await this.loadInstances();
-        this.startAutoRefresh();
+        this._connectWebSocket();
+    }
+
+    /* =========================================================================
+       WebSocket — Real-time updates
+       ========================================================================= */
+
+    /**
+     * Establish WebSocket connection to /ws/dashboard.
+     * On connect, the server sends an instances_snapshot with full data.
+     * Subsequent messages are incremental (device_event, instance_update).
+     */
+    _connectWebSocket() {
+        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = `${protocol}//${location.host}/ws/dashboard`;
+
+        this.ws = new WebSocket(url);
+
+        this.ws.onopen = () => {
+            console.log('Dashboard WS connected');
+            this._reconnectDelay = 1000;
+        };
+
+        this.ws.onmessage = (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                this._handleWsMessage(msg);
+            } catch (e) {
+                console.warn('Dashboard WS parse error:', e);
+            }
+        };
+
+        this.ws.onclose = () => {
+            console.log('Dashboard WS disconnected, reconnecting...');
+            setTimeout(() => this._connectWebSocket(), this._reconnectDelay);
+            this._reconnectDelay = Math.min(
+                this._reconnectDelay * 1.5,
+                this._maxReconnectDelay
+            );
+        };
+
+        this.ws.onerror = (err) => {
+            console.error('Dashboard WS error:', err);
+        };
     }
 
     /**
-     * Load all instances from API
+     * Handle incoming WebSocket messages.
+     * @param {object} msg - Parsed JSON message
+     */
+    _handleWsMessage(msg) {
+        switch (msg.type) {
+            case 'instances_snapshot':
+                // Full instance list — initial load or periodic sync
+                this.instances = msg.instances || [];
+                this.render();
+                this.updateStatusSummary();
+                break;
+
+            case 'device_event':
+                // A device changed state — update affected cards
+                this._onDeviceEvent(msg);
+                break;
+
+            case 'instance_update':
+                // Instance metadata changed (paused, settings, etc.)
+                this._onInstanceUpdate(msg);
+                break;
+
+            case 'ping':
+                // Keepalive — no action needed
+                break;
+
+            default:
+                console.debug('Dashboard WS unknown message type:', msg.type);
+        }
+    }
+
+    /**
+     * Handle a real-time device event.
+     * Updates the mini-KPI on affected cards and appends to open debug panels.
+     * @param {object} evt - device_event message
+     */
+    _onDeviceEvent(evt) {
+        const instanceIds = evt.instance_ids || [];
+
+        for (const instId of instanceIds) {
+            // Track recent events for mini-KPI
+            if (!this.recentEvents[instId]) {
+                this.recentEvents[instId] = [];
+            }
+            this.recentEvents[instId].unshift({
+                device_name: evt.device_name,
+                event_name: evt.event_name,
+                event_value: evt.event_value,
+                time: evt._ts || new Date().toISOString()
+            });
+            // Keep only last 20 per instance
+            if (this.recentEvents[instId].length > 20) {
+                this.recentEvents[instId].length = 20;
+            }
+
+            // Update the mini-KPI on the card
+            this._updateCardMiniKpi(instId);
+
+            // Append to open debug panel (if visible)
+            this._appendDebugEvent(instId, evt);
+        }
+    }
+
+    /**
+     * Handle an instance metadata update.
+     * Re-fetches instances and re-renders only if data actually changed.
+     * @param {object} msg - instance_update message
+     */
+    async _onInstanceUpdate(msg) {
+        // Refetch to get the latest state
+        try {
+            this.instances = await api.get('/instances');
+            this.render();
+            this.updateStatusSummary();
+        } catch (e) {
+            console.error('Failed to refresh instances after update:', e);
+        }
+    }
+
+    /**
+     * Update the mini-KPI section on a single card without full re-render.
+     * @param {number} instId - Instance ID
+     */
+    _updateCardMiniKpi(instId) {
+        const el = document.getElementById(`mini-kpi-${instId}`);
+        if (!el) return;
+
+        const events = this.recentEvents[instId] || [];
+        const count = events.length;
+        const last = events[0];
+
+        let html = `<span class="mini-kpi-count">${count} event${count !== 1 ? 's' : ''}</span>`;
+        if (last) {
+            const time = new Date(last.time).toLocaleTimeString([], {
+                hour: '2-digit', minute: '2-digit', second: '2-digit'
+            });
+            html += `<span class="mini-kpi-last">${utils.escapeHtml(last.device_name)}: `
+                + `${utils.escapeHtml(last.event_name)}=${utils.escapeHtml(last.event_value)} `
+                + `<span class="mini-kpi-time">${time}</span></span>`;
+        }
+
+        el.innerHTML = html;
+    }
+
+    /**
+     * Append a live event to an open debug panel without full refresh.
+     * @param {number} instId - Instance ID
+     * @param {object} evt - device_event data
+     */
+    _appendDebugEvent(instId, evt) {
+        const output = document.getElementById(`debug-output-${instId}`);
+        if (!output) return;
+        // Only append if the debug panel is visible
+        const panel = document.getElementById(`debug-${instId}`);
+        if (!panel || panel.style.display === 'none') return;
+
+        const time = new Date(evt._ts || Date.now()).toLocaleTimeString();
+        const line = document.createElement('div');
+        line.className = 'debug-line';
+        line.innerHTML = `<span class="debug-time">${time}</span> `
+            + `<span class="debug-device">${utils.escapeHtml(evt.device_name || evt.device_id)}</span> `
+            + `<span class="debug-event">${utils.escapeHtml(evt.event_name)}</span>`
+            + `<span class="debug-value">= ${utils.escapeHtml(evt.event_value || '')}</span>`;
+
+        // Prepend (newest first) to match the existing convention
+        output.insertBefore(line, output.firstChild);
+
+        // Cap at 100 lines
+        while (output.children.length > 100) {
+            output.removeChild(output.lastChild);
+        }
+    }
+
+    /* =========================================================================
+       Fallback: HTTP-based refresh (used after user actions)
+       ========================================================================= */
+
+    /**
+     * Load all instances from API (fallback for user-triggered actions).
+     * After the action, the next WebSocket snapshot will keep things in sync.
      */
     async loadInstances() {
         try {
@@ -45,6 +242,10 @@ export class DashboardController {
             `;
         }
     }
+
+    /* =========================================================================
+       Rendering
+       ========================================================================= */
 
     /**
      * Render instance cards
@@ -85,16 +286,29 @@ export class DashboardController {
             });
             observer.observe(output);
         });
+
+        // Update mini-KPIs for any cached recent events
+        for (const instId of Object.keys(this.recentEvents)) {
+            this._updateCardMiniKpi(Number(instId));
+        }
     }
 
     /**
-     * Render a single instance card
+     * Render a single instance card.
+     *
+     * The card-body is clickable and opens the KPI modal.
+     * Actions buttons are in the card-actions section below.
+     *
      * @param {object} inst - Instance data
      * @returns {string} HTML string
      */
     renderCard(inst) {
         const isPaused = inst.is_paused;
         const deviceCount = this.countDevices(inst.device_selections);
+        const lastActivity = inst.last_activity_at
+            ? this._timeAgo(inst.last_activity_at)
+            : 'No activity';
+        const errorCount = inst.error_count || 0;
 
         return `
             <div class="instance-card ${isPaused ? 'paused' : ''}" data-id="${inst.id}">
@@ -102,12 +316,22 @@ export class DashboardController {
                     <h3>${utils.escapeHtml(inst.label)}</h3>
                     <span class="app-type-badge">${this.getAppTypeName(inst.app_type_id)}</span>
                 </div>
-                <div class="card-body">
-                    <span class="status-indicator ${isPaused ? 'paused' : 'active'}">
-                        ${isPaused ? 'PAUSED' : 'ACTIVE'}
-                    </span>
-                    <div class="device-summary">
-                        ${deviceCount} device${deviceCount !== 1 ? 's' : ''} configured
+                <div class="card-body card-body-clickable"
+                     onclick="dashboard.openKpi(${inst.id}, '${utils.escapeHtml(inst.label).replace(/'/g, "\\'")}')"
+                     title="Click for detailed KPIs">
+                    <div class="card-body-top">
+                        <span class="status-indicator ${isPaused ? 'paused' : 'active'}">
+                            ${isPaused ? 'PAUSED' : 'ACTIVE'}
+                        </span>
+                        <div class="card-stats">
+                            <span class="card-stat">${deviceCount} device${deviceCount !== 1 ? 's' : ''}</span>
+                            <span class="card-stat-sep">&middot;</span>
+                            <span class="card-stat">${lastActivity}</span>
+                            ${errorCount > 0 ? `<span class="card-stat-sep">&middot;</span><span class="card-stat card-stat-error">${errorCount} error${errorCount !== 1 ? 's' : ''}</span>` : ''}
+                        </div>
+                    </div>
+                    <div class="mini-kpi" id="mini-kpi-${inst.id}">
+                        <span class="mini-kpi-hint">Click for KPIs</span>
                     </div>
                 </div>
                 <div class="card-actions">
@@ -163,7 +387,6 @@ export class DashboardController {
      * @returns {string} Display name
      */
     getAppTypeName(typeId) {
-        // TODO: Fetch and cache app types
         const types = {
             1: 'Motion Lighting'
         };
@@ -186,9 +409,12 @@ export class DashboardController {
      * Bind event handlers
      */
     bindEvents() {
-        // Make dashboard accessible globally for onclick handlers
         window.dashboard = this;
     }
+
+    /* =========================================================================
+       Instance Actions
+       ========================================================================= */
 
     /**
      * Toggle pause state for an instance
@@ -201,7 +427,7 @@ export class DashboardController {
                 await api.post(`/instances/${instanceId}/resume`);
             } else {
                 await api.post(`/instances/${instanceId}/pause`, {
-                    duration_minutes: 60  // Default 1 hour
+                    duration_minutes: 60
                 });
             }
             await this.loadInstances();
@@ -238,10 +464,10 @@ export class DashboardController {
         }
     }
 
-    /**
-     * Toggle debug panel for an instance
-     * @param {number} instanceId - Instance ID
-     */
+    /* =========================================================================
+       Debug Panel
+       ========================================================================= */
+
     /**
      * Persist debug panel state to localStorage
      */
@@ -252,6 +478,10 @@ export class DashboardController {
         }));
     }
 
+    /**
+     * Toggle debug panel for an instance
+     * @param {number} instanceId - Instance ID
+     */
     async toggleDebug(instanceId) {
         const panel = document.getElementById(`debug-${instanceId}`);
         if (!panel) return;
@@ -295,7 +525,6 @@ export class DashboardController {
                     + `</div>`;
             }).join('');
 
-            // Scroll to bottom
             output.scrollTop = output.scrollHeight;
         } catch (error) {
             output.innerHTML = `<span class="debug-error">Error: ${error.message}</span>`;
@@ -313,11 +542,34 @@ export class DashboardController {
         utils.copyToClipboard(output.innerText, btn, 'Copy');
     }
 
+    /* =========================================================================
+       KPI Modal
+       ========================================================================= */
+
+    /**
+     * Open the KPI modal for an instance.
+     * Lazy-loads the kpi-modal module on first use.
+     *
+     * @param {number} instanceId - Instance ID
+     * @param {string} instanceLabel - Instance display label
+     */
+    async openKpi(instanceId, instanceLabel) {
+        try {
+            const { openKpiModal } = await import('../components/kpi-modal.js');
+            openKpiModal(instanceId, instanceLabel);
+        } catch (error) {
+            console.error('Failed to load KPI modal:', error);
+            utils.notify('Failed to open KPI view: ' + error.message, 'error');
+        }
+    }
+
+    /* =========================================================================
+       E2E Test Modal
+       ========================================================================= */
+
     /**
      * Open the E2E test modal for an instance.
-     *
-     * Lazy-loads the E2ETestModal class on first use so the dashboard
-     * doesn't pay the cost of the test controller until it's needed.
+     * Lazy-loads the E2ETestModal class on first use.
      *
      * @param {number} instanceId - Instance ID
      * @param {string} instanceLabel - Instance display label
@@ -332,6 +584,10 @@ export class DashboardController {
             utils.notify('Failed to open test suite: ' + error.message, 'error');
         }
     }
+
+    /* =========================================================================
+       Delete
+       ========================================================================= */
 
     /**
      * Delete an instance
@@ -351,11 +607,24 @@ export class DashboardController {
         }
     }
 
+    /* =========================================================================
+       Utilities
+       ========================================================================= */
+
     /**
-     * Start auto-refresh
+     * Convert a timestamp to a short "X ago" string.
+     * @param {string} isoStr - ISO timestamp
+     * @returns {string}
      */
-    startAutoRefresh() {
-        // Refresh every 30 seconds
-        setInterval(() => this.loadInstances(), 30000);
+    _timeAgo(isoStr) {
+        const diff = Date.now() - new Date(isoStr).getTime();
+        const secs = Math.floor(diff / 1000);
+        if (secs < 60) return `${secs}s ago`;
+        const mins = Math.floor(secs / 60);
+        if (mins < 60) return `${mins}m ago`;
+        const hrs = Math.floor(mins / 60);
+        if (hrs < 24) return `${hrs}h ago`;
+        const days = Math.floor(hrs / 24);
+        return `${days}d ago`;
     }
 }

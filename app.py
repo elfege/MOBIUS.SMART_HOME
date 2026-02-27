@@ -7,12 +7,13 @@ Serves Jinja2 templates for the web UI.
 """
 
 import os
+import asyncio
 import logging
 import traceback
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, Request, Query, HTTPException
+from fastapi import FastAPI, Request, Query, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -1451,6 +1452,205 @@ async def instance_detail(request: Request, instance_id: int):
     return templates.TemplateResponse(
         request, "instance_detail.html", {"instance_id": instance_id}
     )
+
+
+# =============================================================================
+# Dashboard WebSocket (real-time updates — replaces polling)
+# =============================================================================
+
+
+@app.websocket("/ws/dashboard")
+async def dashboard_websocket(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time dashboard updates.
+
+    Replaces the 30-second polling loop. When Hubitat webhooks arrive,
+    events are pushed instantly to all connected dashboard clients.
+    The frontend uses these events to patch individual cards instead
+    of re-rendering the entire grid (no more flicker).
+
+    Message types sent to client:
+        - device_event: A device changed state
+        - instance_update: Instance metadata changed
+        - instances_snapshot: Full instance list (sent on connect)
+    """
+    from services.dashboard_broadcaster import get_dashboard_broadcaster
+    from services.instance_manager import get_instance_manager
+    import json
+
+    await websocket.accept()
+    broadcaster = get_dashboard_broadcaster()
+    queue = await broadcaster.connect()
+
+    try:
+        # Send initial snapshot so the client doesn't need a separate fetch
+        manager = get_instance_manager()
+        instances = manager.get_all_instances()
+        await websocket.send_json({
+            "type": "instances_snapshot",
+            "instances": instances
+        })
+
+        # Stream events to client
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                await websocket.send_json(event)
+            except asyncio.TimeoutError:
+                # Keepalive ping — detect dead connections
+                await websocket.send_json({"type": "ping"})
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.debug(f"Dashboard WS closed: {e}")
+    finally:
+        await broadcaster.disconnect(queue)
+
+
+# =============================================================================
+# KPI Metrics
+# =============================================================================
+
+
+@app.get("/api/instances/{instance_id}/metrics", tags=["instances"])
+async def get_instance_metrics(
+    instance_id: int,
+    hours: int = Query(24, description="Lookback window in hours")
+):
+    """
+    Aggregated KPI metrics for a single instance.
+
+    Queries event_log for the instance's subscribed devices and computes:
+    - Event counts (total, per-hour, per-device, per-type)
+    - Last activity timestamps per device
+    - Switch on/off operation counts
+    - Motion active/inactive ratios
+    - Error tracking from app_instances table
+
+    Args:
+        instance_id: Target instance
+        hours: Lookback window (default 24h)
+    """
+    from services.instance_manager import get_instance_manager
+    import requests as req
+    from datetime import datetime, timedelta, timezone
+
+    manager = get_instance_manager()
+    instance = manager.get_instance(instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    # Collect device IDs from instance
+    device_ids = []
+    for ids in (instance.get('device_selections') or {}).values():
+        device_ids.extend(str(d) for d in ids)
+
+    postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(hours=hours)).isoformat()
+
+    # Fetch events for this instance's devices within the time window
+    events = []
+    if device_ids:
+        try:
+            resp = req.get(
+                f"{postgrest_url}/event_log",
+                params={
+                    "hubitat_device_id": f"in.({','.join(device_ids)})",
+                    "received_at": f"gte.{since}",
+                    "order": "received_at.desc",
+                    "limit": "2000"
+                },
+                timeout=10
+            )
+            if resp.status_code == 200:
+                events = resp.json()
+        except Exception as e:
+            logger.error(f"Failed to fetch metrics events: {e}")
+
+    # Compute aggregations
+    total_events = len(events)
+
+    # Events per hour (for chart)
+    hourly_buckets = {}
+    for h in range(hours):
+        bucket_time = now - timedelta(hours=h)
+        key = bucket_time.strftime('%Y-%m-%dT%H:00:00')
+        hourly_buckets[key] = 0
+
+    # Per-device stats
+    device_stats = {}
+    # Per-event-type counts
+    type_counts = {}
+
+    for evt in events:
+        # Hourly bucketing
+        received = evt.get('received_at', '')
+        if received:
+            try:
+                # Truncate to hour
+                hour_key = received[:13] + ':00:00'
+                if hour_key in hourly_buckets:
+                    hourly_buckets[hour_key] += 1
+            except (IndexError, TypeError):
+                pass
+
+        # Device stats
+        dev_id = evt.get('hubitat_device_id', '')
+        dev_name = evt.get('device_name', dev_id)
+        evt_type = evt.get('event_type', '')
+        evt_value = evt.get('event_value', '')
+
+        if dev_id not in device_stats:
+            device_stats[dev_id] = {
+                'device_name': dev_name,
+                'event_count': 0,
+                'last_event_at': received,
+                'last_event_type': evt_type,
+                'last_event_value': evt_value,
+                'type_breakdown': {}
+            }
+        device_stats[dev_id]['event_count'] += 1
+
+        # Type breakdown per device
+        if evt_type not in device_stats[dev_id]['type_breakdown']:
+            device_stats[dev_id]['type_breakdown'][evt_type] = {
+                'count': 0,
+                'last_value': evt_value,
+                'last_at': received
+            }
+        device_stats[dev_id]['type_breakdown'][evt_type]['count'] += 1
+
+        # Global type counts
+        type_counts[evt_type] = type_counts.get(evt_type, 0) + 1
+
+    # Sort hourly buckets chronologically
+    hourly_sorted = sorted(hourly_buckets.items())
+
+    # Instance metadata
+    running = manager.get_running_instance(instance_id) is not None
+
+    return {
+        "instance_id": instance_id,
+        "label": instance.get("label"),
+        "is_paused": instance.get("is_paused", False),
+        "is_running": running,
+        "error_count": instance.get("error_count", 0),
+        "last_error": instance.get("last_error"),
+        "last_activity_at": instance.get("last_activity_at"),
+        "created_at": instance.get("created_at"),
+        "device_count": len(device_ids),
+        "window_hours": hours,
+        "total_events": total_events,
+        "hourly_events": [
+            {"hour": h, "count": c} for h, c in hourly_sorted
+        ],
+        "device_stats": device_stats,
+        "type_counts": type_counts,
+        "device_selections": instance.get("device_selections", {}),
+        "settings": instance.get("settings", {}),
+    }
 
 
 # =============================================================================

@@ -13,6 +13,7 @@ represents a user-created automation (e.g., "Advanced Lights - Office").
 
 import os
 import logging
+import traceback
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Type
 import requests
@@ -105,7 +106,7 @@ class InstanceManager:
             if response.status_code == 200:
                 return response.json()
         except Exception as e:
-            self.logger.error(f"Failed to get app types: {e}")
+            self.logger.error(f"Failed to get app types: {e}", exc_info=True)
         return []
 
     def get_app_type_schema(self, type_name: str) -> Optional[Dict[str, Any]]:
@@ -129,7 +130,7 @@ class InstanceManager:
                         'device_categories': types[0].get('device_categories', [])
                     }
         except Exception as e:
-            self.logger.error(f"Failed to get app type schema: {e}")
+            self.logger.error(f"Failed to get app type schema: {e}", exc_info=True)
         return None
 
     # =========================================================================
@@ -206,7 +207,7 @@ class InstanceManager:
                 return None
 
         except Exception as e:
-            self.logger.error(f"Failed to create instance: {e}")
+            self.logger.error(f"Failed to create instance: {e}", exc_info=True)
             return None
 
     def get_instance(self, instance_id: int) -> Optional[Dict[str, Any]]:
@@ -229,7 +230,7 @@ class InstanceManager:
                 instances = response.json()
                 return instances[0] if instances else None
         except Exception as e:
-            self.logger.error(f"Failed to get instance: {e}")
+            self.logger.error(f"Failed to get instance: {e}", exc_info=True)
         return None
 
     def get_all_instances(self) -> List[Dict[str, Any]]:
@@ -248,7 +249,7 @@ class InstanceManager:
             if response.status_code == 200:
                 return response.json()
         except Exception as e:
-            self.logger.error(f"Failed to get instances: {e}")
+            self.logger.error(f"Failed to get instances: {e}", exc_info=True)
         return []
 
     def get_instances_by_type(self, app_type: str) -> List[Dict[str, Any]]:
@@ -274,7 +275,7 @@ class InstanceManager:
             if response.status_code == 200:
                 return response.json()
         except Exception as e:
-            self.logger.error(f"Failed to get instances by type: {e}")
+            self.logger.error(f"Failed to get instances by type: {e}", exc_info=True)
         return []
 
     def update_instance(
@@ -343,7 +344,7 @@ class InstanceManager:
             return False
 
         except Exception as e:
-            self.logger.error(f"Failed to update instance: {e}")
+            self.logger.error(f"Failed to update instance: {e}", exc_info=True)
             return False
 
     def delete_instance(self, instance_id: int) -> bool:
@@ -375,7 +376,7 @@ class InstanceManager:
             return False
 
         except Exception as e:
-            self.logger.error(f"Failed to delete instance: {e}")
+            self.logger.error(f"Failed to delete instance: {e}", exc_info=True)
             return False
 
     # =========================================================================
@@ -425,7 +426,7 @@ class InstanceManager:
                 return True
 
         except Exception as e:
-            self.logger.error(f"Failed to pause instance: {e}")
+            self.logger.error(f"Failed to pause instance: {e}", exc_info=True)
 
         return False
 
@@ -460,7 +461,7 @@ class InstanceManager:
                 return True
 
         except Exception as e:
-            self.logger.error(f"Failed to resume instance: {e}")
+            self.logger.error(f"Failed to resume instance: {e}", exc_info=True)
 
         return False
 
@@ -493,7 +494,7 @@ class InstanceManager:
             )
             return response.status_code in (200, 204)
         except Exception as e:
-            self.logger.error(f"Failed to update memoization: {e}")
+            self.logger.error(f"Failed to update memoization: {e}", exc_info=True)
             return False
 
     # =========================================================================
@@ -533,7 +534,7 @@ class InstanceManager:
                 return [s['instance_id'] for s in subs]
 
         except Exception as e:
-            self.logger.error(f"Failed to get subscribed instances: {e}")
+            self.logger.error(f"Failed to get subscribed instances: {e}", exc_info=True)
 
         return []
 
@@ -602,7 +603,7 @@ class InstanceManager:
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to start instance {instance_id}: {e}")
+            self.logger.error(f"Failed to start instance {instance_id}: {e}", exc_info=True)
             return False
 
     def _stop_instance(self, instance_id: int) -> None:
@@ -611,15 +612,28 @@ class InstanceManager:
             try:
                 self._running_instances[instance_id].shutdown()
             except Exception as e:
-                self.logger.warning(f"Error shutting down instance: {e}")
+                self.logger.warning(f"Error shutting down instance: {e}", exc_info=True)
             del self._running_instances[instance_id]
             self.logger.debug(f"Stopped instance {instance_id}")
 
     def _reload_instance(self, instance_id: int) -> None:
-        """Reload an instance after settings change."""
+        """Reload an instance after settings change.
+
+        Also rebuilds device subscriptions to ensure any newly added
+        device categories (e.g. keep_off_switches) get webhook routing.
+        """
         self._stop_instance(instance_id)
         instance = self.get_instance(instance_id)
         if instance:
+            # Rebuild subscriptions from current device_selections
+            device_selections = instance.get('device_selections', {})
+            app_type = self._get_app_type_name(instance['app_type_id'])
+            if device_selections and app_type:
+                self._delete_subscriptions(instance_id)
+                self._create_subscriptions(
+                    instance_id, device_selections, app_type,
+                    settings=instance.get('settings', {})
+                )
             self._start_instance(instance_id, instance)
 
     # =========================================================================
@@ -638,12 +652,16 @@ class InstanceManager:
         button_event = (settings or {}).get('buttonEventType', 'held')
 
         # Map device categories to event types
+        # keep_off/keep_on switches need subscriptions so _handle_switch()
+        # can detect manual overrides via webhook events
         category_events = {
             'motion_sensors': 'motion',
             'switches': 'switch',
             'contacts': 'contact',
             'illuminance_sensor': 'illuminance',
-            'pause_buttons': button_event
+            'pause_buttons': button_event,
+            'keep_off_switches': 'switch',
+            'keep_on_switches': 'switch'
         }
 
         subscriptions = []
@@ -672,7 +690,7 @@ class InstanceManager:
                     timeout=10
                 )
             except Exception as e:
-                self.logger.error(f"Failed to create subscriptions: {e}")
+                self.logger.error(f"Failed to create subscriptions: {e}", exc_info=True)
 
     def _delete_subscriptions(self, instance_id: int) -> None:
         """Delete all subscriptions for an instance."""
@@ -683,7 +701,7 @@ class InstanceManager:
                 timeout=5
             )
         except Exception as e:
-            self.logger.error(f"Failed to delete subscriptions: {e}")
+            self.logger.error(f"Failed to delete subscriptions: {e}", exc_info=True)
 
     # =========================================================================
     # Helper Methods
@@ -700,8 +718,8 @@ class InstanceManager:
             if response.status_code == 200:
                 types = response.json()
                 return types[0]['id'] if types else None
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.error(f"Failed to get app type ID for '{type_name}': {e}", exc_info=True)
         return None
 
     def _get_app_type_name(self, type_id: int) -> Optional[str]:
@@ -715,8 +733,8 @@ class InstanceManager:
             if response.status_code == 200:
                 types = response.json()
                 return types[0]['type_name'] if types else None
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.error(f"Failed to get app type name for ID {type_id}: {e}", exc_info=True)
         return None
 
 

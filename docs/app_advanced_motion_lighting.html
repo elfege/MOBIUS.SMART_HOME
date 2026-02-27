@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Advanced Motion Lighting - App Architecture (February 21, 2026)</title>
+    <title>Advanced Motion Lighting - App Architecture (February 23, 2026)</title>
     <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
     <style>
         body {
@@ -196,22 +196,22 @@
         <h1>Advanced Motion Lighting - App Architecture</h1>
 
         <div class="critical-note">
-            <strong>App Overview:</strong> Advanced Motion Lighting Management (v2.0.0) is the first app ported from Hubitat Groovy to the 0_SMART_HOME platform. It provides motion-triggered lighting automation with memoization (detects and respects user manual overrides), health monitoring for motion sensors, illuminance-based exception handling, color/dimming control, mode-aware timeouts, and pause/resume via physical buttons. Each instance operates independently with its own device set, settings, and state.
+            <strong>App Overview:</strong> Advanced Motion Lighting Management (v2.0.0) is the first app ported from Hubitat Groovy to the 0_MOBIUS.SMART_HOME platform. It provides motion-triggered lighting automation with source-tracked memoization (detects and respects user manual overrides), three-tier motion detection (memory → live state → event history), health monitoring for motion sensors, illuminance-based exception handling, color/dimming control, Always-Off/On enforcement with mode gating, and pause/resume via physical buttons. Device commands go through <code>DeviceCommander</code> with nested retries and state verification, with optional dual-path Matter protocol. Each instance operates independently with its own device set, settings, and state.
             <br/><br/>
-            <strong>Source:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code> (413 lines)
+            <strong>Source:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code> (1,240 lines)
             <br/>
             <strong>Original Groovy source:</strong> <code>~/HUBITAT/SMARTHOME_MAIN/APPS/LIGHTING/</code>
             <br/><br/>
-            <em>Last updated: February 21, 2026.</em>
+            <em>Last updated: February 23, 2026.</em>
         </div>
 
         <div class="key-metrics">
             <div class="metric-card">
-                <div class="metric-value">5</div>
+                <div class="metric-value">8</div>
                 <div class="metric-label">Device Categories</div>
             </div>
             <div class="metric-card">
-                <div class="metric-value">13</div>
+                <div class="metric-value">17</div>
                 <div class="metric-label">Configurable Settings</div>
             </div>
             <div class="metric-card">
@@ -222,6 +222,10 @@
                 <div class="metric-value">10 min</div>
                 <div class="metric-label">Health Check Interval</div>
             </div>
+            <div class="metric-card">
+                <div class="metric-value">3-tier</div>
+                <div class="metric-label">Motion Detection</div>
+            </div>
         </div>
 
         <!-- ============================================================ -->
@@ -230,7 +234,7 @@
         <h2>Level 1: High-Level Automation Flow</h2>
 
         <div class="architecture-note">
-            <strong>Core Automation Cycle:</strong> Motion sensors detect movement and send events via Hubitat. The app turns on configured switches (with optional dimming and color control), starts a timeout timer, and waits. If motion re-triggers, the timeout resets. When the timeout expires with no motion, lights turn off. Throughout this cycle, the app monitors for user manual overrides (memoization) and respects them by not fighting the user's control.
+            <strong>Core Automation Cycle:</strong> Motion sensors detect movement and send events via Hubitat. The app turns on configured switches (with optional dimming and color control) via <code>DeviceCommander</code> (threaded execution with nested retries and state verification), starts a timeout timer, and waits. If motion re-triggers, the timeout resets. When the timeout expires, the app uses three-tier motion detection (memory → live state → event history) to verify no sensor is still active before turning off. Throughout this cycle, the app monitors for user manual overrides via source-tracked memoization and respects them. After normal light control, Always-Off/On enforcement runs to ensure designated devices stay in their forced state.
         </div>
 
         <div class="diagram-container">
@@ -367,8 +371,8 @@
                 <tr>
                     <td><strong>_handle_switch</strong></td>
                     <td><code>switch</code></td>
-                    <td>switches</td>
-                    <td>Detect manual override via timing heuristic. Record in memoization</td>
+                    <td>switches, keep_off_switches, keep_on_switches</td>
+                    <td>Detect user overrides via source tracking (app/manual/pause/unknown). For keep devices, detects contradictions to expected state.</td>
                 </tr>
                 <tr>
                     <td><strong>_handle_illuminance</strong></td>
@@ -378,9 +382,9 @@
                 </tr>
                 <tr>
                     <td><strong>_handle_button</strong></td>
-                    <td><code>pushed</code></td>
+                    <td><code>pushed</code>, <code>held</code>, <code>doubleTapped</code></td>
                     <td>pause_buttons</td>
-                    <td>Toggle pause/resume state. Useful for physical "don't automate" buttons</td>
+                    <td>Toggle pause/resume. Filters by <code>buttonEventType</code> setting. Processed even when paused (unpause mechanism).</td>
                 </tr>
                 <tr>
                     <td><strong>_handle_contact</strong></td>
@@ -397,7 +401,7 @@
         <h2>Level 3: Memoization System</h2>
 
         <div class="architecture-note">
-            <strong>Purpose:</strong> Memoization prevents the app from "fighting" the user. When a user manually turns a switch on or off (detected by timing), the app remembers this override and stops controlling that specific device until conditions reset (mode change, or new motion cycle). This is the key differentiator from simple motion-triggered automations.
+            <strong>Purpose:</strong> Memoization prevents the app from "fighting" the user. When a user manually changes a switch state (detected via source tracking), the app remembers this override and stops controlling that specific device until conditions reset (mode change, pause/resume, or instance update). The key innovation is the four-source tracking model and verified-only updates.
         </div>
 
         <div class="diagram-container">
@@ -406,52 +410,68 @@
                     participant User as User (Physical)
                     participant Hub as Hubitat Hub
                     participant App as AdvancedMotionLighting
+                    participant CMD as DeviceCommander
                     participant Memo as Memoization State
                     participant Switch as Light Switch 456
 
-                    Note over App,Switch: Normal Operation
-                    App->>Switch: send_command(456, 'on')
-                    App->>Memo: Record: last_command_time = now
-                    Hub-->>App: switch event: 456 = 'on'
-                    App->>App: _handle_switch(event)
-                    App->>App: Time since command < 3s?
-                    Note over App: YES — This is our own echo. Ignore.
+                    Note over App,Switch: Phase 1: App turns on (via DeviceCommander)
+                    App->>CMD: send_command(456, 'on')
+                    CMD->>Hub: HTTP: on
+                    CMD->>CMD: Verify: poll state → confirmed ON
+                    CMD-->>App: CommandResult(verified=True)
+                    App->>Memo: set_memo(switch_state.switch_456, {state:on, source:app})
+                    Note over Memo: Source = 'app' (verified command)
 
-                    Note over User,Switch: User Manual Override
+                    Note over User,Switch: Phase 2: User manually overrides
                     User->>Switch: Physically turns off switch
                     Hub-->>App: switch event: 456 = 'off'
                     App->>App: _handle_switch(event)
-                    App->>App: Time since command > 3s?
-                    Note over App: YES — This is a USER action!
-                    App->>Memo: set_memo('switch_456', 'off')
-                    Note over Memo: Device 456 memoized as 'off'
+                    App->>Memo: Check: memo says state='on', source='app'
+                    Note over App: State contradicts memo → USER override!
+                    App->>Memo: set_memo(switch_456, {state:off, source:manual})
+                    Note over Memo: Source = 'manual'
 
-                    Note over App,Switch: Next Motion Event
+                    Note over App,Switch: Phase 3: Next motion event
                     Hub-->>App: motion event: active
                     App->>App: master(motion_active=True)
                     App->>App: _control_lights('on')
-                    App->>Memo: get_memo('switch_456')
-                    Memo-->>App: 'off' (user override)
-                    Note over App: SKIP device 456 — user wants it off
+                    App->>Memo: get_memo(switch_456).source
+                    Memo-->>App: source='manual'
+                    Note over App: SKIP — user override detected
 
-                    Note over App,Switch: Mode Change Resets Memoization
-                    Hub-->>App: mode change: 'Night' → 'Day'
-                    App->>App: on_mode_change('Day')
-                    App->>Memo: Clear all memoization
-                    Note over Memo: All overrides reset
+                    Note over App,Switch: Phase 4: Mode change resets
+                    Hub-->>App: mode change: Night → Day
+                    App->>Memo: _reset_memoization() → re-seed with source='app'
                     App->>App: master() — full re-evaluation
             </div>
         </div>
 
         <div class="critical-note">
+            <h3>Four-Source Tracking Model</h3>
+            <table>
+                <thead>
+                    <tr><th>Source</th><th>Set By</th><th>Enforcement Behavior</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td><code>app</code></td><td>DeviceCommander (verified), initialize(), update()</td><td>ENFORCE always-off/on rules</td></tr>
+                    <tr><td><code>manual</code></td><td>_handle_switch() (state contradicts expected)</td><td>SKIP enforcement (user override)</td></tr>
+                    <tr><td><code>pause</code></td><td>_control_pause_switches()</td><td>ENFORCE (pause is app-initiated)</td></tr>
+                    <tr><td><code>unknown</code></td><td>Fallback (no memo entry)</td><td>SKIP enforcement (conservative)</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="critical-note">
             <h3>Memoization Rules</h3>
             <ul>
-                <li><strong>Detection Heuristic:</strong> If a switch event arrives more than 3 seconds after the app's last command to that device, it's a user manual action</li>
+                <li><strong>Verified-Only Updates:</strong> Memo is only updated when a command is verified (device state confirmed via live Hubitat API poll). Unverified commands do not change memo.</li>
+                <li><strong>Override Detection:</strong> If a switch event's state contradicts the memo's expected state, it's tagged as <code>source='manual'</code> (user override)</li>
                 <li><strong>Scope:</strong> Per-device — memoizing switch 456 doesn't affect switch 457</li>
-                <li><strong>Stored Values:</strong> Switch state (<code>"on"</code>/<code>"off"</code>) and dim level per device</li>
+                <li><strong>Key Format:</strong> Regular switches keyed by device name; keep devices keyed by <code>keep:{device_id}</code></li>
+                <li><strong>Stored Values:</strong> <code>{state: "on"/"off", source: "app"/"manual"/"pause"/"unknown"}</code> and dim level per device</li>
                 <li><strong>Persistence:</strong> Saved to <code>app_instances.memoization_state</code> (JSONB) via PostgREST</li>
-                <li><strong>Reset Triggers:</strong> Location mode change clears all memoization for the instance</li>
-                <li><strong>Edge Case:</strong> Very fast manual interactions (under 3s) may be misclassified as app echoes</li>
+                <li><strong>Reset Triggers:</strong> Mode change, pause/resume, instance update — all re-seed with <code>source='app'</code></li>
+                <li><strong>Seeding:</strong> On init/resume, keep_off/keep_on devices are seeded with expected state and <code>source='app'</code></li>
             </ul>
         </div>
 
@@ -730,6 +750,27 @@
                     <td><code>contactSensor</code></td>
                     <td>Door/window sensors — turn on lights when opened</td>
                 </tr>
+                <tr>
+                    <td><strong>pause_switches</strong></td>
+                    <td>No</td>
+                    <td>Yes</td>
+                    <td><code>switch</code></td>
+                    <td>Switches controlled on pause/resume (can overlap with motion switches)</td>
+                </tr>
+                <tr>
+                    <td><strong>keep_off_switches</strong></td>
+                    <td>No</td>
+                    <td>Yes</td>
+                    <td><code>switch</code></td>
+                    <td>Always-Off: these switches are forced off after every control cycle</td>
+                </tr>
+                <tr>
+                    <td><strong>keep_on_switches</strong></td>
+                    <td>No</td>
+                    <td>Yes</td>
+                    <td><code>switch</code></td>
+                    <td>Always-On: these switches are forced on after every control cycle</td>
+                </tr>
             </tbody>
         </table>
 
@@ -747,7 +788,7 @@
                 <tr>
                     <td><strong>memoize</strong></td>
                     <td>boolean</td>
-                    <td>true</td>
+                    <td>false</td>
                     <td>Remember manual switch changes (avoid fighting user)</td>
                 </tr>
                 <tr>
@@ -759,7 +800,7 @@
                 <tr>
                     <td><strong>defaultDimLevel</strong></td>
                     <td>integer (0-100)</td>
-                    <td>75</td>
+                    <td>50</td>
                     <td>Brightness percentage when dimming is enabled</td>
                 </tr>
                 <tr>
@@ -771,13 +812,13 @@
                 <tr>
                     <td><strong>colorPreset</strong></td>
                     <td>string</td>
-                    <td>"Soft White"</td>
+                    <td>"Warm White"</td>
                     <td>Color preset name or "Custom"</td>
                 </tr>
                 <tr>
                     <td><strong>customColorTemperature</strong></td>
                     <td>integer (2000-6500)</td>
-                    <td>3000</td>
+                    <td>2700</td>
                     <td>Custom Kelvin value (used when preset = "Custom")</td>
                 </tr>
                 <tr>
@@ -811,9 +852,15 @@
                     <td>Fail-safe: assume motion active if all sensors fail</td>
                 </tr>
                 <tr>
+                    <td><strong>buttonEventType</strong></td>
+                    <td>string</td>
+                    <td>"held"</td>
+                    <td>Which button event triggers pause: <code>"held"</code>, <code>"pushed"</code>, <code>"doubleTapped"</code></td>
+                </tr>
+                <tr>
                     <td><strong>pauseDuration</strong></td>
                     <td>integer</td>
-                    <td>30</td>
+                    <td>60</td>
                     <td>How long to pause when button pressed</td>
                 </tr>
                 <tr>
@@ -821,6 +868,24 @@
                     <td>string</td>
                     <td>"Minutes"</td>
                     <td><code>"Minutes"</code> or <code>"Hours"</code></td>
+                </tr>
+                <tr>
+                    <td><strong>pauseSwitchAction</strong></td>
+                    <td>string</td>
+                    <td>"toggle"</td>
+                    <td>What to do with pause switches: <code>"toggle"</code>, <code>"on"</code>, <code>"off"</code></td>
+                </tr>
+                <tr>
+                    <td><strong>keepOffModes</strong></td>
+                    <td>array (strings)</td>
+                    <td>[] (all modes)</td>
+                    <td>Location modes where Always-Off is enforced. Empty = all modes.</td>
+                </tr>
+                <tr>
+                    <td><strong>keepOnModes</strong></td>
+                    <td>array (strings)</td>
+                    <td>[] (all modes)</td>
+                    <td>Location modes where Always-On is enforced. Empty = all modes.</td>
                 </tr>
             </tbody>
         </table>
@@ -983,6 +1048,173 @@
         </div>
 
         <!-- ============================================================ -->
+        <!-- LEVEL 11: DEVICE COMMANDER INTEGRATION                       -->
+        <!-- ============================================================ -->
+        <h2>Level 11: DeviceCommander Integration</h2>
+
+        <div class="architecture-note">
+            <strong>Centralized Command Execution:</strong> All device commands from the app go through <code>DeviceCommander</code> (682 lines), not directly through <code>HubitatClient</code>. The commander provides threaded execution, nested retries, state verification, and optional dual-path Matter protocol dispatch. This ensures reliable device control even with network issues or unresponsive hubs.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                flowchart TB
+                    APP([App calls send_command]) --> CMD[DeviceCommander]
+                    CMD --> THREAD[ThreadPoolExecutor<br/>8 workers]
+
+                    subgraph Retry["Nested Retry Pipeline"]
+                        OUTER[OUTER: Operation retry<br/>2 cycles, 2s delay]
+                        MIDDLE[MIDDLE: Verification<br/>3 polls, 1s delay]
+                        INNER[INNER: Network<br/>3 retries in HubitatClient]
+                    end
+
+                    THREAD --> OUTER
+                    OUTER --> SEND[Send command via HTTP]
+                    SEND --> INNER
+                    INNER --> VERIFY{Verify state?}
+                    VERIFY --> POLL[Poll live Hubitat API<br/>bypasses cache]
+                    POLL --> MATCH{State matches<br/>expected?}
+                    MATCH -->|Yes| SUCCESS[CommandResult<br/>verified=True]
+                    MATCH -->|No| MIDDLE
+                    MIDDLE -->|Exhausted| OUTER
+
+                    SUCCESS --> MEMO_UPDATE[Update memoization<br/>source=app]
+                    SUCCESS --> MATTER{Matter mapping<br/>exists?}
+                    MATTER -->|Yes| FIRE[Fire-and-forget<br/>Matter command]
+                    MATTER -->|No| DONE([Done])
+                    FIRE --> DONE
+
+                    style CMD fill:#dc3545,color:#fff
+                    style SUCCESS fill:#28a745,color:#fff
+                    style FIRE fill:#e83e8c,color:#fff
+                    style MEMO_UPDATE fill:#fd7e14,color:#fff
+            </div>
+        </div>
+
+        <div class="critical-note">
+            <h3>Commander Configuration (Environment Variables)</h3>
+            <table>
+                <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+                <tbody>
+                    <tr><td><code>DEVICE_CMD_TIMEOUT</code></td><td>30s</td><td>Overall timeout per command</td></tr>
+                    <tr><td><code>DEVICE_CMD_VERIFY_RETRIES</code></td><td>3</td><td>Verification polls per send attempt</td></tr>
+                    <tr><td><code>DEVICE_CMD_VERIFY_DELAY</code></td><td>1.0s</td><td>Delay between verification polls</td></tr>
+                    <tr><td><code>DEVICE_CMD_OPERATION_RETRIES</code></td><td>2</td><td>Full send+verify cycles</td></tr>
+                    <tr><td><code>DEVICE_CMD_OPERATION_DELAY</code></td><td>2.0s</td><td>Delay between operation retries</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 12: THREE-TIER MOTION DETECTION                        -->
+        <!-- ============================================================ -->
+        <h2>Level 12: Three-Tier Motion Detection</h2>
+
+        <div class="architecture-note">
+            <strong>Problem:</strong> Simple motion checking (is any sensor currently "active"?) misses cases where motion was recent but the sensor transitioned to inactive, or where in-memory state was lost after restart.
+            <br/><br/>
+            <strong>Solution:</strong> <code>_is_motion_active()</code> uses three progressively more expensive checks, returning True as soon as any tier confirms activity.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                flowchart TB
+                    START([_is_motion_active called]) --> T1{Tier 1:<br/>In-Memory Timestamp}
+                    T1 -->|last_motion_time<br/>within timeout| YES1([Return True])
+                    T1 -->|No or expired| T2{Tier 2:<br/>Live Device State}
+
+                    T2 -->|Query Hubitat API<br/>currentValue motion| CHECK2{Any sensor<br/>reports active?}
+                    CHECK2 -->|Yes| YES2([Return True])
+                    CHECK2 -->|No| T3{Tier 3:<br/>Event History}
+
+                    T3 -->|Query last ~20 events<br/>per sensor via API| CHECK3{Any active event<br/>within timeout?}
+                    CHECK3 -->|Yes| YES3([Return True])
+                    CHECK3 -->|No| FAILSAFE{All sensors<br/>non-functional?}
+
+                    FAILSAFE -->|Yes| CONSIDER{considerActiveWhenFail?}
+                    CONSIDER -->|true| YES4([Return True<br/>Fail-safe])
+                    CONSIDER -->|false| NO([Return False])
+                    FAILSAFE -->|No| NO
+
+                    style T1 fill:#28a745,color:#fff
+                    style T2 fill:#fd7e14,color:#fff
+                    style T3 fill:#dc3545,color:#fff
+                    style YES1 fill:#28a745,color:#fff
+                    style YES2 fill:#28a745,color:#fff
+                    style YES3 fill:#28a745,color:#fff
+                    style YES4 fill:#ffc107
+            </div>
+        </div>
+
+        <div class="critical-note">
+            <h3>Tier Details</h3>
+            <ul>
+                <li><strong>Tier 1 (In-Memory):</strong> Fastest path (~0ms). Checks <code>self._runtime.last_motion_time</code> against timeout. Used for normal runtime when events flow regularly.</li>
+                <li><strong>Tier 2 (Live State):</strong> Queries Hubitat API for each functional sensor's current <code>motion</code> attribute (~50-200ms per sensor). Catches motion that's active right now but wasn't received via webhook.</li>
+                <li><strong>Tier 3 (Event History):</strong> Queries last ~20 events per sensor from Hubitat API (~200-500ms per sensor). Searches for <code>motion=active</code> events within the timeout window. Catches recent motion that has already transitioned to inactive.</li>
+                <li><strong>Fail-Safe:</strong> If no functional sensors exist, defers to <code>considerActiveWhenFail</code> setting. True = keep lights on. False = allow turn off.</li>
+            </ul>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 13: ALWAYS-OFF/ON ENFORCEMENT                          -->
+        <!-- ============================================================ -->
+        <h2>Level 13: Always-Off/On Enforcement</h2>
+
+        <div class="architecture-note">
+            <strong>Purpose:</strong> Devices in the <code>keep_off_switches</code> and <code>keep_on_switches</code> categories are forced to their designated state after every control cycle. Enforcement respects user manual overrides (via source tracking) and can be gated to specific location modes. See <a href="app_always_off_on.html">Always-Off/On detailed documentation</a> for full decision tables.
+        </div>
+
+        <div class="critical-note">
+            <h3>Enforcement Points</h3>
+            <ul>
+                <li><strong><code>master()</code>:</strong> After normal light control, calls <code>_enforce_keep_switches()</code></li>
+                <li><strong><code>initialize()</code>:</strong> On startup, enforces keep rules immediately (does NOT call master)</li>
+                <li><strong><code>_health_check()</code>:</strong> Every 10 minutes, re-enforces keep rules</li>
+                <li><strong><code>resume()</code>:</strong> On unpause, re-seeds memo then calls master which enforces</li>
+            </ul>
+        </div>
+
+        <div class="alert-note">
+            <h3>Mode Gating</h3>
+            <p>Always-Off and Always-On enforcement can be restricted to specific location modes via <code>keepOffModes</code> and <code>keepOnModes</code> settings. An empty array means "enforce in all modes" (default).</p>
+            <table>
+                <thead><tr><th>keepOffModes</th><th>Current Mode</th><th>Enforce Always-Off?</th></tr></thead>
+                <tbody>
+                    <tr><td><code>[]</code></td><td>any</td><td>YES (all modes)</td></tr>
+                    <tr><td><code>["Night"]</code></td><td>Night</td><td>YES</td></tr>
+                    <tr><td><code>["Night"]</code></td><td>Day</td><td>NO</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="danger-note">
+            <strong>Conflict Resolution:</strong> If a device appears in both <code>keep_off_switches</code> and <code>keep_on_switches</code>, keep_off wins. The code removes conflicting IDs: <code>keep_on_ids = keep_on_ids - keep_off_ids</code>.
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- LEVEL 14: INITIALIZATION BEHAVIOR                            -->
+        <!-- ============================================================ -->
+        <h2>Level 14: Initialization Behavior</h2>
+
+        <div class="architecture-note">
+            <strong>Critical Design Decision:</strong> <code>initialize()</code> does NOT call <code>master()</code>. If it did, <code>_is_motion_active()</code> would return False (no motion event received yet) and all lights would immediately turn off on startup. Instead, initialize only:
+        </div>
+
+        <div class="critical-note">
+            <h3>initialize() Flow</h3>
+            <ol>
+                <li>Log startup with instance label</li>
+                <li>Seed <code>_functional_sensors</code> dict from configured motion sensors</li>
+                <li>Call <code>_init_memoization_keys()</code> — seeds keep_off/keep_on devices with expected state and <code>source='app'</code></li>
+                <li>Schedule health check job (every 10 minutes)</li>
+                <li>Call <code>_enforce_keep_switches()</code> — enforce always-off/on rules immediately</li>
+                <li>Schedule initial timeout run</li>
+            </ol>
+            <p><strong>What it does NOT do:</strong> Call <code>master()</code>, turn off lights, or change any regular switch state. This prevents false light-off on startup/restart.</p>
+        </div>
+
+        <!-- ============================================================ -->
         <!-- ARCHITECTURE SUMMARY                                         -->
         <!-- ============================================================ -->
         <h2>App Architecture Summary</h2>
@@ -990,15 +1222,19 @@
         <div class="critical-note">
             <h3>Advanced Motion Lighting Key Characteristics</h3>
             <ul>
-                <li><strong>Memoization-First Design:</strong> The app always checks for user manual overrides before controlling any device — this is the core differentiator from basic motion automations</li>
+                <li><strong>Source-Tracked Memoization:</strong> Four-source model (app/manual/pause/unknown) with verified-only updates. Only confirmed device state changes update memo. User overrides are detected and respected.</li>
+                <li><strong>Three-Tier Motion Detection:</strong> Memory → live state → event history. Progressively more expensive checks ensure no false "no motion" when sensors are slow or events were missed.</li>
+                <li><strong>DeviceCommander Integration:</strong> All commands go through centralized commander with 8-worker ThreadPool, nested retries (network→verify→operation), and state verification via live API poll.</li>
+                <li><strong>Matter Dual-Path:</strong> For mapped devices, commands are sent simultaneously via Hubitat and Matter protocol (fire-and-forget) for lower latency.</li>
+                <li><strong>Always-Off/On Enforcement:</strong> Designated devices forced to their state after every control cycle, with mode gating and user override respect.</li>
                 <li><strong>Multi-Sensor Support:</strong> Multiple motion sensors per instance, with independent health tracking and functional status per sensor</li>
                 <li><strong>Timeout Rescheduling:</strong> Motion re-triggers reset the timer rather than creating new timers, preventing light flickering</li>
-                <li><strong>Health Monitoring:</strong> 10-minute recurring checks detect silent sensor failures with configurable fail-safe behavior</li>
-                <li><strong>5 Device Categories:</strong> Motion sensors (required), switches (required), illuminance sensor, pause buttons, contact sensors</li>
+                <li><strong>Health Monitoring:</strong> 10-minute recurring checks detect silent sensor failures, with configurable fail-safe behavior and periodic keep-switch enforcement</li>
+                <li><strong>8 Device Categories:</strong> Motion sensors, switches (required). Optional: illuminance, pause buttons, contacts, pause switches, keep-off, keep-on.</li>
                 <li><strong>Rich Light Control:</strong> On/off, dimming (0-100%), color temperature presets (2700-6500K), RGB presets, custom Kelvin</li>
-                <li><strong>Pause/Resume:</strong> Physical button toggle or API call, with optional auto-resume via scheduled job</li>
-                <li><strong>Mode-Aware:</strong> Memoization resets on mode change; future: mode-specific timeouts and dim levels</li>
-                <li><strong>413 Lines of Logic:</strong> Compact but feature-rich — ported from the Hubitat Groovy original</li>
+                <li><strong>Pause/Resume:</strong> Physical button toggle (configurable event type) or API call, with optional auto-resume and pause switch control</li>
+                <li><strong>Mode-Aware:</strong> Memoization resets on mode change. Always-Off/On can be gated to specific modes. Future: mode-specific timeouts and dim levels.</li>
+                <li><strong>1,240 Lines of Logic:</strong> Feature-rich — ported and significantly extended from the Hubitat Groovy original</li>
             </ul>
         </div>
 
@@ -1007,20 +1243,22 @@
             <ul>
                 <li><strong>Mode-Specific Timeouts:</strong> Not yet implemented — currently uses single timeout value regardless of mode</li>
                 <li><strong>Mode-Specific Dim Levels:</strong> Not yet implemented — same dim level across all modes</li>
-                <li><strong>Memoization Timing Edge Case:</strong> The 3-second heuristic may misclassify very fast manual interactions as app echoes</li>
                 <li><strong>No Occupancy Sensor Support:</strong> Currently only handles motion sensors; occupancy sensors (which distinguish presence vs. motion) are not yet supported</li>
                 <li><strong>Health Check Not Persistent:</strong> <code>_functional_sensors</code> is in-memory only (RuntimeInstanceState); resets on restart</li>
                 <li><strong>Single Illuminance Sensor:</strong> Only one lux sensor per instance; no averaging across multiple sensors</li>
+                <li><strong>Three-Tier Cost:</strong> Tier 2 and Tier 3 motion detection require live Hubitat API calls (~50-500ms each); may be slow on congested networks</li>
             </ul>
         </div>
 
         <div class="architecture-note">
             <h3>File Reference</h3>
             <ul>
-                <li><strong>App Logic:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code> (413 lines)</li>
-                <li><strong>Base Class:</strong> <code>apps/base_app.py</code></li>
-                <li><strong>Router:</strong> <code>apps/advanced_motion_lighting/blueprint.py</code> (26 lines)</li>
+                <li><strong>App Logic:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code> (1,240 lines)</li>
+                <li><strong>Base Class:</strong> <code>apps/base_app.py</code> (587 lines)</li>
+                <li><strong>Device Commander:</strong> <code>services/device_commander.py</code> (683 lines)</li>
+                <li><strong>Router:</strong> <code>apps/advanced_motion_lighting/blueprint.py</code></li>
                 <li><strong>Models:</strong> <code>models/event.py</code>, <code>models/instance.py</code>, <code>models/device.py</code></li>
+                <li><strong>Always-Off/On Doc:</strong> <a href="app_always_off_on.html"><code>docs/app_always_off_on.html</code></a></li>
                 <li><strong>Groovy Original:</strong> <code>~/HUBITAT/SMARTHOME_MAIN/APPS/LIGHTING/</code></li>
             </ul>
         </div>

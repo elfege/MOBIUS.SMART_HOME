@@ -1,0 +1,150 @@
+/* =============================================================================
+   CSS Custom Properties — Single Source of Truth
+   All color values, shadows, radii, and font stacks live here.
+   No other CSS file should contain hardcoded color literals.
+   ============================================================================= */
+
+:root {
+    /* =========================================================================
+       Core Theme
+       ========================================================================= */
+    --color-primary: #4A9FD8;
+    --color-primary-hover: #3a8cc2;
+    --color-primary-alpha-15: rgba(74, 159, 216, 0.15);
+    --color-primary-alpha-30: rgba(74, 159, 216, 0.3);
+    --color-accent: #E89B3C;
+    --color-secondary: #64748b;
+
+    --color-bg: #0f0f1a;
+    --color-card: #1a1a2e;
+    --color-text: rgba(255, 255, 255, 0.9);
+    --color-text-muted: rgba(255, 255, 255, 0.5);
+    --color-border: rgba(255, 255, 255, 0.1);
+    --color-header-bg: rgba(20, 20, 28, 0.95);
+
+    /* =========================================================================
+       Semantic Status Colors
+       ========================================================================= */
+    --color-success: #22c55e;
+    --color-success-border: #bbf7d0;
+    --color-success-glow: rgba(34, 197, 94, 0.4);
+
+    --color-warning: #f59e0b;
+
+    --color-danger: #ef4444;
+    --color-danger-hover: #dc2626;
+    --color-danger-dark: #b91c1c;
+
+    /* Neutral (slate) — pending indicators, muted UI */
+    --color-neutral: #94a3b8;
+
+    /* =========================================================================
+       State Badges — on/off/active/inactive
+       Used in E2E device tiles, dashboard status indicators, Matter badges
+       ========================================================================= */
+
+    /* Green state (on / active / success / online) */
+    --color-state-green-bg: #dcfce7;
+    --color-state-green-text: #166534;
+    --color-state-green-border: #86efac;
+
+    /* Slate state (off / inactive) */
+    --color-state-slate-bg: #f1f5f9;
+    --color-state-slate-text: #64748b;
+
+    /* Amber state (active / paused / warning) */
+    --color-state-amber-bg: #fef3c7;
+    --color-state-amber-text: #92400e;
+    --color-state-amber-border: #fcd34d;
+
+    /* Blue state (info / loading / tag) */
+    --color-state-blue-bg: #dbeafe;
+    --color-state-blue-text: #1e40af;
+    --color-state-blue-border: #bfdbfe;
+
+    /* Red state (error / offline) */
+    --color-state-red-bg: #fef2f2;
+    --color-state-red-text: #991b1b;
+    --color-state-red-border: #fecaca;
+
+    /* Loading (light blue variant) */
+    --color-state-loading-bg: #eff6ff;
+
+    /* =========================================================================
+       Terminal / Log Panel (Catppuccin Mocha-inspired)
+       Shared between debug output, E2E log, and any monospace panels
+       ========================================================================= */
+    --color-terminal-bg: #1e1e2e;
+    --color-terminal-text: #cdd6f4;
+    --color-terminal-muted: #6c7086;
+    --color-terminal-blue: #89b4fa;
+    --color-terminal-green: #a6e3a1;
+    --color-terminal-yellow: #f9e2af;
+    --color-terminal-red: #f38ba8;
+    --color-terminal-purple: #cba6f7;
+    --color-terminal-line-border: rgba(255, 255, 255, 0.03);
+    --color-terminal-line-border-subtle: rgba(255, 255, 255, 0.05);
+
+    /* =========================================================================
+       Overlays & Backdrops
+       ========================================================================= */
+    --color-overlay: rgba(0, 0, 0, 0.6);
+    --color-overlay-light: rgba(0, 0, 0, 0.45);
+    --color-subtle-border: rgba(0, 0, 0, 0.04);
+
+    /* =========================================================================
+       Scrollbar (dark-themed)
+       ========================================================================= */
+    --color-scrollbar-track: rgba(0, 0, 0, 0.2);
+    --color-scrollbar-thumb: rgba(148, 163, 184, 0.4);
+    --color-scrollbar-thumb-hover: rgba(148, 163, 184, 0.6);
+    --color-scrollbar-thumb-active: rgba(148, 163, 184, 0.8);
+
+    /* =========================================================================
+       Device Card Border Accents (Matter page)
+       ========================================================================= */
+    --color-card-online: var(--color-success);
+    --color-card-offline: var(--color-danger);
+    --color-card-commissioned: #3b82f6;
+    --color-card-hover-shadow: rgba(0, 0, 0, 0.08);
+
+    /* =========================================================================
+       Modal (light-themed — Matter modals)
+       ========================================================================= */
+    --color-modal-bg: #ffffff;
+    --color-modal-text: var(--color-card);
+    --color-modal-body-text: #555555;
+    --color-modal-shadow: rgba(0, 0, 0, 0.2);
+    --color-modal-spinner-border: #e0e0e0;
+    --color-modal-spinner-active: #0066cc;
+
+    /* =========================================================================
+       Toast Notifications
+       ========================================================================= */
+    --color-toast-text: #ffffff;
+    --color-toast-shadow: rgba(0, 0, 0, 0.15);
+    --color-toast-success: #28a745;
+    --color-toast-error: #dc3545;
+    --color-toast-info: #0066cc;
+
+    /* =========================================================================
+       Form Controls
+       ========================================================================= */
+    --color-input-focus-bg: #fffbeb;
+
+    /* =========================================================================
+       Radius & Shadows
+       ========================================================================= */
+    --radius: 8px;
+    --radius-small: 4px;
+    --radius-pill: 999px;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -2px rgba(0, 0, 0, 0.3);
+
+    /* =========================================================================
+       Font Stacks
+       ========================================================================= */
+    --font-system: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                   'Helvetica Neue', Arial, sans-serif;
+    --font-mono: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+}

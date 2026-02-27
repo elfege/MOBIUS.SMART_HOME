@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MOBIUS Smart Home - Documentation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #24292e;
+            background: #ffffff;
+            padding: 40px 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        header {
+            border-bottom: 3px solid #0366d6;
+            padding-bottom: 20px;
+            margin-bottom: 40px;
+        }
+
+        h1 {
+            font-size: 2.5em;
+            font-weight: 600;
+            color: #0366d6;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            font-size: 1.1em;
+            color: #586069;
+            font-weight: 400;
+        }
+
+        h2 {
+            font-size: 1.5em;
+            font-weight: 600;
+            color: #24292e;
+            margin: 30px 0 20px 0;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #e1e4e8;
+        }
+
+        .doc-list {
+            list-style: none;
+        }
+
+        .doc-item {
+            margin-bottom: 15px;
+            padding: 15px;
+            background: #f6f8fa;
+            border-radius: 6px;
+            border-left: 4px solid #0366d6;
+            transition: all 0.2s ease;
+        }
+
+        .doc-item:hover {
+            background: #e1e4e8;
+            transform: translateX(5px);
+        }
+
+        .doc-item a {
+            color: #0366d6;
+            text-decoration: none;
+            font-weight: 500;
+            font-size: 1.1em;
+            display: block;
+        }
+
+        .doc-item a:hover {
+            text-decoration: underline;
+        }
+
+        .doc-description {
+            color: #586069;
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+
+        .stack-info {
+            background: #f8f9fa;
+            border: 2px solid #0366d6;
+            border-radius: 8px;
+            padding: 30px;
+            margin-bottom: 40px;
+        }
+
+        .stack-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+        }
+
+        .stack-col h3 {
+            font-size: 1.1em;
+            margin-bottom: 10px;
+            color: #0366d6;
+        }
+
+        .stack-col ul {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .stack-col ul li {
+            padding-left: 20px;
+            position: relative;
+            margin-bottom: 6px;
+        }
+
+        .stack-col ul li:before {
+            content: "\2022";
+            position: absolute;
+            left: 0;
+            color: #0366d6;
+            font-weight: bold;
+        }
+
+        footer {
+            margin-top: 60px;
+            padding-top: 20px;
+            border-top: 1px solid #e1e4e8;
+            text-align: center;
+            color: #586069;
+            font-size: 0.9em;
+        }
+
+        @media (max-width: 768px) {
+            .stack-grid {
+                grid-template-columns: 1fr;
+                gap: 20px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>MOBIUS Smart Home | Documentation</h1>
+            <p class="subtitle">Hubitat automation migration platform &mdash; Python/FastAPI, multi-instance architecture</p>
+        </header>
+
+        <div class="stack-info">
+            <div class="stack-grid">
+                <div class="stack-col">
+                    <h3>Backend</h3>
+                    <ul>
+                        <li>Python 3.11 / FastAPI</li>
+                        <li>PostgreSQL 16 + PostgREST</li>
+                        <li>APScheduler (background tasks)</li>
+                        <li>Hubitat Maker API integration</li>
+                    </ul>
+                </div>
+                <div class="stack-col">
+                    <h3>Frontend</h3>
+                    <ul>
+                        <li>Jinja2 templates</li>
+                        <li>ES6 modules + jQuery</li>
+                        <li>Nginx reverse proxy (HTTPS)</li>
+                        <li>SSE for live event streaming</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <main>
+            <section>
+                <h2>Architecture</h2>
+                <ul class="doc-list">
+                    <li class="doc-item">
+                        <a href="architecture.html">System Architecture</a>
+                        <p class="doc-description">Docker services, multi-instance design, webhook routing, database schema, and deployment topology</p>
+                    </li>
+                </ul>
+            </section>
+
+            <section>
+                <h2>App Documentation</h2>
+                <ul class="doc-list">
+                    <li class="doc-item">
+                        <a href="app_advanced_motion_lighting.html">Advanced Motion Lighting</a>
+                        <p class="doc-description">Motion-triggered lighting with memoization, mode-specific timeouts, dimming, color, and pause/resume</p>
+                    </li>
+                    <li class="doc-item">
+                        <a href="app_always_off_on.html">Always Off / Always On Enforcement</a>
+                        <p class="doc-description">Source-tracked enforcement with manual override detection, mode gating, and mutual exclusion</p>
+                    </li>
+                </ul>
+            </section>
+
+            <section>
+                <h2>Operations</h2>
+                <ul class="doc-list">
+                    <li class="doc-item">
+                        <a href="README_port_mappings.md">Port Mappings</a>
+                        <p class="doc-description">External/internal port assignments for all Docker services</p>
+                    </li>
+                </ul>
+            </section>
+
+            <section>
+                <h2>Development</h2>
+                <ul class="doc-list">
+                    <li class="doc-item">
+                        <a href="README_project_history.md">Project History</a>
+                        <p class="doc-description">Chronological log of implementation progress, decisions, and completed milestones</p>
+                    </li>
+                    <li class="doc-item">
+                        <a href="README_handoff.md">Session Handoff</a>
+                        <p class="doc-description">Current session state, recent changes, and active TODO list</p>
+                    </li>
+                </ul>
+            </section>
+        </main>
+
+        <footer>
+            <p>MOBIUS Smart Home | by Elfege Leylavergne</p>
+        </footer>
+    </div>
+</body>
+
+</html>

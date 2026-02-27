@@ -13,6 +13,7 @@ pending jobs are restored from the database.
 
 import os
 import logging
+import traceback
 from datetime import datetime, timedelta
 from typing import Callable, Dict, Any, Optional, List
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -181,7 +182,7 @@ class SchedulerService:
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to schedule job {job_id}: {e}")
+            self.logger.error(f"Failed to schedule job {job_id}: {e}", exc_info=True)
             return False
 
     def schedule_recurring(
@@ -235,7 +236,7 @@ class SchedulerService:
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to schedule recurring job {job_id}: {e}")
+            self.logger.error(f"Failed to schedule recurring job {job_id}: {e}", exc_info=True)
             return False
 
     def reschedule(
@@ -277,7 +278,7 @@ class SchedulerService:
                 return True
 
         except Exception as e:
-            self.logger.error(f"Failed to reschedule job {job_id}: {e}")
+            self.logger.error(f"Failed to reschedule job {job_id}: {e}", exc_info=True)
 
         return False
 
@@ -306,7 +307,7 @@ class SchedulerService:
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to cancel job {job_id}: {e}")
+            self.logger.error(f"Failed to cancel job {job_id}: {e}", exc_info=True)
             return False
 
     def cancel_for_instance(self, instance_id: int) -> int:
@@ -386,7 +387,7 @@ class SchedulerService:
                 timeout=5
             )
         except Exception as e:
-            self.logger.warning(f"Failed to persist job {job_id}: {e}")
+            self.logger.warning(f"Failed to persist job {job_id}: {e}", exc_info=True)
 
     def _update_job_time(self, job_id: str, execute_at: datetime) -> None:
         """Update job execution time in database."""
@@ -399,7 +400,7 @@ class SchedulerService:
                 timeout=5
             )
         except Exception as e:
-            self.logger.warning(f"Failed to update job time {job_id}: {e}")
+            self.logger.warning(f"Failed to update job time {job_id}: {e}", exc_info=True)
 
     def _mark_job_cancelled(self, job_id: str) -> None:
         """Mark job as cancelled in database."""
@@ -412,7 +413,7 @@ class SchedulerService:
                 timeout=5
             )
         except Exception as e:
-            self.logger.warning(f"Failed to mark job cancelled {job_id}: {e}")
+            self.logger.warning(f"Failed to mark job cancelled {job_id}: {e}", exc_info=True)
 
     def _mark_job_completed(self, job_id: str) -> None:
         """Mark job as completed in database."""
@@ -428,7 +429,7 @@ class SchedulerService:
                 timeout=5
             )
         except Exception as e:
-            self.logger.warning(f"Failed to mark job completed {job_id}: {e}")
+            self.logger.warning(f"Failed to mark job completed {job_id}: {e}", exc_info=True)
 
     def _restore_pending_jobs(self) -> None:
         """
@@ -481,7 +482,7 @@ class SchedulerService:
             self.logger.info(f"Restored {len(jobs)} pending jobs from database")
 
         except Exception as e:
-            self.logger.error(f"Failed to restore pending jobs: {e}")
+            self.logger.error(f"Failed to restore pending jobs: {e}", exc_info=True)
 
 
 # Global scheduler instance

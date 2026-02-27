@@ -19,6 +19,7 @@ Step types:
 import asyncio
 import logging
 import time
+import traceback
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -103,6 +104,8 @@ class E2ETestRunner:
         self._scenarios: List[TestScenario] = []
         self._running = False
         self._cancel_flag = False
+        # Device state snapshot for save/restore
+        self._saved_device_states: Dict[str, Dict[str, str]] = {}
 
     async def initialize(self):
         """Load instance data and build test scenarios."""
@@ -221,6 +224,126 @@ class E2ETestRunner:
         self._cancel_flag = True
 
     # =========================================================================
+    # Device State Save/Restore
+    # =========================================================================
+
+    async def save_device_states(self) -> Dict[str, Dict[str, str]]:
+        """
+        Snapshot current state of all test devices before running scenarios.
+
+        Captures switch state and level for every device in the instance's
+        device_selections. Uses live Hubitat API (not cache).
+
+        Returns:
+            Dict mapping device_id -> {attribute: value}
+        """
+        from services.hubitat_client import get_default_client
+        client = get_default_client()
+
+        all_device_ids: set = set()
+        ds = self._instance.get("device_selections", {})
+        for category_ids in ds.values():
+            all_device_ids.update(str(did) for did in category_ids)
+
+        saved: Dict[str, Dict[str, str]] = {}
+        for device_id in all_device_ids:
+            try:
+                device = client.get_device(device_id)
+                if not device:
+                    logger.warning(
+                        f"save_device_states: device {device_id} not found"
+                    )
+                    continue
+
+                attrs = device.get("attributes", [])
+                state: Dict[str, str] = {}
+                if isinstance(attrs, list):
+                    for a in attrs:
+                        name = a.get("name")
+                        if name in ("switch", "level"):
+                            state[name] = str(a.get("currentValue", ""))
+                elif isinstance(attrs, dict):
+                    for key in ("switch", "level"):
+                        if key in attrs:
+                            state[key] = str(attrs[key])
+
+                saved[device_id] = state
+                logger.info(f"Saved state for device {device_id}: {state}")
+            except Exception as e:
+                logger.error(
+                    f"Failed to save state for device {device_id}: {e}",
+                    exc_info=True
+                )
+
+        self._saved_device_states = saved
+
+        await self._broadcast("states_saved", {
+            "device_count": len(saved),
+            "devices": {did: st for did, st in saved.items()}
+        })
+
+        return saved
+
+    async def restore_device_states(self) -> Dict[str, str]:
+        """
+        Restore all test devices to their saved states.
+
+        Called after all scenarios complete. Sends commands to return
+        each device to the state captured by save_device_states().
+
+        Returns:
+            Dict mapping device_id -> "restored"/"failed"/"skipped"
+        """
+        if not self._saved_device_states:
+            logger.info("No saved device states to restore")
+            return {}
+
+        from services.device_commander import get_device_commander
+        commander = get_device_commander()
+
+        results: Dict[str, str] = {}
+        for device_id, state in self._saved_device_states.items():
+            switch_state = state.get("switch")
+            if not switch_state:
+                results[device_id] = "skipped"
+                continue
+
+            try:
+                result = await commander.send_command(
+                    device_id=device_id,
+                    command=switch_state,  # "on" or "off"
+                    verify=False,
+                )
+
+                # Restore level if device was on and had a level
+                level = state.get("level")
+                if switch_state == "on" and level:
+                    await commander.send_command(
+                        device_id=device_id,
+                        command="setLevel",
+                        args=[int(level)],
+                        verify=False,
+                    )
+
+                results[device_id] = "restored" if result.success else "failed"
+                logger.info(
+                    f"Restore device {device_id}: {switch_state} -> "
+                    f"{'OK' if result.success else 'FAILED'}"
+                )
+            except Exception as e:
+                results[device_id] = "failed"
+                logger.error(
+                    f"Failed to restore device {device_id}: {e}",
+                    exc_info=True
+                )
+
+        await self._broadcast("states_restored", {
+            "results": results
+        })
+
+        return results
+
+    # =========================================================================
     # Step Execution
     # =========================================================================
 
@@ -248,22 +371,38 @@ class E2ETestRunner:
             step.message = f"Unknown action type: {action}"
 
     async def _step_send_command(self, step: TestStep):
-        """Send a real command to a real device via Hubitat Maker API."""
-        from services.hubitat_client import get_default_client
+        """Send a real command to a real device via DeviceCommander."""
+        from services.device_commander import get_device_commander
 
         device_id = step.params["device_id"]
         command = step.params["command"]
         args = step.params.get("args")
 
-        client = get_default_client()
-        ok = client.send_command(device_id, command, args)
+        try:
+            commander = get_device_commander()
+            # E2E tests have their own verify steps — skip commander verification
+            result = await commander.send_command(
+                device_id=device_id,
+                command=command,
+                args=args,
+                verify=False,
+            )
 
-        if ok:
-            step.result = StepResult.PASS
-            step.message = f"Sent {command} to device {device_id}"
-        else:
+            if result.success:
+                step.result = StepResult.PASS
+                step.message = f"Sent {command} to device {device_id}"
+            else:
+                step.result = StepResult.FAIL
+                step.message = (
+                    f"Command {command} failed for device {device_id}: "
+                    f"{result.error}"
+                )
+        except Exception as e:
             step.result = StepResult.FAIL
-            step.message = f"Command {command} failed for device {device_id}"
+            step.message = f"Command {command} exception for device {device_id}: {e}"
+            logger.error(
+                f"_step_send_command failed: {e}", exc_info=True
+            )
 
     async def _step_inject_webhook(self, step: TestStep):
         """
@@ -832,6 +971,121 @@ class E2ETestRunner:
                     "attribute": "switch",
                     "expected": "off",
                     "retries": 3
+                }
+            ))
+            scenarios.append(s)
+
+        # ------------------------------------------------------------------
+        # Scenario 7: Keep-Off Enforcement
+        # ------------------------------------------------------------------
+        keep_off_ids = ds.get("keep_off_switches", [])
+        if keep_off_ids and motion_ids:
+            ko_sid = keep_off_ids[0]
+            s = TestScenario(
+                id="keep_off_enforcement",
+                name="Keep-Off Enforcement",
+                description="Verify keep-off switches stay off despite motion"
+            )
+            # Turn ON the keep-off switch (simulating manual/external turn-on)
+            s.steps.append(TestStep(
+                name=f"Turn ON keep-off switch {ko_sid}",
+                description="Manually turn on a keep-off switch to test enforcement",
+                action="command",
+                params={"device_id": str(ko_sid), "command": "on"}
+            ))
+            s.steps.append(TestStep(
+                name="Wait for command",
+                description="Allow state to propagate",
+                action="wait",
+                params={"seconds": 2}
+            ))
+            # Trigger motion (calls master() → _enforce_keep_switches())
+            s.steps.append(TestStep(
+                name="Inject motion active",
+                description="Trigger master() which should enforce keep-off",
+                action="webhook",
+                params={"payload": {
+                    "deviceId": str(motion_ids[0]),
+                    "name": "motion",
+                    "value": "active",
+                    "displayName": f"E2E Test Motion {motion_ids[0]}"
+                }}
+            ))
+            s.steps.append(TestStep(
+                name="Wait for enforcement",
+                description="Allow app to process and enforce keep-off",
+                action="wait",
+                params={"seconds": 5}
+            ))
+            # Verify the keep-off switch was forced OFF
+            s.steps.append(TestStep(
+                name=f"Verify keep-off switch {ko_sid} is OFF",
+                description="Keep-off switch should be forced OFF despite motion",
+                action="verify",
+                params={
+                    "device_id": str(ko_sid),
+                    "attribute": "switch",
+                    "expected": "off",
+                    "retries": 5,
+                    "retry_delay": 2.0
+                }
+            ))
+            scenarios.append(s)
+
+        # ------------------------------------------------------------------
+        # Scenario 8: Keep-On Enforcement
+        # ------------------------------------------------------------------
+        keep_on_ids = ds.get("keep_on_switches", [])
+        if keep_on_ids:
+            ko_sid = keep_on_ids[0]
+            s = TestScenario(
+                id="keep_on_enforcement",
+                name="Keep-On Enforcement",
+                description="Verify keep-on switches stay on despite timeout"
+            )
+            # Turn OFF the keep-on switch
+            s.steps.append(TestStep(
+                name=f"Turn OFF keep-on switch {ko_sid}",
+                description="Manually turn off a keep-on switch to test enforcement",
+                action="command",
+                params={"device_id": str(ko_sid), "command": "off"}
+            ))
+            s.steps.append(TestStep(
+                name="Wait for command",
+                description="Allow state to propagate",
+                action="wait",
+                params={"seconds": 2}
+            ))
+            # Trigger motion inactive → timeout → master() → enforce
+            if motion_ids:
+                s.steps.append(TestStep(
+                    name="Inject motion inactive",
+                    description="Trigger timeout path which calls master()",
+                    action="webhook",
+                    params={"payload": {
+                        "deviceId": str(motion_ids[0]),
+                        "name": "motion",
+                        "value": "inactive",
+                        "displayName": f"E2E Test Motion {motion_ids[0]}"
+                    }}
+                ))
+            s.steps.append(TestStep(
+                name="Wait for enforcement",
+                description="Allow app to process and enforce keep-on",
+                action="wait",
+                params={"seconds": 5}
+            ))
+            # Verify the keep-on switch was forced ON
+            s.steps.append(TestStep(
+                name=f"Verify keep-on switch {ko_sid} is ON",
+                description="Keep-on switch should be forced ON despite inactivity",
+                action="verify",
+                params={
+                    "device_id": str(ko_sid),
+                    "attribute": "switch",
+                    "expected": "on",
+                    "retries": 5,
+                    "retry_delay": 2.0
                 }
             ))
             scenarios.append(s)

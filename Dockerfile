@@ -1,5 +1,5 @@
 # =============================================================================
-# 0_SMART_HOME Dockerfile
+# 0_MOBIUS.SMART_HOME Dockerfile
 # Python 3.11 FastAPI application for Hubitat automation
 # =============================================================================
 
@@ -29,7 +29,8 @@ COPY templates/ ./templates/
 COPY static/ ./static/
 
 # Create non-root user for security
-RUN useradd -m -r appuser && chown -R appuser:appuser /app
+# /app/logs is used by tee to write startup output for the nginx reloading page
+RUN useradd -m -r appuser && mkdir -p /app/logs && chown -R appuser:appuser /app
 USER appuser
 
 # Expose application port

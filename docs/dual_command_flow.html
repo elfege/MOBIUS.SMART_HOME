@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dual-Command Flow: Matter + Hubitat</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 15px;
+            background: #f5f5f5;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1800px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 2.2em;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+        }
+
+        h2 {
+            color: #34495e;
+            border-left: 4px solid #3498db;
+            padding-left: 15px;
+            margin-top: 40px;
+            font-size: 1.6em;
+        }
+
+        h3 {
+            color: #2980b9;
+            font-size: 1.2em;
+            margin-top: 20px;
+        }
+
+        .diagram-container {
+            background: #fafafa;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 40px 15px 15px 15px;
+            margin: 20px 0;
+            overflow-x: auto;
+        }
+
+        .mermaid {
+            font-size: 11px;
+        }
+
+        .info-box {
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin: 15px 0;
+            font-size: 0.95em;
+        }
+
+        .info-box.blue {
+            background: #eaf4fd;
+            border-left: 4px solid #3498db;
+        }
+
+        .info-box.green {
+            background: #eafaf1;
+            border-left: 4px solid #27ae60;
+        }
+
+        .info-box.orange {
+            background: #fef5e7;
+            border-left: 4px solid #e67e22;
+        }
+
+        .info-box.red {
+            background: #fdedec;
+            border-left: 4px solid #e74c3c;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 15px 0;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px 14px;
+            text-align: left;
+        }
+
+        th {
+            background: #34495e;
+            color: white;
+            font-weight: 600;
+        }
+
+        tr:nth-child(even) {
+            background: #f9f9f9;
+        }
+
+        code {
+            background: #f0f0f0;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+
+        .file-ref {
+            color: #7f8c8d;
+            font-style: italic;
+            font-size: 0.85em;
+        }
+
+        .timestamp {
+            text-align: center;
+            color: #95a5a6;
+            font-size: 0.85em;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Dual-Command Flow: Matter + Hubitat</h1>
+        <div class="timestamp">0_MOBIUS.SMART_HOME &mdash; February 23, 2026</div>
+
+        <!-- ============================================================ -->
+        <h2>1. Overview</h2>
+        <!-- ============================================================ -->
+
+        <p>
+            When a device is <strong>commissioned to the local Matter fabric</strong>,
+            MOBIUS sends commands via both protocols in parallel:
+        </p>
+        <ol>
+            <li><strong>Matter first</strong> (async, fire-and-forget) &mdash; lowest latency, local LAN</li>
+            <li><strong>Hubitat second</strong> (full retry + verify cycle) &mdash; cloud-relay but authoritative for state verification</li>
+        </ol>
+        <p>
+            If a device is <strong>not commissioned</strong> to Matter, only Hubitat fires.
+            The <code>_fire_matter_command()</code> method checks the
+            <code>device_matter_map</code> table and silently returns if no mapping exists.
+        </p>
+
+        <div class="info-box blue">
+            <strong>Why Matter first?</strong> Matter commands traverse the local LAN
+            directly (device ← Matter Server ← MOBIUS). Hubitat commands go
+            Hub ← cloud relay ← MOBIUS, adding 200-500ms. For user-perceived
+            responsiveness, firing Matter first makes the device react sooner.
+        </div>
+
+        <!-- ============================================================ -->
+        <h2>2. Decision Flow</h2>
+        <!-- ============================================================ -->
+
+        <div class="diagram-container">
+            <div class="mermaid">
+flowchart TD
+    A["send_command(device_id, cmd)"] --> B{"Device in<br>device_matter_map?"}
+
+    B -- Yes --> C["Fire Matter<br>(async, non-blocking)"]
+    B -- No --> D["Skip Matter"]
+
+    C --> E["Fire Hubitat<br>(full retry + verify)"]
+    D --> E
+
+    E --> F{"Hubitat verify<br>succeeded?"}
+
+    F -- Yes --> G["CommandStatus = VERIFIED<br>Update memo, cache"]
+    F -- No --> H["CommandStatus = FAILED/TIMEOUT<br>Log warning, memo unchanged"]
+
+    style C fill:#2ecc71,stroke:#27ae60,color:white
+    style D fill:#95a5a6,stroke:#7f8c8d,color:white
+    style E fill:#3498db,stroke:#2980b9,color:white
+    style G fill:#27ae60,stroke:#1e8449,color:white
+    style H fill:#e74c3c,stroke:#c0392b,color:white
+            </div>
+        </div>
+
+        <p class="file-ref">
+            Source: <code>services/device_commander.py</code> &mdash;
+            <code>send_command()</code> (async) and <code>send_command_sync()</code>
+        </p>
+
+        <!-- ============================================================ -->
+        <h2>3. Timing Sequence</h2>
+        <!-- ============================================================ -->
+
+        <h3>3a. Commissioned Device (Matter + Hubitat)</h3>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+sequenceDiagram
+    participant App as App Logic
+    participant Cmd as DeviceCommander
+    participant MT as Matter Server
+    participant Device as Physical Device
+    participant Hub as Hubitat Hub
+    participant WH as Webhook
+
+    App->>Cmd: send_command(device_id, "on")
+    Note over Cmd: Set status = UPDATING
+
+    Cmd->>MT: Matter fire-and-forget (async)
+    activate MT
+    MT->>Device: Matter ON (local LAN)
+    Note over Device: Device turns ON (~50ms)
+    deactivate MT
+
+    Cmd->>Hub: Hubitat command (in thread)
+    activate Hub
+    Hub->>Device: Hubitat ON (cloud relay)
+    Note over Device: Already ON (no-op)
+    Hub-->>Cmd: HTTP 200
+
+    Note over Cmd: Verify loop starts
+    Cmd->>Hub: GET device state
+    Hub-->>Cmd: switch: "on"
+    Note over Cmd: Verified! Status = VERIFIED
+    deactivate Hub
+
+    Hub->>WH: Webhook: switch=on
+    WH->>App: DeviceEvent(switch, "on")
+    Note over App: _handle_switch() checks<br>UPDATING guard → suppressed
+            </div>
+        </div>
+
+        <div class="info-box green">
+            <strong>Key insight:</strong> The device physically changes state from
+            the Matter command (~50ms). When the Hubitat command arrives, the device
+            is already in the correct state. Hubitat's verify cycle confirms this
+            immediately, so no extra retries are needed.
+        </div>
+
+        <h3>3b. Non-Commissioned Device (Hubitat Only)</h3>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+sequenceDiagram
+    participant App as App Logic
+    participant Cmd as DeviceCommander
+    participant Hub as Hubitat Hub
+    participant Device as Physical Device
+    participant WH as Webhook
+
+    App->>Cmd: send_command(device_id, "off")
+    Note over Cmd: No Matter mapping → skip
+    Note over Cmd: Set status = UPDATING
+
+    Cmd->>Hub: Hubitat command (in thread)
+    activate Hub
+    Hub->>Device: Hubitat OFF
+    Note over Device: Device turns OFF (~300ms)
+    Hub-->>Cmd: HTTP 200
+
+    Cmd->>Hub: GET device state
+    Hub-->>Cmd: switch: "off"
+    Note over Cmd: Verified! Status = VERIFIED
+    deactivate Hub
+
+    Hub->>WH: Webhook: switch=off
+    WH->>App: DeviceEvent(switch, "off")
+    Note over App: _handle_switch() checks<br>UPDATING guard → suppressed
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <h2>4. UPDATING Guard (Phantom Override Prevention)</h2>
+        <!-- ============================================================ -->
+
+        <p>
+            The <strong>UPDATING guard</strong> in <code>_handle_switch()</code> prevents
+            the memoization system from tagging state changes as "manual override" when
+            they're actually echoes of our own commands.
+        </p>
+
+        <h3>The Problem Without the Guard</h3>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+sequenceDiagram
+    participant App as App Logic
+    participant Cmd as DeviceCommander
+    participant MT as Matter Server
+    participant Hub as Hubitat Hub
+    participant WH as Webhook
+
+    App->>Cmd: send_command(device_id, "on")
+    Cmd->>MT: Matter ON (async)
+    Note over MT: Device ON in ~50ms
+
+    Note over Cmd: Hubitat command in-flight...
+
+    Hub->>WH: Webhook: switch=on
+    WH->>App: DeviceEvent(switch, "on")
+
+    Note over App: WITHOUT guard:<br>App hasn't sent Hubitat cmd yet!<br>Thinks this is manual override!
+    Note over App: INCORRECTLY memoizes<br>source='manual'
+            </div>
+        </div>
+
+        <div class="info-box red">
+            <strong>Race condition:</strong> Matter changes the device before Hubitat
+            sends its command. The Hubitat webhook for the state change arrives before
+            the Hubitat command completes. Without the guard, <code>_handle_switch()</code>
+            interprets this as a manual user override and memoizes it, blocking future
+            automation commands for that device.
+        </div>
+
+        <h3>The Solution: Check CommandStatus</h3>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+flowchart TD
+    A["_handle_switch(event)"] --> B{"DeviceCommander.get_device_status<br>== UPDATING?"}
+
+    B -- Yes --> C["Suppress event<br>(log at DEBUG level)"]
+    B -- No --> D{"Is keep_off or<br>keep_on device?"}
+
+    D -- Yes --> E{"Event contradicts<br>expected state?"}
+    D -- No --> F["Normal switch event<br>(no memo update)"]
+
+    E -- Yes --> G["Memoize override<br>source='manual'"]
+    E -- No --> H["Echo of our command<br>(ignore)"]
+
+    style B fill:#e67e22,stroke:#d35400,color:white
+    style C fill:#95a5a6,stroke:#7f8c8d,color:white
+    style G fill:#e74c3c,stroke:#c0392b,color:white
+    style H fill:#95a5a6,stroke:#7f8c8d,color:white
+            </div>
+        </div>
+
+        <p class="file-ref">
+            Source: <code>apps/advanced_motion_lighting/app_logic.py</code> &mdash;
+            <code>_handle_switch()</code>
+        </p>
+
+        <div class="info-box orange">
+            <strong>Timing window:</strong> The UPDATING status is set at the very
+            start of <code>_execute_command_sync()</code> (before sending any command)
+            and cleared when verification completes (VERIFIED) or fails (FAILED/TIMEOUT).
+            This covers the entire window where echoed webhooks could arrive.
+        </div>
+
+        <!-- ============================================================ -->
+        <h2>5. Failure Scenarios</h2>
+        <!-- ============================================================ -->
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Scenario</th>
+                    <th>Matter</th>
+                    <th>Hubitat</th>
+                    <th>Result</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Both succeed</td>
+                    <td>Device changes fast</td>
+                    <td>Verify confirms state</td>
+                    <td>VERIFIED, memo updated</td>
+                </tr>
+                <tr>
+                    <td>Matter fails, Hubitat succeeds</td>
+                    <td>Exception logged at DEBUG</td>
+                    <td>Changes device, verifies</td>
+                    <td>VERIFIED, memo updated</td>
+                </tr>
+                <tr>
+                    <td>Matter succeeds, Hubitat fails</td>
+                    <td>Device changed</td>
+                    <td>Verify sees correct state anyway</td>
+                    <td>VERIFIED (Hubitat sees Matter's result)</td>
+                </tr>
+                <tr>
+                    <td>Both fail</td>
+                    <td>Exception logged</td>
+                    <td>All retries exhausted</td>
+                    <td>FAILED/TIMEOUT, memo unchanged</td>
+                </tr>
+                <tr>
+                    <td>No Matter mapping</td>
+                    <td>Skipped silently</td>
+                    <td>Normal full cycle</td>
+                    <td>VERIFIED or FAILED per usual</td>
+                </tr>
+                <tr>
+                    <td>No event loop (scheduler thread)</td>
+                    <td>Skipped (logged at DEBUG)</td>
+                    <td>Normal full cycle</td>
+                    <td>VERIFIED or FAILED per usual</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <!-- ============================================================ -->
+        <h2>6. Memoization Safety</h2>
+        <!-- ============================================================ -->
+
+        <p>
+            Memoization updates are <strong>always gated on Hubitat verification</strong>,
+            never on Matter success. This means:
+        </p>
+
+        <ul>
+            <li>The memo system records what Hubitat <em>verified</em> the device state
+                to be after the command cycle completes.</li>
+            <li>Matter's fire-and-forget result is invisible to the memo system.</li>
+            <li>If Matter changes the device and Hubitat's verify confirms it, the memo
+                correctly reflects the new state &mdash; it doesn't matter which protocol
+                caused the change.</li>
+            <li>The UPDATING guard prevents webhooks (from either protocol) from being
+                misinterpreted as manual overrides during the command cycle.</li>
+        </ul>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+flowchart LR
+    subgraph "Command Cycle"
+        A["Matter<br>fire-and-forget"] --> B["Hubitat<br>send + verify"]
+    end
+
+    subgraph "State Tracking"
+        B --> C["CommandStatus<br>transitions"]
+        C --> D["Memo updated<br>ONLY on VERIFIED"]
+    end
+
+    subgraph "Event Handling"
+        E["Webhook<br>switch event"] --> F{"Status ==<br>UPDATING?"}
+        F -- Yes --> G["Suppress"]
+        F -- No --> H["Process<br>normally"]
+    end
+
+    style A fill:#2ecc71,stroke:#27ae60,color:white
+    style B fill:#3498db,stroke:#2980b9,color:white
+    style D fill:#9b59b6,stroke:#8e44ad,color:white
+    style G fill:#95a5a6,stroke:#7f8c8d,color:white
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <h2>7. File Reference</h2>
+        <!-- ============================================================ -->
+
+        <table>
+            <thead>
+                <tr>
+                    <th>File</th>
+                    <th>Key Functions</th>
+                    <th>Role</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>services/device_commander.py</code></td>
+                    <td>
+                        <code>send_command()</code><br>
+                        <code>send_command_sync()</code><br>
+                        <code>_fire_matter_command()</code><br>
+                        <code>_execute_command_sync()</code><br>
+                        <code>get_device_status()</code>
+                    </td>
+                    <td>Central command execution with dual-protocol dispatch</td>
+                </tr>
+                <tr>
+                    <td><code>apps/advanced_motion_lighting/app_logic.py</code></td>
+                    <td>
+                        <code>_handle_switch()</code>
+                    </td>
+                    <td>UPDATING guard &mdash; suppresses phantom override detection</td>
+                </tr>
+                <tr>
+                    <td><code>models/command.py</code></td>
+                    <td>
+                        <code>CommandStatus</code> enum<br>
+                        <code>CommandResult</code> dataclass
+                    </td>
+                    <td>Status states: IDLE &rarr; UPDATING &rarr; VERIFIED/FAILED/TIMEOUT</td>
+                </tr>
+                <tr>
+                    <td><code>services/matter_client.py</code></td>
+                    <td>
+                        <code>get_matter_mapping()</code><br>
+                        <code>get_matter_client()</code><br>
+                        <code>send_hubitat_command()</code>
+                    </td>
+                    <td>Matter WebSocket client + Hubitat-to-Matter command translation</td>
+                </tr>
+            </tbody>
+        </table>
+
+    </div>
+
+    <script>
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'default',
+            sequence: { mirrorActors: false },
+            flowchart: { useMaxWidth: true, htmlLabels: true }
+        });
+    </script>
+</body>
+</html>

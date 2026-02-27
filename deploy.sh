@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# deploy.sh - Rebuild and deploy 0_SMART_HOME
+# deploy.sh - Rebuild and deploy 0_MOBIUS.SMART_HOME
 #
 # Usage:
 #   ./deploy.sh              # Rebuild + start (prompts for prune/no-cache)
@@ -27,7 +27,7 @@ for arg in "$@"; do
 	esac
 done
 
-echo "=== 0_SMART_HOME Deploy ==="
+echo "=== 0_MOBIUS.SMART_HOME Deploy ==="
 echo ""
 
 # Prune: flag or prompt

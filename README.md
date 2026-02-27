@@ -1,4 +1,4 @@
-# 0_SMART_HOME
+# 0_MOBIUS.SMART_HOME
 
 Python/Flask application for migrating Hubitat Groovy apps to a web-based automation system with multi-instance support.
 
@@ -28,7 +28,7 @@ Ported from Hubitat Groovy with full feature parity:
 
 2. **Deploy**
    ```bash
-   cd /home/elfege/0_SMART_HOME
+   cd /home/elfege/0_MOBIUS.SMART_HOME
    ./deploy.sh
    ```
 
@@ -45,12 +45,12 @@ Ported from Hubitat Groovy with full feature parity:
 | smart-home | 5001 | Flask application |
 | postgres | 5432 | Database |
 | postgrest | 3001 | REST API from schema |
-| nginx | 8080 | Reverse proxy |
+| nginx | 8082 | Reverse proxy |
 
 ### Key Directories
 
 ```
-0_SMART_HOME/
+0_MOBIUS.SMART_HOME/
 ├── app.py              # Flask entry point
 ├── apps/               # App type implementations
 ├── services/           # Core services

@@ -36,9 +36,17 @@ export class DashboardController {
     }
 
     /**
-     * Initialize the dashboard
+     * Initialize the dashboard.
+     *
+     * Loads instances via HTTP first (so the dashboard renders immediately),
+     * then opens a WebSocket for real-time updates. This way the UI is never
+     * blocked by a WebSocket connection failure.
      */
     async init() {
+        // Render immediately from HTTP — never gate the UI on WebSocket
+        await this.loadInstances();
+
+        // Then open WebSocket for real-time push updates
         this._connectWebSocket();
     }
 
@@ -59,6 +67,7 @@ export class DashboardController {
 
         this.ws.onopen = () => {
             console.log('Dashboard WS connected');
+            this._wsConnected = true;
             this._reconnectDelay = 1000;
         };
 
@@ -71,13 +80,26 @@ export class DashboardController {
             }
         };
 
-        this.ws.onclose = () => {
-            console.log('Dashboard WS disconnected, reconnecting...');
+        this.ws.onclose = (event) => {
+            // Code 1006 with no prior open = endpoint doesn't exist (404).
+            // Back off aggressively to avoid log spam.
+            if (!this._wsConnected) {
+                this._reconnectDelay = Math.min(
+                    this._reconnectDelay * 2,
+                    this._maxReconnectDelay
+                );
+                console.log(
+                    `Dashboard WS endpoint unavailable, retry in ${this._reconnectDelay / 1000}s`
+                );
+            } else {
+                console.log('Dashboard WS disconnected, reconnecting...');
+                this._reconnectDelay = Math.min(
+                    this._reconnectDelay * 1.5,
+                    this._maxReconnectDelay
+                );
+            }
+            this._wsConnected = false;
             setTimeout(() => this._connectWebSocket(), this._reconnectDelay);
-            this._reconnectDelay = Math.min(
-                this._reconnectDelay * 1.5,
-                this._maxReconnectDelay
-            );
         };
 
         this.ws.onerror = (err) => {

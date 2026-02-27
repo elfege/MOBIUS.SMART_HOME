@@ -107,6 +107,7 @@ class BaseApp(ABC):
 
         # Pause state
         self._is_paused: bool = instance_data.get('is_paused', False)
+        self._pause_reason: Optional[str] = instance_data.get('pause_reason')
 
         # Hubitat client (lazy loaded)
         self._hubitat = None

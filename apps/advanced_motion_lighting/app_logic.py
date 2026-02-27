@@ -414,6 +414,85 @@ class AdvancedMotionLightingApp(BaseApp):
             self.master(motion_active_event=True)
 
     # =========================================================================
+    # Mode Change (overrides BaseApp)
+    # =========================================================================
+
+    def on_mode_change(self, new_mode: str) -> None:
+        """
+        Handle location mode change.
+
+        Groovy parity: modeChangeHandler()
+        1. Check exclusion modes → auto-pause/resume
+        2. Reset memoization (Groovy: resetStates)
+        3. Cancel pending timeouts (Groovy: unschedule(master))
+        4. Re-evaluate (Groovy: master())
+
+        The new mode's timeout is picked up automatically by
+        _get_timeout_seconds() when master() calls _schedule_next_run().
+        """
+        self.logger.info(f"Mode changed to: {new_mode}")
+
+        exclusion_modes = self.get_setting('exclusionModes', [])
+
+        if exclusion_modes and new_mode in exclusion_modes:
+            # Mode is excluded → pause if not already paused for this reason
+            if not self._is_paused or self._pause_reason != 'mode_exclusion':
+                self.logger.info(
+                    f"Mode '{new_mode}' is in exclusion list → pausing"
+                )
+                self._is_paused = True
+                self._pause_reason = 'mode_exclusion'
+                self.cancel_timeout()
+                # Update DB directly (avoid callback loop through instance_manager)
+                import requests as _req
+                try:
+                    _req.patch(
+                        f"{self.instance_manager.postgrest_url}/app_instances",
+                        params={"id": f"eq.{self.instance_id}"},
+                        json={
+                            "is_paused": True,
+                            "pause_reason": "mode_exclusion"
+                        },
+                        headers={"Content-Type": "application/json"},
+                        timeout=5
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to update pause state in DB: {e}"
+                    )
+            return  # Don't run master() while excluded
+
+        # Mode is NOT excluded — check if we need to auto-resume
+        if self._is_paused and self._pause_reason == 'mode_exclusion':
+            self.logger.info(
+                f"Mode '{new_mode}' not in exclusion list → resuming"
+            )
+            self._is_paused = False
+            self._pause_reason = None
+            # Update DB directly
+            import requests as _req
+            try:
+                _req.patch(
+                    f"{self.instance_manager.postgrest_url}/app_instances",
+                    params={"id": f"eq.{self.instance_id}"},
+                    json={
+                        "is_paused": False,
+                        "pause_reason": None
+                    },
+                    headers={"Content-Type": "application/json"},
+                    timeout=5
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to update resume state in DB: {e}"
+                )
+
+        # Normal mode change: reset memoization, cancel timeouts, re-evaluate
+        self._reset_memoization()
+        self.cancel_timeout()
+        self.master()
+
+    # =========================================================================
     # Main Logic
     # =========================================================================
 
@@ -539,7 +618,22 @@ class AdvancedMotionLightingApp(BaseApp):
         return False
 
     def _in_exception_state(self) -> bool:
-        """Check if we're in an exception state (should not control lights)."""
+        """
+        Check if we're in an exception state (should not control lights).
+
+        Groovy parity: exceptions() + InRestrictedModeOrTime()
+        """
+        # Check exclusion modes (belt-and-suspenders: master() also checks is_paused,
+        # but this catches edge cases like startup before mode-change fires)
+        exclusion_modes = self.get_setting('exclusionModes', [])
+        if exclusion_modes:
+            current_mode = self._get_current_mode()
+            if current_mode and current_mode in exclusion_modes:
+                self.logger.debug(
+                    f"In exclusion mode: {current_mode}"
+                )
+                return True
+
         # Check illuminance threshold
         if self.get_setting('useIlluminance', False):
             threshold = self.get_setting('illuminanceThreshold', 50)
@@ -548,7 +642,6 @@ class AdvancedMotionLightingApp(BaseApp):
                 self.logger.debug(f"Illuminance {current_lux} > threshold {threshold}")
                 return True
 
-        # Could add more exceptions here (restricted modes, time windows, etc.)
         return False
 
     # =========================================================================
@@ -1027,14 +1120,44 @@ class AdvancedMotionLightingApp(BaseApp):
     # =========================================================================
 
     def _get_timeout_seconds(self) -> int:
-        """Get timeout in seconds based on settings and current mode."""
+        """
+        Get timeout in seconds based on settings and current mode.
+
+        Groovy parity: getTimeout()
+        1. Start with default noMotionTime
+        2. If timeWithMode enabled, look up mode-specific timeout
+        3. Convert to seconds based on timeUnit
+        """
         timeout = self.get_setting('noMotionTime', 5)
         time_unit = self.get_setting('timeUnit', 'minutes')
+
+        # Per-mode timeout lookup (Groovy: settings["noMotionTime_${location.mode}"])
+        if self.get_setting('timeWithMode', False):
+            mode_timeouts = self.get_setting('modeTimeouts', {})
+            current_mode = self._get_current_mode()
+            if current_mode and current_mode in mode_timeouts:
+                mode_timeout = mode_timeouts[current_mode]
+                if mode_timeout is not None:
+                    self.logger.debug(
+                        f"Per-mode timeout for '{current_mode}': "
+                        f"{mode_timeout} {time_unit}"
+                    )
+                    timeout = mode_timeout
+                else:
+                    self.logger.debug(
+                        f"No timeout set for mode '{current_mode}', "
+                        f"using default: {timeout} {time_unit}"
+                    )
+            else:
+                self.logger.debug(
+                    f"Mode '{current_mode}' not in modeTimeouts, "
+                    f"using default: {timeout} {time_unit}"
+                )
 
         if time_unit == 'minutes':
             timeout *= 60
 
-        # TODO: Add mode-specific timeouts
+        self.logger.debug(f"_get_timeout_seconds() → {timeout}s")
         return timeout
 
     def _schedule_next_run(self) -> None:
@@ -1136,6 +1259,19 @@ class AdvancedMotionLightingApp(BaseApp):
                     "minimum": 1,
                     "default": 5
                 },
+                "timeWithMode": {
+                    "type": "boolean",
+                    "title": "Use Different Timeouts per Mode",
+                    "description": "Set different motion timeouts for each Hubitat mode",
+                    "default": False
+                },
+                "modeTimeouts": {
+                    "type": "object",
+                    "title": "Per-Mode Timeouts",
+                    "description": "Timeout value for each mode (same time unit as default). Empty = use default.",
+                    "additionalProperties": {"type": "integer", "minimum": 1},
+                    "default": {}
+                },
                 "useIlluminance": {
                     "type": "boolean",
                     "title": "Enable Illuminance Threshold",
@@ -1193,6 +1329,13 @@ class AdvancedMotionLightingApp(BaseApp):
                     "type": "array",
                     "title": "Always-On: Active Modes",
                     "description": "Modes where Always-On is enforced. Empty = all modes.",
+                    "items": {"type": "string"},
+                    "default": []
+                },
+                "exclusionModes": {
+                    "type": "array",
+                    "title": "Exclusion Modes",
+                    "description": "App pauses automatically in these modes, resumes when mode changes out",
                     "items": {"type": "string"},
                     "default": []
                 }

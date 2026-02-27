@@ -5,7 +5,7 @@
  * for quick control from the automation wizard. Supports toggle, dimmer slider,
  * and color picker. Uses optimistic state updates (no SSE).
  *
- * Visual design cherry-picked from 0_TILES app.
+ * Visual design cherry-picked from 0_MOBIUS.TILES app.
  */
 
 import { api, utils } from '../main.js';

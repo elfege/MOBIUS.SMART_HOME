@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# start.sh - Start 0_SMART_HOME containers
+# start.sh - Start 0_MOBIUS.SMART_HOME containers
 #
 # ALL configuration comes from AWS Secrets Manager:
 #   - HUBITAT secret: Hub tokens, IPs, app numbers
@@ -23,13 +23,13 @@ cd "$SCRIPT_DIR" &>/dev/null || true
 }
 
 echo "=========================================="
-echo "  0_SMART_HOME - Startup"
+echo "  0_MOBIUS.SMART_HOME - Startup"
 echo "=========================================="
 echo ""
 
-# Stop existing 0_SMART_HOME containers if running (NOT webhook-dispatcher)
+# Stop existing 0_MOBIUS.SMART_HOME containers if running (NOT webhook-dispatcher)
 if docker ps --format '{{.Names}}' | grep -q '^smarthome-app$'; then
-	echo "Stopping existing 0_SMART_HOME containers..."
+	echo "Stopping existing 0_MOBIUS.SMART_HOME containers..."
 	docker compose down --remove-orphans 2>/dev/null || true
 fi
 
@@ -83,7 +83,7 @@ export HUBITAT_HUB_IP_OTHER_HUB_3="${HUBITAT_HUB_IP_3:-}"
 export HUBITAT_API_NUMBER_OTHER_HUB_3="${HUBITAT_API_NUMBER_3:-}"
 
 # Derived vars
-export WEBHOOK_TARGETS="${WEBHOOK_TARGETS:-http://smarthome-app:${APP_INTERNAL_PORT:-5000}/api/webhook/event,http://host.docker.internal:80/api/webhook/event}"
+export WEBHOOK_TARGETS="${WEBHOOK_TARGETS:-http://smarthome-app:${APP_INTERNAL_PORT:-5000}/api/webhook/event,http://tiles-app:80/api/webhook/event}"
 
 set +a
 
@@ -133,7 +133,11 @@ mkdir -p "$SCRIPT_DIR/nginx/html"
 # -------------------------------------------------------------------------
 echo ""
 
-# webhook-dispatcher is shared across projects (0_SMART_HOME, 0_TILES).
+# Ensure external Docker network exists before compose up.
+# Marked external so proxy (or other stacks) can attach without "Resource in use" on restart.
+docker network inspect smarthome_smarthome-net >/dev/null 2>&1 || docker network create smarthome_smarthome-net
+
+# webhook-dispatcher is shared across projects (0_MOBIUS.SMART_HOME, 0_MOBIUS.TILES).
 # Docker only runs one — whichever project starts first owns the container.
 # If it's already running from another project, skip it to avoid name conflict.
 if docker ps --format '{{.Names}}' | grep -q '^webhook-dispatcher$'; then
@@ -145,6 +149,10 @@ else
 	docker compose up -d
 fi
 
+# Connect webhook-dispatcher to TILES network so Docker DNS resolves tiles-app.
+# Silently ignore if network doesn't exist yet (TILES not started).
+docker network connect tiles_tiles-net webhook-dispatcher 2>/dev/null || true
+
 # Wait for containers to start
 echo ""
 echo "Waiting for containers to start..."
@@ -154,7 +162,7 @@ sleep 5
 if docker ps --format '{{.Names}}' | grep -q '^smarthome-app$'; then
 	echo -e "${GREEN:-}OK: Containers are running!${NC:-}"
 	echo ""
-	echo "Access 0_SMART_HOME UI at:"
+	echo "Access 0_MOBIUS.SMART_HOME UI at:"
 	echo "  - https://${SERVER_IP}:${NGINX_HTTPS_PORT}/"
 	echo "  - http://${SERVER_IP}:${APP_EXTERNAL_PORT}/  (direct, no nginx)"
 	echo "  - https://${SERVER_IP}:${NGINX_HTTPS_PORT}/docs  (OpenAPI docs)"

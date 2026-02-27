@@ -123,7 +123,7 @@ services:
     image: postgres:16-alpine
     container_name: smarthome-postgres
     ports:
-      - "${POSTGRES_EXTERNAL_PORT:-5434}:${POSTGRES_INTERNAL_PORT:-5432}"
+      - "${POSTGRES_EXTERNAL_PORT:-5433}:${POSTGRES_INTERNAL_PORT:-5432}"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-smarthome}
       POSTGRES_USER: ${POSTGRES_USER:-smarthome_api}
@@ -147,7 +147,7 @@ services:
     image: postgrest/postgrest:v12.0.2
     container_name: smarthome-postgrest
     ports:
-      - "${POSTGREST_EXTERNAL_PORT:-3003}:${POSTGREST_INTERNAL_PORT:-3001}"
+      - "${POSTGREST_EXTERNAL_PORT:-3002}:${POSTGREST_INTERNAL_PORT:-3001}"
     environment:
       PGRST_DB_URI: postgres://${POSTGRES_USER:-smarthome_api}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_INTERNAL_PORT:-5432}/${POSTGRES_DB:-smarthome}
       PGRST_DB_SCHEMA: public
@@ -168,8 +168,8 @@ services:
     image: nginx:1.27-alpine
     container_name: smarthome-nginx
     ports:
-      - "${NGINX_HTTP_PORT:-8080}:80"
-      - "${NGINX_HTTPS_PORT:-8444}:443"
+      - "${NGINX_HTTP_PORT:-8082}:80"
+      - "${NGINX_HTTPS_PORT:-8445}:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/certs:/etc/nginx/certs:ro
@@ -208,7 +208,8 @@ services:
 # =============================================================================
 networks:
   smarthome-net:
-    driver: bridge
+    external: true
+    name: smarthome_smarthome-net
 
 # =============================================================================
 # Volumes

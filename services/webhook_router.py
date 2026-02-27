@@ -12,6 +12,7 @@ dispatches them to all subscribed instances.
 
 import os
 import logging
+import traceback
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 import requests
@@ -19,6 +20,16 @@ import requests
 from models.event import DeviceEvent
 from services.instance_manager import get_instance_manager
 from services.device_cache import DeviceCache
+
+# ANSI colors for log output (matches Hubitat event log style)
+_CYAN = "\033[96m"     # device name
+_GREEN = "\033[92m"    # active/on values
+_RED = "\033[91m"      # inactive/off values
+_YELLOW = "\033[93m"   # event type
+_MAGENTA = "\033[95m"  # routing info
+_DIM = "\033[2m"       # dim/secondary info
+_BOLD = "\033[1m"      # emphasis
+_R = "\033[0m"         # reset
 
 
 class WebhookRouter:
@@ -93,9 +104,12 @@ class WebhookRouter:
             self.logger.warning(f"Invalid webhook payload: {webhook_payload}")
             return 0
 
-        self.logger.debug(
-            f"Received event: device={device_id} ({display_name}), "
-            f"event={event_name}, value={event_value}"
+        # Color the value based on active/on vs inactive/off
+        val_color = _GREEN if event_value in ('active', 'on', 'open') else _RED
+        self.logger.info(
+            f"EVENT  {_CYAN}{display_name}{_R} "
+            f"[{_DIM}id:{device_id}{_R}]  "
+            f"{_YELLOW}{event_name}{_R} = {val_color}{event_value}{_R}"
         )
 
         # Create event object
@@ -138,7 +152,8 @@ class WebhookRouter:
                     )
             except Exception as e:
                 self.logger.error(
-                    f"Failed to dispatch event to instance {instance_id}: {e}"
+                    f"Failed to dispatch event to instance {instance_id}: {e}",
+                    exc_info=True
                 )
 
         # Log event
@@ -172,8 +187,14 @@ class WebhookRouter:
             pass  # E2E broadcast failure must never affect routing
 
         if routed_to:
+            self.logger.info(
+                f"  {_MAGENTA}→ routed to {len(routed_to)} instance(s):{_R}"
+                f" {routed_to}"
+            )
+        else:
             self.logger.debug(
-                f"Routed event to {len(routed_to)} instances: {routed_to}"
+                f"  {_DIM}→ no subscriptions for device {device_id}"
+                f" ({display_name}) event_type={event_name}{_R}"
             )
 
         return len(routed_to)
@@ -210,7 +231,8 @@ class WebhookRouter:
                     notified += 1
             except Exception as e:
                 self.logger.error(
-                    f"Failed to notify instance {instance_id} of mode change: {e}"
+                    f"Failed to notify instance {instance_id} of mode change: {e}",
+                    exc_info=True
                 )
 
         # Update location_modes table
@@ -242,7 +264,7 @@ class WebhookRouter:
                 timeout=5
             )
         except Exception as e:
-            self.logger.warning(f"Failed to log event: {e}")
+            self.logger.warning(f"Failed to log event: {e}", exc_info=True)
 
     def _update_mode(self, mode_name: str) -> None:
         """Update location_modes table with new active mode."""
@@ -270,7 +292,7 @@ class WebhookRouter:
                 timeout=5
             )
         except Exception as e:
-            self.logger.warning(f"Failed to update mode in database: {e}")
+            self.logger.warning(f"Failed to update mode in database: {e}", exc_info=True)
 
 
 # Global router instance

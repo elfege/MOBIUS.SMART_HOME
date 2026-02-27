@@ -38,3 +38,6 @@ nginx/certs/
 *.pem
 *.key
 *.crt
+
+# Claude Code
+.claude/

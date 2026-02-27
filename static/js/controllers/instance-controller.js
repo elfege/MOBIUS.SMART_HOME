@@ -424,6 +424,27 @@ export class InstanceWizardController {
             } else {
                 this.selectedDevices[category].push(deviceId);
             }
+
+            // Mutual exclusion: keep_off ↔ keep_on
+            // A device cannot be in both lists simultaneously
+            const conflictMap = {
+                'keep_off_switches': 'keep_on_switches',
+                'keep_on_switches': 'keep_off_switches'
+            };
+            const conflictCategory = conflictMap[category];
+            if (conflictCategory && this.selectedDevices[conflictCategory]) {
+                const wasIn = this.selectedDevices[conflictCategory].includes(deviceId);
+                if (wasIn) {
+                    this.selectedDevices[conflictCategory] =
+                        this.selectedDevices[conflictCategory].filter(id => id !== deviceId);
+                    // Uncheck the checkbox in the other category
+                    const otherCb = document.querySelector(
+                        `input[name="${conflictCategory}"][value="${deviceId}"]`
+                    );
+                    if (otherCb) otherCb.checked = false;
+                    this._updateCategoryTags(conflictCategory);
+                }
+            }
         } else {
             this.selectedDevices[category] = this.selectedDevices[category].filter(
                 id => id !== deviceId

@@ -1,5 +1,5 @@
 -- =============================================================================
--- 0_SMART_HOME Database Schema
+-- 0_MOBIUS.SMART_HOME Database Schema
 -- Multi-instance automation system for Hubitat integration
 -- =============================================================================
 
@@ -344,6 +344,11 @@ CREATE TABLE IF NOT EXISTS hubitat_matter_devices (
     -- Commissioning state in OUR matter-server
     our_node_id INTEGER,                    -- NULL until commissioned into our fabric
     is_commissioned BOOLEAN DEFAULT false,
+
+    -- Commission retry tracking (exponential backoff + circuit breaker)
+    commission_attempts INTEGER DEFAULT 0,          -- Total attempts made
+    last_commission_attempt TIMESTAMPTZ,             -- When last attempt was made
+    last_commission_error TEXT,                       -- Error from last failed attempt
 
     -- Tracking
     discovered_at TIMESTAMPTZ DEFAULT NOW(),

@@ -5,6 +5,7 @@ Registers all available app types and populates the app_types table.
 """
 
 import logging
+import traceback
 import requests
 import os
 from typing import Dict, Type, List
@@ -95,7 +96,7 @@ def sync_to_database() -> None:
             }
 
             response = requests.post(
-                f"{postgrest_url}/app_types",
+                f"{postgrest_url}/app_types?on_conflict=type_name",
                 json=data,
                 headers={
                     "Content-Type": "application/json",
@@ -112,4 +113,4 @@ def sync_to_database() -> None:
                 )
 
         except Exception as e:
-            logger.error(f"Failed to sync app type {type_name}: {e}")
+            logger.error(f"Failed to sync app type {type_name}: {e}", exc_info=True)

@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Always Off / Always On - Feature Documentation (February 23, 2026)</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 15px;
+            background: #f5f5f5;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1800px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 2.2em;
+            border-bottom: 3px solid #e67e22;
+            padding-bottom: 10px;
+        }
+
+        h2 {
+            color: #34495e;
+            border-left: 4px solid #e67e22;
+            padding-left: 15px;
+            margin-top: 40px;
+            font-size: 1.6em;
+        }
+
+        h3 {
+            color: #d35400;
+            font-size: 1.2em;
+            margin-top: 20px;
+        }
+
+        .diagram-container {
+            background: #fafafa;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 40px 15px 15px 15px;
+            margin: 20px 0;
+            overflow-x: auto;
+        }
+
+        .mermaid {
+            font-size: 11px;
+        }
+
+        .architecture-note {
+            background: #fef5e7;
+            color: #2c3e50;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            border-left: 4px solid #e67e22;
+            font-size: 14px;
+        }
+
+        .critical-note {
+            background: #d1ecf1;
+            color: #0c5460;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            border-left: 4px solid #17a2b8;
+            font-size: 14px;
+        }
+
+        .alert-note {
+            background: #fff3cd;
+            color: #856404;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            border-left: 4px solid #ffc107;
+            font-size: 14px;
+        }
+
+        .danger-note {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            border-left: 4px solid #dc3545;
+            font-size: 14px;
+        }
+
+        .key-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 25px 0;
+        }
+
+        .metric-card {
+            background: linear-gradient(135deg, #e67e22 0%, #d35400 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .metric-value {
+            font-size: 2em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .metric-label {
+            font-size: 0.9em;
+            opacity: 0.9;
+        }
+
+        ul {
+            line-height: 1.8;
+            margin-left: 20px;
+        }
+
+        li {
+            margin: 8px 0;
+        }
+
+        strong {
+            color: #2c3e50;
+        }
+
+        code {
+            background: #f5f5f5;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            color: #d63384;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+
+        th {
+            background: #e67e22;
+            color: white;
+        }
+
+        tr:nth-child(even) {
+            background: #f9f9f9;
+        }
+
+        .decision-table td:first-child {
+            font-family: 'Courier New', monospace;
+            font-weight: bold;
+        }
+
+        .action-skip {
+            color: #28a745;
+            font-weight: bold;
+        }
+
+        .action-force {
+            color: #dc3545;
+            font-weight: bold;
+        }
+
+        .action-noop {
+            color: #6c757d;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Always Off / Always On - Feature Documentation</h1>
+
+        <div class="critical-note">
+            <strong>Feature Overview:</strong> The Always Off / Always On feature allows users to designate
+            specific switches that should be forced to a particular state regardless of motion automation.
+            Devices in the "Always Off" list are forced off; devices in the "Always On" list are forced on.
+            The feature uses four-source tracking (<code>app</code>/<code>manual</code>/<code>pause</code>/<code>unknown</code>)
+            to detect and respect user manual overrides. Enforcement can be gated to specific location modes
+            via <code>keepOffModes</code> and <code>keepOnModes</code> settings. Enforcement runs in <code>master()</code>,
+            <code>initialize()</code>, <code>_health_check()</code> (every 10 min), and on mode change.
+            <br/><br/>
+            <strong>Source:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code> &mdash;
+            <code>_enforce_keep_switches()</code> (lines 815-940)
+            <br/>
+            <strong>Device Categories:</strong> <code>keep_off_switches</code>, <code>keep_on_switches</code>
+            <br/>
+            <strong>Settings:</strong> <code>keepOffModes</code>, <code>keepOnModes</code>
+            <br/><br/>
+            <em>Last updated: February 23, 2026.</em>
+        </div>
+
+        <div class="key-metrics">
+            <div class="metric-card">
+                <div class="metric-value">2</div>
+                <div class="metric-label">Device Categories</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">2</div>
+                <div class="metric-label">Mode Gating Settings</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">4</div>
+                <div class="metric-label">Enforcement Points</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">4</div>
+                <div class="metric-label">Source Types</div>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- CORE CONCEPT                                                  -->
+        <!-- ============================================================ -->
+        <h2>Core Concept</h2>
+
+        <div class="architecture-note">
+            <strong>Simple Rule:</strong> If a device is in the always-off list, turn it off.
+            If it's in the always-on list, turn it on. Enforcement can optionally be restricted to
+            specific location modes via <code>keepOffModes</code> / <code>keepOnModes</code> settings
+            (empty = all modes).
+            <br/><br/>
+            <strong>The Exception:</strong> Source-tracked memoization detects when the user has manually
+            overridden the app's action. If the memo source is <code>'manual'</code>, the app respects
+            that override. If the source is <code>'app'</code> or <code>'pause'</code>, enforcement proceeds.
+            Overrides reset on mode change, pause/resume, or instance update.
+            <br/><br/>
+            <strong>Conflict Resolution:</strong> If a device appears in both keep_off and keep_on categories,
+            keep_off wins: <code>keep_on_ids = keep_on_ids - keep_off_ids</code>.
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- DECISION TABLES                                               -->
+        <!-- ============================================================ -->
+        <h2>Always-Off Decision Table</h2>
+
+        <div class="architecture-note">
+            <strong>Goal state:</strong> Device should be OFF. The app checks the memo's <code>source</code>
+            field to determine whether to enforce or skip.
+        </div>
+
+        <table class="decision-table">
+            <thead>
+                <tr>
+                    <th>Memo Source</th>
+                    <th>Device State</th>
+                    <th>Interpretation</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>source='app'</code></td>
+                    <td>ON</td>
+                    <td>App set expected state but device is wrong</td>
+                    <td class="action-force">FORCE OFF &mdash; app-initiated, enforce rule</td>
+                </tr>
+                <tr>
+                    <td><code>source='pause'</code></td>
+                    <td>ON</td>
+                    <td>Pause/resume turned it on</td>
+                    <td class="action-force">FORCE OFF &mdash; pause is app-initiated, enforce</td>
+                </tr>
+                <tr>
+                    <td><code>source='manual'</code></td>
+                    <td>ON</td>
+                    <td>User manually turned it back on</td>
+                    <td class="action-skip">SKIP &mdash; user override, respect until reset</td>
+                </tr>
+                <tr>
+                    <td><code>source='unknown'</code></td>
+                    <td>ON</td>
+                    <td>No memo or unknown origin</td>
+                    <td class="action-skip">SKIP &mdash; conservative, don't fight unknown state</td>
+                </tr>
+                <tr>
+                    <td>any</td>
+                    <td>OFF</td>
+                    <td>Already off</td>
+                    <td class="action-noop">Nothing &mdash; goal state already achieved</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>Always-On Decision Table</h2>
+
+        <div class="architecture-note">
+            <strong>Goal state:</strong> Device should be ON. Same source-based logic, mirrored.
+        </div>
+
+        <table class="decision-table">
+            <thead>
+                <tr>
+                    <th>Memo Source</th>
+                    <th>Device State</th>
+                    <th>Interpretation</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>source='app'</code></td>
+                    <td>OFF</td>
+                    <td>App set expected state but device is wrong</td>
+                    <td class="action-force">FORCE ON &mdash; app-initiated, enforce rule</td>
+                </tr>
+                <tr>
+                    <td><code>source='pause'</code></td>
+                    <td>OFF</td>
+                    <td>Pause turned it off</td>
+                    <td class="action-force">FORCE ON &mdash; pause is app-initiated, enforce</td>
+                </tr>
+                <tr>
+                    <td><code>source='manual'</code></td>
+                    <td>OFF</td>
+                    <td>User manually turned it off</td>
+                    <td class="action-skip">SKIP &mdash; user override, respect until reset</td>
+                </tr>
+                <tr>
+                    <td><code>source='unknown'</code></td>
+                    <td>OFF</td>
+                    <td>No memo or unknown origin</td>
+                    <td class="action-skip">SKIP &mdash; conservative, don't fight unknown state</td>
+                </tr>
+                <tr>
+                    <td>any</td>
+                    <td>ON</td>
+                    <td>Already on</td>
+                    <td class="action-noop">Nothing &mdash; goal state already achieved</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <!-- ============================================================ -->
+        <!-- FLOW DIAGRAM                                                  -->
+        <!-- ============================================================ -->
+        <h2>Enforcement Flow</h2>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                flowchart TB
+                    START([Enforcement Triggered]) --> ENFORCE[_enforce_keep_switches]
+                    ENFORCE --> GET_MODE[Get current location mode]
+
+                    GET_MODE --> OFF_MODE{keepOffModes<br/>active for<br/>current mode?}
+                    OFF_MODE -->|No / wrong mode| OFF_SKIP([Skip Always-Off<br/>enforcement])
+                    OFF_MODE -->|Yes / empty list| OFF_LOOP[For each device in<br/>keep_off_switches]
+                    OFF_LOOP --> OFF_STATE{Device<br/>currently ON?}
+                    OFF_STATE -->|No| OFF_DONE([Already OFF])
+                    OFF_STATE -->|Yes| OFF_SRC{Memo source?}
+                    OFF_SRC -->|source=manual<br/>or unknown| USER_OVR([User Override<br/>SKIP])
+                    OFF_SRC -->|source=app<br/>or pause| FORCE_OFF[send_command<br/>device, 'off']
+
+                    GET_MODE --> ON_MODE{keepOnModes<br/>active for<br/>current mode?}
+                    ON_MODE -->|No / wrong mode| ON_SKIP([Skip Always-On<br/>enforcement])
+                    ON_MODE -->|Yes / empty list| ON_LOOP[For each device in<br/>keep_on_switches]
+                    ON_LOOP --> ON_STATE{Device<br/>currently OFF?}
+                    ON_STATE -->|No| ON_DONE([Already ON])
+                    ON_STATE -->|Yes| ON_SRC{Memo source?}
+                    ON_SRC -->|source=manual<br/>or unknown| USER_OVR2([User Override<br/>SKIP])
+                    ON_SRC -->|source=app<br/>or pause| FORCE_ON[send_command<br/>device, 'on']
+
+                    style START fill:#667eea,color:#fff
+                    style ENFORCE fill:#fd7e14,color:#fff
+                    style GET_MODE fill:#e67e22,color:#fff
+                    style FORCE_OFF fill:#dc3545,color:#fff
+                    style FORCE_ON fill:#28a745,color:#fff
+                    style USER_OVR fill:#17a2b8,color:#fff
+                    style USER_OVR2 fill:#17a2b8,color:#fff
+                    style OFF_DONE fill:#6c757d,color:#fff
+                    style ON_DONE fill:#6c757d,color:#fff
+                    style OFF_SKIP fill:#6c757d,color:#fff
+                    style ON_SKIP fill:#6c757d,color:#fff
+                    style OFF_SRC fill:#ffc107
+                    style ON_SRC fill:#ffc107
+                    style OFF_STATE fill:#ffc107
+                    style ON_STATE fill:#ffc107
+                    style OFF_MODE fill:#ffc107
+                    style ON_MODE fill:#ffc107
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- MEMOIZATION INTERACTION                                       -->
+        <!-- ============================================================ -->
+        <h2>Memoization Interaction</h2>
+
+        <div class="architecture-note">
+            <strong>How memoization applies:</strong> The memoization system tracks what the APP last
+            commanded each device to do, with a <code>source</code> field distinguishing the origin.
+            Keep device memos are keyed by <code>keep:{device_id}</code> format for consistency.
+            On initialization and resume, keep devices are seeded with expected state and
+            <code>source='app'</code>, establishing the baseline for override detection.
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                sequenceDiagram
+                    participant User as User (Physical)
+                    participant App as AML Instance
+                    participant Memo as Memoization State
+                    participant Dev as Always-Off Device
+
+                    Note over App,Dev: Phase 1: Initialization Seeds Memo
+                    App->>App: _init_memoization_keys()
+                    App->>Memo: set keep:device_id = {state:off, source:app}
+                    App->>App: _enforce_keep_switches()
+                    App->>Dev: Device is ON, source=app
+                    App->>Dev: send_command('off')
+                    Note over Memo: Memo: {state:off, source:app}
+
+                    Note over User,Dev: Phase 2: User Manually Turns It Back On
+                    User->>Dev: Physically turns on switch
+                    App->>App: _handle_switch(event: ON)
+                    App->>Memo: memo says state=off but device is ON
+                    Note over App: State contradicts memo = USER OVERRIDE
+                    App->>Memo: set keep:device_id = {state:on, source:manual}
+
+                    Note over App,Dev: Phase 3: Next Event Cycle
+                    App->>App: _enforce_keep_switches()
+                    App->>Memo: Check source for device
+                    Memo-->>App: source='manual'
+                    Note over App: SKIP — user override detected
+
+                    Note over App,Dev: Phase 4: Mode Change Resets
+                    App->>App: on_mode_change('Night' to 'Day')
+                    App->>Memo: _reset_memoization() re-seeds with source=app
+                    App->>App: _enforce_keep_switches()
+                    App->>Memo: Check source for device
+                    Memo-->>App: source='app'
+                    App->>Dev: send_command('off')
+                    Note over App: Enforcement resumes
+            </div>
+        </div>
+
+        <div class="diagram-container">
+            <div class="mermaid">
+                sequenceDiagram
+                    participant App as AML Instance
+                    participant Memo as Memoization State
+                    participant Dev as Always-Off Device
+
+                    Note over App,Dev: Pause/Resume Turns Device On
+                    App->>Dev: Resume: turn on all pause switches
+                    App->>Memo: Record: keep:device_id = {state:on, source:pause}
+
+                    Note over App,Dev: Next Event Cycle
+                    App->>App: _enforce_keep_switches()
+                    App->>Memo: Check source for device
+                    Memo-->>App: source='pause'
+                    App->>App: Device is ON, source=pause
+                    Note over App: Pause is app-initiated, NOT a user override
+                    App->>Dev: send_command('off')
+                    Note over App: FORCE OFF &mdash; enforce the always-off rule
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- EXCLUSION FROM NORMAL CONTROL                                 -->
+        <!-- ============================================================ -->
+        <h2>Exclusion from Normal Light Control</h2>
+
+        <div class="critical-note">
+            <strong>Important:</strong> Devices in the <code>keep_off_switches</code> and
+            <code>keep_on_switches</code> categories are <strong>excluded</strong> from the normal
+            motion-triggered <code>_control_lights()</code> pipeline. This prevents the motion
+            automation from turning on a device that should always be off (or vice versa).
+            <br/><br/>
+            The exclusion happens in <code>_control_lights()</code>:
+            <br/>
+            <code>if device_id in keep_off_ids or device_id in keep_on_ids: continue</code>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- DEVICE CATEGORIES                                             -->
+        <!-- ============================================================ -->
+        <h2>Device Categories</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Category Key</th>
+                    <th>UI Label</th>
+                    <th>Capability</th>
+                    <th>Multiple</th>
+                    <th>Required</th>
+                    <th>Purpose</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>keep_off_switches</code></td>
+                    <td>Always Off</td>
+                    <td><code>switch</code></td>
+                    <td>Yes</td>
+                    <td>No</td>
+                    <td>Devices forced off on every event cycle</td>
+                </tr>
+                <tr>
+                    <td><code>keep_on_switches</code></td>
+                    <td>Always On</td>
+                    <td><code>switch</code></td>
+                    <td>Yes</td>
+                    <td>No</td>
+                    <td>Devices forced on on every event cycle</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>Mode Gating Settings</h2>
+
+        <div class="architecture-note">
+            <strong>Optional mode restriction:</strong> By default, enforcement runs in all location modes.
+            The <code>keepOffModes</code> and <code>keepOnModes</code> settings allow restricting enforcement
+            to specific modes. An empty array (default) means "enforce in all modes."
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Setting</th>
+                    <th>Type</th>
+                    <th>Default</th>
+                    <th>Description</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>keepOffModes</code></td>
+                    <td>array (strings)</td>
+                    <td><code>[]</code></td>
+                    <td>Location modes where Always-Off is enforced. Empty = all modes.</td>
+                </tr>
+                <tr>
+                    <td><code>keepOnModes</code></td>
+                    <td>array (strings)</td>
+                    <td><code>[]</code></td>
+                    <td>Location modes where Always-On is enforced. Empty = all modes.</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="critical-note">
+            <h3>Mode Gating Examples</h3>
+            <table>
+                <thead><tr><th>keepOffModes</th><th>Current Mode</th><th>Enforce Always-Off?</th></tr></thead>
+                <tbody>
+                    <tr><td><code>[]</code></td><td>any</td><td>YES (all modes, default)</td></tr>
+                    <tr><td><code>["Night"]</code></td><td>Night</td><td>YES</td></tr>
+                    <tr><td><code>["Night"]</code></td><td>Day</td><td>NO (wrong mode)</td></tr>
+                    <tr><td><code>["Night", "Away"]</code></td><td>Away</td><td>YES</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- WHEN ENFORCEMENT RUNS                                         -->
+        <!-- ============================================================ -->
+        <h2>When Enforcement Runs</h2>
+
+        <div class="architecture-note">
+            <code>_enforce_keep_switches()</code> is called at four points:
+            <ul>
+                <li><strong>Inside <code>master()</code></strong> (line 416): After normal motion light
+                    control, enforcement runs to override any devices that should be always-off or
+                    always-on, regardless of what the motion logic decided.</li>
+                <li><strong>Inside <code>initialize()</code></strong> (line 175): On startup, enforcement
+                    runs immediately. This ensures keep devices are in correct state from the moment
+                    the instance starts, without waiting for a motion event.</li>
+                <li><strong>Inside <code>_health_check()</code></strong> (line 1034): Every 10 minutes,
+                    enforcement re-runs. This catches cases where no motion events have occurred but
+                    keep devices have drifted (e.g., physically toggled, power restored).</li>
+                <li><strong>Inside <code>on_mode_change()</code></strong>: After memoization is reset
+                    (re-seeded with <code>source='app'</code>) and <code>master()</code> runs,
+                    enforcement ensures correct state for the new mode context.</li>
+            </ul>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- SUMMARY                                                       -->
+        <!-- ============================================================ -->
+        <h2>Summary</h2>
+
+        <div class="critical-note">
+            <h3>Key Characteristics</h3>
+            <ul>
+                <li><strong>Four-Source Tracking:</strong> Distinguishes <code>app</code>, <code>manual</code>, <code>pause</code>, <code>unknown</code> sources. Only <code>manual</code> and <code>unknown</code> skip enforcement.</li>
+                <li><strong>Mode Gating:</strong> Optional <code>keepOffModes</code> / <code>keepOnModes</code> restrict enforcement to specific location modes. Empty = all modes (default).</li>
+                <li><strong>Four Enforcement Points:</strong> <code>master()</code>, <code>initialize()</code>, <code>_health_check()</code> (10 min), <code>on_mode_change()</code></li>
+                <li><strong>Memo Seeding:</strong> On init/resume/mode-change, keep devices are seeded with expected state and <code>source='app'</code>, establishing baseline for override detection</li>
+                <li><strong>Conflict Resolution:</strong> Device in both keep_off and keep_on: keep_off wins (<code>keep_on_ids - keep_off_ids</code>)</li>
+                <li><strong>Excluded from Normal Control:</strong> Always-off/on devices are skipped by <code>_control_lights()</code></li>
+                <li><strong>Pause Switch Interaction:</strong> On resume, pause switches skip keep_off devices (enforcement handles them). On pause, skip keep_on devices.</li>
+                <li><strong>Verified-Only Memo:</strong> Only confirmed (verified=True) commands update memo, preventing false override detection from failed commands</li>
+            </ul>
+        </div>
+
+        <div class="architecture-note">
+            <h3>File Reference</h3>
+            <ul>
+                <li><strong>Enforcement:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code> &mdash; <code>_enforce_keep_switches()</code> (lines 815-940)</li>
+                <li><strong>Memo Seeding:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code> &mdash; <code>_init_memoization_keys()</code> (lines 88-115)</li>
+                <li><strong>Override Detection:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code> &mdash; <code>_handle_switch()</code> (lines 226-272)</li>
+                <li><strong>Exclusion Logic:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code> &mdash; <code>_control_lights()</code> (lines 548-549)</li>
+                <li><strong>Mode Settings:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code> &mdash; <code>get_settings_schema()</code> (lines 1154-1167)</li>
+                <li><strong>Device Categories:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code> &mdash; <code>get_device_categories()</code> (lines 1224-1238)</li>
+                <li><strong>Parent Feature Doc:</strong> <a href="app_advanced_motion_lighting.html"><code>docs/app_advanced_motion_lighting.html</code></a></li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'default',
+            flowchart: {
+                useMaxWidth: true,
+                htmlLabels: true,
+                curve: 'basis',
+                padding: 5,
+                nodeSpacing: 25,
+                rankSpacing: 35
+            },
+            sequence: {
+                useMaxWidth: true,
+                showSequenceNumbers: false,
+                actorMargin: 30,
+                messageFontSize: 12
+            }
+        });
+        mermaid.run()
+    </script>
+</body>
+</html>

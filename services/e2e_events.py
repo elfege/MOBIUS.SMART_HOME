@@ -9,7 +9,7 @@ Uses asyncio.Queue because FastAPI runs on uvicorn's async event loop.
 Each connected browser (EventSource) gets its own queue, tagged with
 an instance_id so events are filtered per-modal.
 
-Adapted from the 0_TILES SSE pattern (which uses threading.Queue for Flask).
+Adapted from the 0_MOBIUS.TILES SSE pattern (which uses threading.Queue for Flask).
 """
 
 import asyncio

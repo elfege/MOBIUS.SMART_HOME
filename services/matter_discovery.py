@@ -19,10 +19,15 @@ import os
 import asyncio
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# Commission retry policy
+MAX_COMMISSION_ATTEMPTS = 5          # Stop trying after this many failures
+COMMISSION_BASE_BACKOFF_SECONDS = 60 # First retry after 60s, then 120, 240, 480, 960
+COMMISSION_CONCURRENCY = 1           # Only 1 PASE session at a time
 
 
 def mac_from_ipv6_ll(ipv6: str) -> Optional[str]:
@@ -296,23 +301,54 @@ class MatterDiscoveryService:
 
         logger.info(f"Matter scan: {upserted} devices upserted, {len(errors)} hub errors")
 
-        # --- Phase 3: Auto-commission new online devices ---
+        # --- Phase 3: Auto-commission eligible devices ---
+        # Only attempt devices that are:
+        #   - online
+        #   - not yet commissioned
+        #   - under the max attempt limit
+        #   - past their exponential backoff cooldown
         commissioned = 0
         try:
-            # Get uncommissioned, online devices
             resp = req.get(
                 f"{postgrest_url}/hubitat_matter_devices",
                 params={
                     "is_online": "eq.true",
-                    "is_commissioned": "eq.false"
+                    "is_commissioned": "eq.false",
+                    "commission_attempts": f"lt.{MAX_COMMISSION_ATTEMPTS}",
+                    "select": "*"
                 },
                 headers={"Accept": "application/json"},
                 timeout=5
             )
             if resp.ok:
-                to_commission = resp.json()
-                if to_commission:
-                    commissioned = await self._commission_devices(to_commission)
+                candidates = resp.json()
+                # Filter by backoff cooldown (can't do date math in PostgREST)
+                now = datetime.now(timezone.utc)
+                eligible = []
+                for dev in candidates:
+                    attempts = dev.get('commission_attempts', 0)
+                    last_attempt = dev.get('last_commission_attempt')
+                    if attempts > 0 and last_attempt:
+                        # Exponential backoff: base * 2^(attempts-1)
+                        backoff_secs = COMMISSION_BASE_BACKOFF_SECONDS * (2 ** (attempts - 1))
+                        try:
+                            last_ts = datetime.fromisoformat(last_attempt.replace('Z', '+00:00'))
+                            if now - last_ts < timedelta(seconds=backoff_secs):
+                                logger.debug(
+                                    f"Skipping {dev.get('device_name')} — "
+                                    f"backoff {backoff_secs}s, attempt {attempts}/{MAX_COMMISSION_ATTEMPTS}"
+                                )
+                                continue
+                        except (ValueError, TypeError):
+                            pass  # Malformed timestamp, allow retry
+                    eligible.append(dev)
+
+                if eligible:
+                    logger.info(
+                        f"Commission eligible: {len(eligible)} devices "
+                        f"(skipped {len(candidates) - len(eligible)} on backoff/limit)"
+                    )
+                    commissioned = await self._commission_devices(eligible)
         except Exception as e:
             logger.warning(f"Auto-commission phase failed: {e}")
 
@@ -333,35 +369,97 @@ class MatterDiscoveryService:
 
     async def _commission_devices(self, devices: list) -> int:
         """
-        Commission a list of devices with concurrency limit.
+        Commission devices sequentially with a concurrency of 1.
+
+        Matter PASE sessions cannot overlap — only one commissioning handshake
+        can be active at a time. Devices are processed one-by-one.
+
+        Each failure increments commission_attempts and records the error in the
+        DB. The caller (phase 3) is responsible for filtering out devices that
+        have exceeded MAX_COMMISSION_ATTEMPTS or are still in backoff cooldown.
+
         Returns number successfully commissioned.
         """
         import requests as req
         from services.matter_client import get_matter_client
 
         postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
-        sem = asyncio.Semaphore(len(devices))  # Full parallelism
         commissioned = 0
 
-        async def commission_one(device):
-            nonlocal commissioned
+        # Ensure matter-server connection before starting batch
+        client = get_matter_client()
+        if not client.is_connected:
+            connected = await client.connect()
+            if not connected:
+                logger.error(
+                    "Cannot connect to matter-server — "
+                    "skipping all commissioning this cycle"
+                )
+                return 0
+
+        # Pre-fetch existing nodes on our fabric to avoid re-commissioning
+        try:
+            existing_nodes = await client.get_nodes()
+            existing_unique_ids = set()
+            for node in existing_nodes:
+                # python-matter-server nodes may have a unique_id attribute
+                uid = node.get('unique_id') or node.get('uniqueId', '')
+                if uid:
+                    existing_unique_ids.add(uid)
+            logger.info(
+                f"Matter fabric has {len(existing_nodes)} existing nodes"
+            )
+        except Exception as e:
+            logger.warning(f"Could not query existing Matter nodes: {e}")
+            existing_unique_ids = set()
+
+        for device in devices:
             unique_id = device['unique_id']
             device_name = device.get('device_name', unique_id)
             hub_ip = device['hub_ip']
             hubitat_node = device['hubitat_node_id']
+            attempts = device.get('commission_attempts', 0)
+            now_ts = datetime.now(timezone.utc).isoformat()
 
-            async with sem:
+            # --- Guard: skip if already on our fabric ---
+            if unique_id in existing_unique_ids:
+                logger.info(
+                    f"Skipping {device_name} — already on our Matter fabric "
+                    f"(unique_id={unique_id})"
+                )
+                # Mark as commissioned in DB so we stop retrying
                 try:
-                    # Open pairing window on Hubitat
-                    pair_resp = req.get(
-                        f"http://{hub_ip}/hub/matter/openPairingWindow",
-                        params={"node": hubitat_node},
-                        timeout=90
+                    req.patch(
+                        f"{postgrest_url}/hubitat_matter_devices",
+                        params={"unique_id": f"eq.{unique_id}"},
+                        json={"is_commissioned": True},
+                        headers={"Content-Type": "application/json"},
+                        timeout=5
                     )
-                    if not pair_resp.ok:
-                        logger.warning(f"Pairing window failed for {device_name}: HTTP {pair_resp.status_code}")
-                        return
+                except Exception:
+                    pass
+                continue
 
+            logger.info(
+                f"Commissioning {device_name} "
+                f"(attempt {attempts + 1}/{MAX_COMMISSION_ATTEMPTS})"
+            )
+
+            error_msg = None
+            try:
+                # Step 1: Open pairing window on Hubitat hub
+                pair_resp = req.get(
+                    f"http://{hub_ip}/hub/matter/openPairingWindow",
+                    params={"node": hubitat_node},
+                    timeout=90
+                )
+                if not pair_resp.ok:
+                    error_msg = (
+                        f"Pairing window HTTP {pair_resp.status_code}: "
+                        f"{pair_resp.text[:200]}"
+                    )
+                    logger.warning(f"{device_name}: {error_msg}")
+                else:
                     pair_data = pair_resp.json()
                     setup_code = (
                         pair_data.get('setupCode') or
@@ -370,56 +468,87 @@ class MatterDiscoveryService:
                         (pair_data if isinstance(pair_data, str) else None)
                     )
                     if not setup_code:
-                        logger.warning(f"No setup code for {device_name}: {pair_data}")
-                        return
+                        error_msg = f"No setup code in response: {pair_data}"
+                        logger.warning(f"{device_name}: {error_msg}")
+                    else:
+                        # Step 2: Commission into our matter-server
+                        result = await asyncio.wait_for(
+                            client.commission_with_code(str(setup_code)),
+                            timeout=120  # Hard timeout for PASE + commissioning
+                        )
+                        our_node_id = (
+                            result.get('node_id')
+                            if isinstance(result, dict)
+                            else None
+                        )
 
-                    # Commission into our matter-server
-                    client = get_matter_client()
-                    if not client.is_connected:
-                        connected = await client.connect()
-                        if not connected:
-                            logger.error("Cannot connect to matter-server")
-                            return
+                        # Step 3: Create device_matter_map entry
+                        if our_node_id is not None and device.get('maker_api_device_id'):
+                            req.post(
+                                f"{postgrest_url}/device_matter_map",
+                                json={
+                                    "hubitat_device_id": device['maker_api_device_id'],
+                                    "matter_node_id": our_node_id,
+                                    "matter_endpoint_id": 1,
+                                    "device_name": device_name
+                                },
+                                headers={
+                                    "Content-Type": "application/json",
+                                    "Prefer": "resolution=merge-duplicates"
+                                },
+                                timeout=5
+                            )
 
-                    result = await client.commission_with_code(str(setup_code))
-                    our_node_id = result.get('node_id') if isinstance(result, dict) else None
-
-                    # Create device_matter_map entry
-                    if our_node_id is not None and device.get('maker_api_device_id'):
-                        req.post(
-                            f"{postgrest_url}/device_matter_map",
+                        # Step 4: Mark success in DB
+                        req.patch(
+                            f"{postgrest_url}/hubitat_matter_devices",
+                            params={"unique_id": f"eq.{unique_id}"},
                             json={
-                                "hubitat_device_id": device['maker_api_device_id'],
-                                "matter_node_id": our_node_id,
-                                "matter_endpoint_id": 1,
-                                "device_name": device_name
+                                "our_node_id": our_node_id,
+                                "is_commissioned": True,
+                                "last_commission_attempt": now_ts,
+                                "last_commission_error": None
                             },
-                            headers={
-                                "Content-Type": "application/json",
-                                "Prefer": "resolution=merge-duplicates"
-                            },
+                            headers={"Content-Type": "application/json"},
                             timeout=5
                         )
 
-                    # Update hubitat_matter_devices
-                    req.patch(
-                        f"{postgrest_url}/hubitat_matter_devices",
-                        params={"unique_id": f"eq.{unique_id}"},
-                        json={
-                            "our_node_id": our_node_id,
-                            "is_commissioned": True
-                        },
-                        headers={"Content-Type": "application/json"},
-                        timeout=5
-                    )
+                        commissioned += 1
+                        logger.info(
+                            f"Commissioned {device_name} as node {our_node_id}"
+                        )
+                        continue  # Success — skip the failure update below
 
-                    commissioned += 1
-                    logger.info(f"Commissioned {device_name} as node {our_node_id}")
+            except asyncio.TimeoutError:
+                error_msg = "Commission timed out after 120s"
+                logger.error(f"{device_name}: {error_msg}")
+            except Exception as e:
+                error_msg = str(e)
+                logger.warning(f"Commission failed for {device_name}: {e}")
 
-                except Exception as e:
-                    logger.warning(f"Commission failed for {device_name}: {e}")
+            # --- Failure: update attempt counter and error ---
+            try:
+                req.patch(
+                    f"{postgrest_url}/hubitat_matter_devices",
+                    params={"unique_id": f"eq.{unique_id}"},
+                    json={
+                        "commission_attempts": attempts + 1,
+                        "last_commission_attempt": now_ts,
+                        "last_commission_error": (error_msg or "Unknown error")[:500]
+                    },
+                    headers={"Content-Type": "application/json"},
+                    timeout=5
+                )
+            except Exception as db_err:
+                logger.warning(
+                    f"Failed to update commission_attempts for "
+                    f"{device_name}: {db_err}"
+                )
 
-        await asyncio.gather(*[commission_one(d) for d in devices])
+            # Brief cooldown between sequential attempts to let the
+            # Matter network settle before trying the next device
+            await asyncio.sleep(5)
+
         return commissioned
 
     async def _reconcile_mappings(self) -> int:

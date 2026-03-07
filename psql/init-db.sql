@@ -361,6 +361,56 @@ CREATE INDEX IF NOT EXISTS idx_hubitat_matter_devices_commissioned
     ON hubitat_matter_devices(is_commissioned) WHERE is_commissioned = false;
 
 -- =============================================================================
+-- DEVICE HUB MAPPING TABLE
+-- =============================================================================
+-- Maps each device to its native (physically paired) Hubitat hub.
+-- Populated by the hub_classifier service which queries all hubs' Maker APIs
+-- and uses the hubMeshDisabled attribute to distinguish native vs linked devices.
+--
+-- This table enables:
+-- 1. Command routing: send commands to the hub that owns the radio (no mesh relay)
+-- 2. Event source identification: know which hub's event stream is authoritative
+-- 3. Protocol awareness: know if a device is Z-Wave, Zigbee, Matter, LAN, etc.
+
+CREATE TABLE IF NOT EXISTS device_hub_mapping (
+    -- Composite key: device label + native hub (a device has one native hub)
+    device_label VARCHAR(200) NOT NULL,
+    native_hub_name VARCHAR(100) NOT NULL,
+
+    -- Native hub connection info (denormalized from hub_config for fast lookups)
+    native_hub_ip VARCHAR(50) NOT NULL,
+    native_device_id VARCHAR(50) NOT NULL,
+
+    -- Radio protocol (zwave, zigbee, matter, lan, virtual, cloud, unknown)
+    protocol VARCHAR(30) NOT NULL DEFAULT 'unknown',
+
+    -- Driver type from Hubitat (e.g., 'Generic Z-Wave Smart Switch')
+    device_type VARCHAR(200),
+
+    -- Mirror device IDs on other hubs (for cross-reference)
+    -- Format: {"hub_name": {"id": "device_id", "hub_ip": "ip"}, ...}
+    mirrors JSONB DEFAULT '{}',
+
+    -- Classification metadata
+    is_mesh_linked BOOLEAN DEFAULT false,
+    last_classified_at TIMESTAMPTZ DEFAULT NOW(),
+
+    PRIMARY KEY (device_label, native_hub_name)
+);
+
+-- Index for fast lookups by label (most common query: "which hub owns this device?")
+CREATE INDEX IF NOT EXISTS idx_device_hub_mapping_label
+    ON device_hub_mapping(device_label);
+
+-- Index for per-hub queries ("list all native devices on Home 2")
+CREATE INDEX IF NOT EXISTS idx_device_hub_mapping_hub
+    ON device_hub_mapping(native_hub_name);
+
+-- Index for protocol queries ("list all Z-Wave devices")
+CREATE INDEX IF NOT EXISTS idx_device_hub_mapping_protocol
+    ON device_hub_mapping(protocol);
+
+-- =============================================================================
 -- GRANT PERMISSIONS TO ANONYMOUS ROLE (for PostgREST)
 -- =============================================================================
 
@@ -398,6 +448,18 @@ INSERT INTO hub_config (hub_name, hub_ip, maker_api_app_number, maker_api_token_
 VALUES ('main', '<LAN_IP>', '268', 'HUBITAT_API_TOKEN_MAIN', true)
 ON CONFLICT (hub_name) DO NOTHING;
 
+INSERT INTO hub_config (hub_name, hub_ip, maker_api_app_number, maker_api_token_env, is_primary)
+VALUES ('home_1', '<LAN_IP>', '1717', 'HUBITAT_API_TOKEN_OTHER_HUB_1', false)
+ON CONFLICT (hub_name) DO NOTHING;
+
+INSERT INTO hub_config (hub_name, hub_ip, maker_api_app_number, maker_api_token_env, is_primary)
+VALUES ('home_2', '<LAN_IP>', '2151', 'HUBITAT_API_TOKEN_OTHER_HUB_2', false)
+ON CONFLICT (hub_name) DO NOTHING;
+
+INSERT INTO hub_config (hub_name, hub_ip, maker_api_app_number, maker_api_token_env, is_primary)
+VALUES ('home_3', '<LAN_IP>', '1269', 'HUBITAT_API_TOKEN_OTHER_HUB_3', false)
+ON CONFLICT (hub_name) DO NOTHING;
+
 -- =============================================================================
 -- COMMENTS
 -- =============================================================================
@@ -412,3 +474,4 @@ COMMENT ON TABLE hub_config IS 'Hubitat hub connection configuration';
 COMMENT ON TABLE location_modes IS 'Cached Hubitat location modes';
 COMMENT ON TABLE device_matter_map IS 'Maps Hubitat devices to Matter protocol nodes for dual-command control';
 COMMENT ON TABLE hubitat_matter_devices IS 'Discovered Matter devices from Hubitat hubs, deduplicated by unique_id';
+COMMENT ON TABLE device_hub_mapping IS 'Maps devices to their native hub for direct command routing and parallel event processing';

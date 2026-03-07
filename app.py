@@ -116,6 +116,46 @@ def run_db_migrations():
         "ADD COLUMN IF NOT EXISTS last_commission_attempt TIMESTAMPTZ",
         "ALTER TABLE hubitat_matter_devices "
         "ADD COLUMN IF NOT EXISTS last_commission_error TEXT",
+
+        # Device hub mapping table for native-hub command routing (added 2026-02-28)
+        """CREATE TABLE IF NOT EXISTS device_hub_mapping (
+            device_label VARCHAR(200) NOT NULL,
+            native_hub_name VARCHAR(100) NOT NULL,
+            native_hub_ip VARCHAR(50) NOT NULL,
+            native_device_id VARCHAR(50) NOT NULL,
+            protocol VARCHAR(30) NOT NULL DEFAULT 'unknown',
+            device_type VARCHAR(200),
+            mirrors JSONB DEFAULT '{}',
+            is_mesh_linked BOOLEAN DEFAULT false,
+            last_classified_at TIMESTAMPTZ DEFAULT NOW(),
+            PRIMARY KEY (device_label, native_hub_name)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_device_hub_mapping_label "
+        "ON device_hub_mapping(device_label)",
+        "CREATE INDEX IF NOT EXISTS idx_device_hub_mapping_hub "
+        "ON device_hub_mapping(native_hub_name)",
+        "CREATE INDEX IF NOT EXISTS idx_device_hub_mapping_protocol "
+        "ON device_hub_mapping(protocol)",
+
+        # Seed all hub configs
+        "INSERT INTO hub_config (hub_name, hub_ip, maker_api_app_number, "
+        "maker_api_token_env, is_primary) "
+        "VALUES ('home_1', '<LAN_IP>', '1717', "
+        "'HUBITAT_API_TOKEN_OTHER_HUB_1', false) "
+        "ON CONFLICT (hub_name) DO NOTHING",
+        "INSERT INTO hub_config (hub_name, hub_ip, maker_api_app_number, "
+        "maker_api_token_env, is_primary) "
+        "VALUES ('home_2', '<LAN_IP>', '2151', "
+        "'HUBITAT_API_TOKEN_OTHER_HUB_2', false) "
+        "ON CONFLICT (hub_name) DO NOTHING",
+        "INSERT INTO hub_config (hub_name, hub_ip, maker_api_app_number, "
+        "maker_api_token_env, is_primary) "
+        "VALUES ('home_3', '<LAN_IP>', '1269', "
+        "'HUBITAT_API_TOKEN_OTHER_HUB_3', false) "
+        "ON CONFLICT (hub_name) DO NOTHING",
+
+        # Grant PostgREST access to new table
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON device_hub_mapping TO smarthome_anon",
     ]
 
     try:
@@ -151,6 +191,23 @@ async def lifespan(app: FastAPI):
     from services.device_cache_refresh import start_cache_refresh, stop_cache_refresh
     refresh_interval = int(os.environ.get('DEVICE_CACHE_REFRESH_INTERVAL', '120'))
     start_cache_refresh(refresh_interval=refresh_interval)
+
+    # Run hub classification on startup (populates device_hub_mapping table).
+    # Runs in background thread so it doesn't block app readiness.
+    # TILES and DeviceCommander depend on this data for native-hub routing.
+    import threading
+    def _startup_classification():
+        try:
+            from services.hub_classifier import run_classification, invalidate_cache
+            logger.info("Running startup hub classification...")
+            result = run_classification()
+            invalidate_cache()
+            total = result.get("total_native", 0) if isinstance(result, dict) else 0
+            logger.info(f"Startup hub classification complete: {total} native devices mapped")
+        except Exception as e:
+            logger.warning(f"Startup hub classification failed (will retry on next POST /api/hub/classify): {e}")
+
+    threading.Thread(target=_startup_classification, name="startup-hub-classify", daemon=True).start()
 
     yield
 
@@ -553,6 +610,123 @@ async def handle_mode_webhook(request: Request):
 # =============================================================================
 # Modes
 # =============================================================================
+
+
+# =============================================================================
+# Hub Classification (native-hub device routing)
+# =============================================================================
+
+
+@app.post("/api/hub/classify", tags=["hub-classification"])
+async def run_hub_classification():
+    """
+    Run device classification across all configured hubs.
+
+    Queries each hub's Maker API, classifies devices as native vs
+    mesh-linked, builds cross-reference routing table, and writes
+    to the device_hub_mapping table.
+
+    This enables the DeviceCommander to route commands directly to
+    the hub that physically owns each device (bypassing Hub Mesh relay).
+    """
+    from services.hub_classifier import run_classification, invalidate_cache
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+        # Run classification in executor to avoid blocking event loop
+        # (makes HTTP requests to all 4 hubs)
+        result = await loop.run_in_executor(None, run_classification)
+        # Invalidate in-memory routing cache so new data is picked up
+        invalidate_cache()
+        return result
+    except Exception as e:
+        logger.error(f"Hub classification failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/hub/mapping", tags=["hub-classification"])
+async def get_hub_mapping(
+    hub_name: Optional[str] = Query(None, description="Filter by native hub name"),
+    protocol: Optional[str] = Query(None, description="Filter by protocol"),
+):
+    """
+    Get the current device-to-hub mapping table.
+
+    Returns all classified devices with their native hub, protocol,
+    and mirror info. Optionally filter by hub or protocol.
+    """
+    import requests as req
+
+    postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    params = {}
+    if hub_name:
+        params["native_hub_name"] = f"eq.{hub_name}"
+    if protocol:
+        params["protocol"] = f"eq.{protocol}"
+    params["order"] = "device_label.asc"
+
+    try:
+        resp = req.get(
+            f"{postgrest_url}/device_hub_mapping",
+            params=params,
+            headers={"Accept": "application/json"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            entries = resp.json()
+            return {
+                "count": len(entries),
+                "entries": entries,
+            }
+        return {"error": f"PostgREST returned {resp.status_code}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/hub/mapping/stats", tags=["hub-classification"])
+async def get_hub_mapping_stats():
+    """
+    Get summary statistics for the device hub mapping.
+
+    Returns per-hub and per-protocol counts.
+    """
+    import requests as req
+    from collections import defaultdict
+
+    postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+
+    try:
+        resp = req.get(
+            f"{postgrest_url}/device_hub_mapping",
+            headers={"Accept": "application/json"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return {"error": f"PostgREST returned {resp.status_code}"}
+
+        entries = resp.json()
+        hub_counts = defaultdict(int)
+        proto_counts = defaultdict(int)
+        hub_proto = defaultdict(lambda: defaultdict(int))
+
+        for e in entries:
+            hub = e.get("native_hub_name", "unknown")
+            proto = e.get("protocol", "unknown")
+            hub_counts[hub] += 1
+            proto_counts[proto] += 1
+            hub_proto[hub][proto] += 1
+
+        return {
+            "total": len(entries),
+            "by_hub": dict(hub_counts),
+            "by_protocol": dict(proto_counts),
+            "hub_protocol_matrix": {
+                hub: dict(protos) for hub, protos in hub_proto.items()
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =============================================================================

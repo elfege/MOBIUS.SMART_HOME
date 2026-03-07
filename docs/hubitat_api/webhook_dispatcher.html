@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Webhook Dispatcher Architecture</title>
+    <link rel="stylesheet" href="hubitat_docs.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <script>mermaid.initialize({ startOnLoad: true, theme: 'default' });</script>
+</head>
+<body>
+<div class="container">
+    <nav class="breadcrumb"><a href="index.html">Hubitat API Docs</a> &raquo; Webhook Dispatcher</nav>
+
+    <h1>Webhook Dispatcher Architecture</h1>
+    <p class="last-updated">How Hubitat events flow from the Maker API to our applications.</p>
+
+    <!-- ================================================================== -->
+    <h2 id="overview">1. Overview</h2>
+    <p>
+        Hubitat's Maker API supports sending events to <strong>one URL</strong> per Maker API instance.
+        Our <strong>webhook dispatcher</strong> acts as a fan-out service: it receives events from
+        Hubitat and forwards them to multiple downstream applications.
+    </p>
+
+    <div class="response-example" style="text-align: center;">
+        <div class="mermaid">
+graph TD
+    HUB["Hubitat Hub<br/>(Maker API)"] -->|"HTTP POST"| DISP["webhook-dispatcher<br/>:5050"]
+    DISP -->|"POST /api/webhook/event"| SH["smarthome-app<br/>:5000"]
+    DISP -->|"POST /api/webhook/event"| TILES["tiles-app<br/>:80"]
+
+    style HUB fill:#e8f5e9,stroke:#2e7d32
+    style DISP fill:#fff3e0,stroke:#ef6c00
+    style SH fill:#e3f2fd,stroke:#1565c0
+    style TILES fill:#e3f2fd,stroke:#1565c0
+        </div>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2 id="config">2. Configuration</h2>
+
+    <h3>Hubitat Maker API Setting</h3>
+    <p>In Maker API app settings, set <em>"URL to send device events to by POST"</em> to:</p>
+    <div class="code-block">
+<pre>http://<LAN_IP>:5050/api/webhook/event</pre>
+    </div>
+
+    <h3>Dispatcher Environment Variables</h3>
+    <table>
+        <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+            <tr><td><code>WEBHOOK_PORT</code></td><td><code>5050</code></td><td>Port the dispatcher listens on</td></tr>
+            <tr><td><code>WEBHOOK_TARGETS</code></td><td><em>(required)</em></td><td>Comma-separated URLs to forward events to</td></tr>
+        </tbody>
+    </table>
+
+    <h3>Current Target Configuration</h3>
+    <div class="code-block">
+<pre>WEBHOOK_TARGETS=http://smarthome-app:5000/api/webhook/event,http://tiles-app:80/api/webhook/event</pre>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2 id="flow">3. Event Flow</h2>
+
+    <div class="response-example" style="text-align: center;">
+        <div class="mermaid">
+sequenceDiagram
+    participant Hub as Hubitat Hub
+    participant Disp as Webhook Dispatcher
+    participant SH as SmartHome App
+    participant T as Tiles App
+
+    Hub->>Disp: POST /api/webhook/event<br/>{"content": {"name":"motion","value":"active",...}}
+    activate Disp
+    Disp->>SH: POST /api/webhook/event<br/>(unwrapped event data)
+    Disp->>T: POST /api/webhook/event<br/>(unwrapped event data)
+    SH-->>Disp: 200 OK
+    T-->>Disp: 200 OK
+    Disp-->>Hub: 200 OK
+    deactivate Disp
+        </div>
+    </div>
+
+    <h3>Content Unwrapping</h3>
+    <p>
+        Hubitat wraps event data in a <code>content</code> object. The dispatcher
+        <strong>unwraps</strong> the <code>content</code> field before forwarding, so downstream
+        apps receive the event data directly:
+    </p>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+        <div>
+            <h4>From Hubitat (raw)</h4>
+            <div class="response-example">
+<pre>{
+  "content": {
+    "name": "motion",
+    "value": "active",
+    "displayName": "Office Motion",
+    "deviceId": "23",
+    "descriptionText": "...",
+    "unit": null,
+    "type": null,
+    "data": null
+  }
+}</pre>
+            </div>
+        </div>
+        <div>
+            <h4>To Apps (unwrapped)</h4>
+            <div class="response-example">
+<pre>{
+  "name": "motion",
+  "value": "active",
+  "displayName": "Office Motion",
+  "deviceId": "23",
+  "descriptionText": "...",
+  "unit": null,
+  "type": null,
+  "data": null
+}</pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2 id="docker">4. Docker Configuration</h2>
+
+    <h3>Container Details</h3>
+    <table>
+        <thead><tr><th>Property</th><th>Value</th></tr></thead>
+        <tbody>
+            <tr><td>Container name</td><td><code>webhook-dispatcher</code></td></tr>
+            <tr><td>Image</td><td>Python 3.11-slim + Flask</td></tr>
+            <tr><td>Dockerfile</td><td><code>Dockerfile.dispatcher</code></td></tr>
+            <tr><td>External port</td><td>5050</td></tr>
+            <tr><td>Internal port</td><td>5050</td></tr>
+        </tbody>
+    </table>
+
+    <h3>Ownership</h3>
+    <p>
+        <strong>0_MOBIUS.SMART_HOME solely owns</strong> the webhook-dispatcher container.
+        TILES removed it from its own docker-compose. Both projects' <code>Dockerfile.dispatcher</code>
+        and <code>services/webhook_dispatcher.py</code> are <strong>hardlinks</strong> to the
+        canonical source at <code>~/0_SCRIPTS/webhook_dispatcher/</code>.
+    </p>
+
+    <h3>Network Connectivity</h3>
+    <p>
+        After startup, the dispatcher needs access to both Docker networks to resolve container hostnames:
+    </p>
+    <div class="code-block">
+<pre>docker network connect tiles_tiles-net webhook-dispatcher</pre>
+    </div>
+    <p>
+        This allows the dispatcher to resolve <code>tiles-app</code> via Docker DNS.
+        <code>smarthome-app</code> is already resolvable since the dispatcher runs on
+        the same docker-compose network.
+    </p>
+
+    <!-- ================================================================== -->
+    <h2 id="sse">5. SSE Considerations</h2>
+    <p>
+        Apps receiving events via webhook that use <strong>Server-Sent Events (SSE)</strong>
+        to push to browser clients <strong>must run single-worker uvicorn</strong>.
+    </p>
+    <div class="warning">
+        <strong>Why single worker?</strong> Multiple uvicorn workers have isolated memory.
+        An SSE client connected to worker A won't see events from a webhook hitting worker B.
+        Uvicorn's async event loop handles concurrency within a single worker.
+    </div>
+
+    <!-- ================================================================== -->
+    <h2 id="reliability">6. Reliability Notes</h2>
+    <ul>
+        <li>Hubitat's POST is best-effort &mdash; no retry on failure</li>
+        <li>The dispatcher forwards in parallel (non-blocking) to all targets</li>
+        <li>If a target is down, the dispatcher logs the error but continues for other targets</li>
+        <li>For critical use cases, combine webhook push with periodic polling as a fallback</li>
+        <li>Hubitat sends events for <strong>all authorized devices</strong> in the Maker API instance &mdash; apps must filter by device ID</li>
+    </ul>
+
+    <footer>
+        <p>
+            Dispatcher source: <code>~/0_SCRIPTS/webhook_dispatcher/</code>
+            &nbsp;|&nbsp;
+            See also: <a href="maker_api_reference.html#webhooks">Maker API Webhook Format</a>
+        </p>
+    </footer>
+</div>
+</body>
+</html>

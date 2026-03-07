@@ -51,7 +51,7 @@ class SwitchCommandsMixin:
             has_level = self._device_has_capability(device, 'SwitchLevel')
 
             if use_dim and has_level:
-                level = self._get_current_dim_level()
+                level = self._get_current_dim_level(device_name)
                 result = self.send_command(device_id, 'setLevel', [level])
             else:
                 result = self.send_command(device_id, 'on')
@@ -71,14 +71,16 @@ class SwitchCommandsMixin:
                 # Do NOT update memo — device may not have actually changed
                 return False
 
-            # Apply color after confirmed on (best-effort)
+            # Apply color after confirmed on (best-effort); memo the applied color
             if self.get_setting('useColor', False):
-                self._set_color(device_id, device)
+                applied_color = self._set_color(device_id, device_name, device)
+                if applied_color:
+                    self._memoization['color_state'][device_name] = applied_color
 
             # Record verified state in memo
             self._memoization['switch_state'][device_name] = {'state': 'on', 'source': 'app'}
             if use_dim and has_level:
-                self._memoization['dim_level'][device_name] = level
+                self._memoization['dim_level'][device_name] = {'level': level, 'source': 'app'}
             return True
 
         except Exception as e:

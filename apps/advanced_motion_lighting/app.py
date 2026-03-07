@@ -41,6 +41,7 @@ from apps.advanced_motion_lighting.event_handlers.dispatch import EventDispatchM
 from apps.advanced_motion_lighting.event_handlers.motion import MotionEventMixin
 from apps.advanced_motion_lighting.event_handlers.switch_override import SwitchOverrideMixin
 from apps.advanced_motion_lighting.event_handlers.button_and_pause import ButtonAndPauseMixin
+from apps.advanced_motion_lighting.event_handlers.level_color_override import LevelColorOverrideMixin
 from apps.advanced_motion_lighting.mode_change import ModeChangeMixin
 from apps.advanced_motion_lighting.main_logic import MainLogicMixin
 from apps.advanced_motion_lighting.motion_detection import MotionDetectionMixin
@@ -67,6 +68,7 @@ class AdvancedMotionLightingApp(
     MotionEventMixin,        # _handle_motion()
     SwitchOverrideMixin,     # _handle_switch()
     ButtonAndPauseMixin,     # _handle_button(), _control_pause_switches()
+    LevelColorOverrideMixin, # _handle_level_color() — dim/color manual override detection
     # Core logic
     MainLogicMixin,          # master(), _in_exception_state()
     MotionDetectionMixin,    # _is_motion_active()

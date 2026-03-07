@@ -22,6 +22,25 @@ cd "$SCRIPT_DIR" &>/dev/null || true
 	exit 1
 }
 
+# ── Wait for internet / AWS connectivity (post-power-loss guard) ─────────────
+_AWS_WAIT_URL="https://sts.amazonaws.com"
+_LOG_FILE="${LOG_FILE:-$HOME/0_LOGS/log.log}"
+mkdir -p "$(dirname "$_LOG_FILE")"
+if ! curl -sf --max-time 5 "$_AWS_WAIT_URL" -o /dev/null 2>&1; then
+    _msg="[$(date '+%H:%M:%S')] Waiting for internet/AWS (${_AWS_WAIT_URL}) — logging every 5s to: $_LOG_FILE"
+    echo -e "${FLASH_ACCENT_YELLOW:-\033[5;33m}${_msg}${NC:-\033[0m}"
+    echo "$_msg" >> "$_LOG_FILE"
+    until curl -sf --max-time 5 "$_AWS_WAIT_URL" -o /dev/null 2>&1; do
+        _msg="[$(date '+%H:%M:%S')] Still waiting for internet/AWS — retrying in 5s"
+        echo -e "${FLASH_ACCENT_YELLOW:-\033[5;33m}${_msg}${NC:-\033[0m}"
+        echo "$_msg" >> "$_LOG_FILE"
+        sleep 5
+    done
+fi
+echo -e "${GREEN:-\033[0;32m}[$(date '+%H:%M:%S')] Internet/AWS connectivity confirmed — proceeding${NC:-\033[0m}"
+echo "[$(date '+%H:%M:%S')] Internet/AWS connectivity confirmed" >> "$_LOG_FILE"
+# ─────────────────────────────────────────────────────────────────────────────
+
 echo "=========================================="
 echo "  0_MOBIUS.SMART_HOME - Startup"
 echo "=========================================="

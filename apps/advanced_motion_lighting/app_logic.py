@@ -674,9 +674,30 @@ class AdvancedMotionLightingApp(BaseApp):
             device = self.get_device_state(device_id)
             device_name = device.get('device_label', device.get('device_name', device_id)) if device else device_id
 
-            # Memoization check: if app already set this to desired state, skip
+            # Memoization check: if app already set this to desired state, skip.
+            # Cross-check memo against actual device state to detect staleness.
+            # The memo can become stale when:
+            #   - A command was sent but not verified (memo not updated)
+            #   - Device was changed externally (user/Hubitat rule/other app)
+            # If actual state contradicts what memo claims, clear the stale
+            # entry and proceed with the command.
             if self._should_skip_due_to_memo(device_name, action):
-                continue
+                if device:
+                    actual = device.get('attributes', {}).get('switch')
+                    if actual is not None and actual != action:
+                        self.logger.info(
+                            f"Stale memo for {_C}{device_name}{_R}: "
+                            f"memo says '{action}' but device is '{actual}'"
+                            f" — clearing memo, proceeding"
+                        )
+                        self._memoization.get('switch_state', {}).pop(
+                            device_name, None
+                        )
+                        memo_dirty = True
+                    else:
+                        continue
+                else:
+                    continue
 
             # Send command (checks actual device state before sending)
             if action == 'on':

@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hubitat Maker API - Device Response Examples</title>
+    <link rel="stylesheet" href="hubitat_docs.css">
+</head>
+<body>
+<div class="container">
+    <nav class="breadcrumb"><a href="index.html">Hubitat API Docs</a> &raquo; Device Response Examples</nav>
+
+    <h1>Maker API &mdash; Real Device Response Examples</h1>
+    <p class="last-updated">
+        Compiled February 2026 from community-contributed examples.
+        <br>Source: <a href="https://community.hubitat.com/t/maker-api-example-responses-for-lots-of-various-device-types/42083">Hubitat Community Thread</a>
+    </p>
+    <p>
+        These are actual JSON responses from <code>GET /devices/{id}</code> for various device types.
+        Use them as a reference for parsing Maker API data in your integrations.
+    </p>
+
+    <!-- ================================================================== -->
+    <h2>Switches &amp; Dimmers</h2>
+
+    <h3>Generic Z-Wave Smart Switch</h3>
+    <div class="response-example">
+<pre>{
+  "id": "1",
+  "name": "Generic Z-Wave Smart Switch",
+  "label": "Living Room Lamp",
+  "type": "Generic Z-Wave Smart Switch",
+  "capabilities": ["Switch", "Configuration", "Refresh", "Actuator"],
+  "attributes": {
+    "switch": "on"
+  },
+  "commands": [
+    { "command": "configure" },
+    { "command": "off" },
+    { "command": "on" },
+    { "command": "refresh" }
+  ]
+}</pre>
+    </div>
+
+    <h3>Generic Zigbee Outlet</h3>
+    <div class="response-example">
+<pre>{
+  "id": "14",
+  "name": "Generic Zigbee Outlet",
+  "label": "Office Outlet",
+  "type": "Generic Zigbee Outlet",
+  "capabilities": ["Switch", "Configuration", "PowerMeter", "Sensor", "Actuator", "Outlet"],
+  "attributes": {
+    "power": "5.2",
+    "switch": "on"
+  },
+  "commands": [
+    { "command": "configure" },
+    { "command": "off" },
+    { "command": "on" },
+    { "command": "refresh" }
+  ]
+}</pre>
+    </div>
+
+    <h3>Zooz Central Scene Dimmer (Z-Wave)</h3>
+    <div class="response-example">
+<pre>{
+  "id": "25",
+  "name": "Zooz Central Scene Dimmer",
+  "label": "Bedroom Dimmer",
+  "type": "Zooz Central Scene Dimmer",
+  "capabilities": [
+    "Switch", "Configuration", "SwitchLevel", "Refresh", "Actuator",
+    "HoldableButton", "Light", "PushableButton", "DoubleTapableButton",
+    "ReleasableButton", "ChangeLevel"
+  ],
+  "attributes": {
+    "level": "75",
+    "switch": "on",
+    "numberOfButtons": "7",
+    "held": null,
+    "pushed": "1",
+    "doubleTapped": null,
+    "released": null
+  },
+  "commands": [
+    { "command": "doubleTap", "type": ["NUMBER"] },
+    { "command": "hold", "type": ["NUMBER"] },
+    { "command": "off" },
+    { "command": "on" },
+    { "command": "push", "type": ["NUMBER"] },
+    { "command": "release", "type": ["NUMBER"] },
+    { "command": "setLevel", "type": ["NUMBER", "NUMBER"] },
+    { "command": "startLevelChange", "type": ["ENUM"] },
+    { "command": "stopLevelChange" }
+  ]
+}</pre>
+    </div>
+
+    <h3>Inovelli Dimmer Red Series (Z-Wave)</h3>
+    <div class="response-example">
+<pre>{
+  "id": "42",
+  "name": "Inovelli Dimmer Red Series LZW31-SN",
+  "label": "Kitchen Dimmer",
+  "type": "Inovelli Dimmer Red Series LZW31-SN",
+  "capabilities": [
+    "Switch", "Polling", "Configuration", "SwitchLevel", "Refresh",
+    "EnergyMeter", "PowerMeter", "Sensor", "Actuator",
+    "HoldableButton", "PushableButton"
+  ],
+  "attributes": {
+    "switch": "on",
+    "level": "50",
+    "energy": "1.234",
+    "power": "8.5",
+    "held": null,
+    "pushed": null,
+    "numberOfButtons": "11"
+  },
+  "commands": [
+    { "command": "off" },
+    { "command": "on" },
+    { "command": "setLevel", "type": ["NUMBER", "NUMBER"] },
+    { "command": "refresh" },
+    { "command": "holdUp" },
+    { "command": "holdDown" },
+    { "command": "pressUpX1" },
+    { "command": "pressDownX1" },
+    { "command": "pressUpX2" },
+    { "command": "pressDownX2" },
+    { "command": "pressUpX3" },
+    { "command": "pressDownX3" },
+    { "command": "pressUpX4" },
+    { "command": "pressDownX4" },
+    { "command": "pressUpX5" },
+    { "command": "pressDownX5" }
+  ]
+}</pre>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2>Bulbs</h2>
+
+    <h3>Generic Zigbee Bulb</h3>
+    <div class="response-example">
+<pre>{
+  "id": "50",
+  "name": "Generic Zigbee Bulb",
+  "label": "Desk Lamp",
+  "type": "Generic Zigbee Bulb",
+  "capabilities": ["Switch", "Configuration", "SwitchLevel", "Refresh", "Actuator", "Light", "ChangeLevel"],
+  "attributes": {
+    "level": "80",
+    "switch": "on"
+  },
+  "commands": [
+    { "command": "off" },
+    { "command": "on" },
+    { "command": "setLevel", "type": ["NUMBER", "NUMBER"] },
+    { "command": "startLevelChange", "type": ["ENUM"] },
+    { "command": "stopLevelChange" }
+  ]
+}</pre>
+    </div>
+
+    <h3>Generic Zigbee CT Bulb (Color Temperature)</h3>
+    <div class="response-example">
+<pre>{
+  "id": "55",
+  "name": "Generic Zigbee CT Bulb (dev)",
+  "label": "Kitchen Under-Cabinet",
+  "type": "Generic Zigbee CT Bulb (dev)",
+  "capabilities": ["Switch", "Configuration", "SwitchLevel", "Refresh", "Actuator", "ColorTemperature", "Light", "ChangeLevel"],
+  "attributes": {
+    "colorTemperature": "3500",
+    "level": "100",
+    "switch": "on",
+    "colorName": "Warm White"
+  },
+  "commands": [
+    { "command": "off" },
+    { "command": "on" },
+    { "command": "setColorTemperature", "type": ["NUMBER"] },
+    { "command": "setLevel", "type": ["NUMBER", "NUMBER"] },
+    { "command": "startLevelChange", "type": ["ENUM"] },
+    { "command": "stopLevelChange" }
+  ]
+}</pre>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2>Motion Sensors</h2>
+
+    <h3>Hue Motion Sensor</h3>
+    <div class="response-example">
+<pre>{
+  "id": "100",
+  "name": "Hue Motion Sensor",
+  "label": "Office Motion",
+  "type": "Hue Motion Sensor",
+  "capabilities": [
+    "IlluminanceMeasurement", "TemperatureMeasurement", "Battery",
+    "MotionSensor", "Configuration", "Refresh", "Sensor"
+  ],
+  "attributes": {
+    "battery": "95",
+    "illuminance": "340",
+    "motion": "inactive",
+    "temperature": "72.5"
+  },
+  "commands": [
+    { "command": "configure" },
+    { "command": "refresh" }
+  ]
+}</pre>
+    </div>
+
+    <h3>Zigbee Xiaomi/Aqara Motion Sensor</h3>
+    <div class="response-example">
+<pre>{
+  "id": "105",
+  "name": "Zigbee - Xiaomi/Aqara Motion Sensor",
+  "label": "Bathroom Motion",
+  "type": "Zigbee - Xiaomi/Aqara Motion Sensor",
+  "capabilities": [
+    "IlluminanceMeasurement", "Battery", "MotionSensor",
+    "PresenceSensor", "Sensor", "Initialize"
+  ],
+  "attributes": {
+    "battery": "87",
+    "illuminance": "12",
+    "motion": "active",
+    "presence": "present",
+    "lastCheckin": "2026-02-25 14:30:00",
+    "driver": "v2.0"
+  },
+  "commands": [
+    { "command": "initialize" },
+    { "command": "resetBatteryReplacedDate" }
+  ]
+}</pre>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2>Contact Sensors</h2>
+
+    <h3>Generic Zigbee Contact Sensor</h3>
+    <div class="response-example">
+<pre>{
+  "id": "110",
+  "name": "Generic Zigbee Contact Sensor",
+  "label": "Front Door",
+  "type": "Generic Zigbee Contact Sensor",
+  "capabilities": [
+    "TemperatureMeasurement", "Battery", "ContactSensor",
+    "Configuration", "Refresh", "Sensor"
+  ],
+  "attributes": {
+    "battery": "78",
+    "contact": "closed",
+    "temperature": "68.0"
+  },
+  "commands": [
+    { "command": "configure" },
+    { "command": "refresh" }
+  ]
+}</pre>
+    </div>
+
+    <h3>Xiaomi Door/Window Sensor</h3>
+    <div class="response-example">
+<pre>{
+  "id": "115",
+  "name": "Xiaomi Door/Window Sensor",
+  "label": "Garage Door",
+  "type": "Xiaomi Door/Window Sensor",
+  "capabilities": [
+    "TemperatureMeasurement", "Battery", "ContactSensor", "Sensor"
+  ],
+  "attributes": {
+    "battery": "92",
+    "contact": "open",
+    "temperature": "45.2",
+    "lastCheckin": "2026-02-25 14:25:00",
+    "lastClosed": "2026-02-25 12:00:00",
+    "lastOpened": "2026-02-25 14:20:00"
+  },
+  "commands": [
+    { "command": "resetBatteryReplacedDate" },
+    { "command": "resetToClosed" },
+    { "command": "resetToOpen" }
+  ]
+}</pre>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2>Locks</h2>
+
+    <h3>Generic Z-Wave Lock</h3>
+    <div class="response-example">
+<pre>{
+  "id": "200",
+  "name": "Generic Z-Wave Lock",
+  "label": "Front Door Lock",
+  "type": "Generic Z-Wave Lock",
+  "capabilities": [
+    "Battery", "Configuration", "Lock", "Refresh",
+    "LockCodes", "Sensor", "Actuator"
+  ],
+  "attributes": {
+    "battery": "65",
+    "lock": "locked",
+    "codeLength": "4",
+    "maxCodes": "30",
+    "lastCodeName": "Dad"
+  },
+  "commands": [
+    { "command": "configure" },
+    { "command": "deleteCode", "type": ["NUMBER"] },
+    { "command": "getCodes" },
+    { "command": "lock" },
+    { "command": "refresh" },
+    { "command": "setCode", "type": ["NUMBER", "STRING", "STRING"] },
+    { "command": "unlock" }
+  ]
+}</pre>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2>Sirens &amp; Alarms</h2>
+
+    <h3>Dome Siren</h3>
+    <div class="response-example">
+<pre>{
+  "id": "300",
+  "name": "Dome Siren",
+  "label": "Basement Siren",
+  "type": "Dome Siren",
+  "capabilities": [
+    "Switch", "Battery", "Alarm", "Configuration", "Tone",
+    "Refresh", "Actuator", "SpeechSynthesis", "Chime"
+  ],
+  "attributes": {
+    "alarm": "off",
+    "battery": "100",
+    "soundEffects": "{\"1\":\"Alarm\",\"2\":\"Ding\",\"3\":\"DingDong\"}",
+    "status": "stopped"
+  },
+  "commands": [
+    { "command": "both" },
+    { "command": "off" },
+    { "command": "on" },
+    { "command": "playSound", "type": ["NUMBER"] },
+    { "command": "siren" },
+    { "command": "strobe" },
+    { "command": "beep" },
+    { "command": "speak", "type": ["STRING"] }
+  ]
+}</pre>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2>Presence Sensors</h2>
+
+    <h3>Mobile App Device</h3>
+    <div class="response-example">
+<pre>{
+  "id": "400",
+  "name": "Mobile App Device",
+  "label": "Dad's Phone",
+  "type": "Mobile App Device",
+  "capabilities": ["PresenceSensor", "Sensor", "Notification"],
+  "attributes": {
+    "presence": "present",
+    "notificationText": null
+  },
+  "commands": [
+    { "command": "arrived" },
+    { "command": "departed" },
+    { "command": "deviceNotification", "type": ["STRING"] }
+  ]
+}</pre>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2>Power Monitoring</h2>
+
+    <h3>Zooz Double Plug Outlet Advanced</h3>
+    <div class="response-example">
+<pre>{
+  "id": "500",
+  "name": "Zooz Double Plug ZEN25",
+  "label": "Server Outlet",
+  "type": "Zooz Double Plug Outlet Advanced",
+  "capabilities": [
+    "Switch", "Refresh", "EnergyMeter", "PowerMeter",
+    "Sensor", "Actuator", "VoltageMeasurement", "Outlet"
+  ],
+  "attributes": {
+    "switch": "on",
+    "power": "125.4",
+    "energy": "45.67",
+    "current": "1.05",
+    "voltage": "121.3"
+  },
+  "commands": [
+    { "command": "off" },
+    { "command": "on" },
+    { "command": "refresh" },
+    { "command": "reset" }
+  ]
+}</pre>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2>Irrigation / Valves</h2>
+
+    <h3>Rachio Controller</h3>
+    <div class="response-example">
+<pre>{
+  "id": "600",
+  "name": "Rachio Controller",
+  "label": "Sprinkler Controller",
+  "type": "Rachio Controller",
+  "capabilities": ["Switch", "Polling", "Refresh", "Valve", "Sensor", "Actuator"],
+  "attributes": {
+    "activeZoneCnt": "8",
+    "controllerOn": "true",
+    "curZoneName": "idle",
+    "rainDelay": "0",
+    "switch": "off",
+    "valve": "closed"
+  },
+  "commands": [
+    { "command": "close" },
+    { "command": "off" },
+    { "command": "on" },
+    { "command": "open" },
+    { "command": "runAllZones", "type": ["NUMBER"] },
+    { "command": "setRainDelay", "type": ["NUMBER"] },
+    { "command": "standbyOff" },
+    { "command": "standbyOn" }
+  ]
+}</pre>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2>Weather</h2>
+
+    <h3>OpenWeatherMap</h3>
+    <div class="response-example">
+<pre>{
+  "id": "700",
+  "name": "OpenWeatherMap",
+  "label": "Local Weather",
+  "type": "OpenWeatherMap",
+  "capabilities": [
+    "TemperatureMeasurement", "RelativeHumidityMeasurement",
+    "Refresh", "Sensor"
+  ],
+  "attributes": {
+    "temperature": "42.5",
+    "humidity": "65",
+    "pressure": "30.12",
+    "weather": "Partly Cloudy",
+    "windSpeed": "8.5"
+  },
+  "commands": [
+    { "command": "refresh" }
+  ]
+}</pre>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2>Security Keypads</h2>
+
+    <h3>Centralite Keypad</h3>
+    <div class="response-example">
+<pre>{
+  "id": "800",
+  "name": "Centralite Keypad",
+  "label": "Front Entry Keypad",
+  "type": "Centralite Keypad",
+  "capabilities": [
+    "TemperatureMeasurement", "Battery", "ContactSensor",
+    "MotionSensor", "Alarm", "Configuration", "Tone",
+    "Refresh", "LockCodes", "Sensor", "TamperAlert",
+    "PushableButton", "SecurityKeypad"
+  ],
+  "attributes": {
+    "armMode": "disarmed",
+    "battery": "88",
+    "lockCodes": "{}",
+    "motion": "inactive",
+    "pinStatus": null,
+    "tamper": "clear"
+  },
+  "commands": [
+    { "command": "armAway" },
+    { "command": "armHome" },
+    { "command": "armNight" },
+    { "command": "beep" },
+    { "command": "deleteCode", "type": ["NUMBER"] },
+    { "command": "disarm" },
+    { "command": "getCodes" },
+    { "command": "setCode", "type": ["NUMBER", "STRING", "STRING"] },
+    { "command": "siren" }
+  ]
+}</pre>
+    </div>
+
+    <footer>
+        <p>
+            Source:
+            <a href="https://community.hubitat.com/t/maker-api-example-responses-for-lots-of-various-device-types/42083">
+                Hubitat Community - Maker API Example Responses
+            </a>
+        </p>
+        <p><em>Note: Custom drivers may include additional attributes beyond standard capabilities.</em></p>
+    </footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hubitat Device Capabilities Reference</title>
+    <link rel="stylesheet" href="hubitat_docs.css">
+</head>
+<body>
+<div class="container">
+    <nav class="breadcrumb"><a href="index.html">Hubitat API Docs</a> &raquo; Device Capabilities</nav>
+
+    <h1>Hubitat Device Capabilities Reference</h1>
+    <p class="last-updated">
+        Compiled February 2026 from official Hubitat Driver Capability List.
+        <br>Source: <a href="https://docs2.hubitat.com/en/developer/driver/capability-list">docs2.hubitat.com/en/developer/driver/capability-list</a>
+    </p>
+    <p>
+        A <strong>capability</strong> defines a contract: a set of <strong>commands</strong> (methods)
+        and <strong>attributes</strong> (state values) that a driver implementing that capability must provide.
+        The Maker API exposes these through the <code>/devices/all</code> and <code>/devices/{id}</code> endpoints.
+    </p>
+
+    <!-- ================================================================== -->
+    <h2 id="sensor-caps">Sensor Capabilities</h2>
+
+    <div class="capability">
+        <h3 id="AccelerationSensor">AccelerationSensor</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>acceleration</code></td><td>ENUM</td><td><code>active</code>, <code>inactive</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="Battery">Battery</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Unit</th></tr></thead>
+            <tbody>
+                <tr><td><code>battery</code></td><td>NUMBER</td><td>% (0&ndash;100)</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="CarbonDioxideMeasurement">CarbonDioxideMeasurement</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Unit</th></tr></thead>
+            <tbody>
+                <tr><td><code>carbonDioxide</code></td><td>NUMBER</td><td>ppm</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="CarbonMonoxideDetector">CarbonMonoxideDetector</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>carbonMonoxide</code></td><td>ENUM</td><td><code>clear</code>, <code>tested</code>, <code>detected</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="ContactSensor">ContactSensor</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>contact</code></td><td>ENUM</td><td><code>open</code>, <code>closed</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="EnergyMeter">EnergyMeter</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Unit</th></tr></thead>
+            <tbody>
+                <tr><td><code>energy</code></td><td>NUMBER</td><td>kWh</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="IlluminanceMeasurement">IlluminanceMeasurement</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Unit</th></tr></thead>
+            <tbody>
+                <tr><td><code>illuminance</code></td><td>NUMBER</td><td>lux</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="MotionSensor">MotionSensor</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>motion</code></td><td>ENUM</td><td><code>active</code>, <code>inactive</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="PowerMeter">PowerMeter</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Unit</th></tr></thead>
+            <tbody>
+                <tr><td><code>power</code></td><td>NUMBER</td><td>W</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="PresenceSensor">PresenceSensor</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>presence</code></td><td>ENUM</td><td><code>present</code>, <code>not present</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="RelativeHumidityMeasurement">RelativeHumidityMeasurement</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Unit</th></tr></thead>
+            <tbody>
+                <tr><td><code>humidity</code></td><td>NUMBER</td><td>%</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="SmokeDetector">SmokeDetector</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>smoke</code></td><td>ENUM</td><td><code>clear</code>, <code>tested</code>, <code>detected</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="TamperAlert">TamperAlert</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>tamper</code></td><td>ENUM</td><td><code>clear</code>, <code>detected</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="TemperatureMeasurement">TemperatureMeasurement</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Unit</th></tr></thead>
+            <tbody>
+                <tr><td><code>temperature</code></td><td>NUMBER</td><td>&deg;F or &deg;C (per hub setting)</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="UltravioletIndex">UltravioletIndex</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Unit</th></tr></thead>
+            <tbody>
+                <tr><td><code>ultravioletIndex</code></td><td>NUMBER</td><td>&mdash;</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="VoltageMeasurement">VoltageMeasurement</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Unit</th></tr></thead>
+            <tbody>
+                <tr><td><code>voltage</code></td><td>NUMBER</td><td>V</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="WaterSensor">WaterSensor</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>water</code></td><td>ENUM</td><td><code>dry</code>, <code>wet</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2 id="actuator-caps">Actuator Capabilities</h2>
+
+    <div class="capability">
+        <h3 id="Switch">Switch</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>switch</code></td><td>ENUM</td><td><code>on</code>, <code>off</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>on()</code>, <code>off()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="SwitchLevel">SwitchLevel</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Unit</th></tr></thead>
+            <tbody>
+                <tr><td><code>level</code></td><td>NUMBER</td><td>% (0&ndash;100)</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>setLevel(level, duration?)</code></p>
+        <p class="cap-note"><code>level</code>: 0&ndash;100, <code>duration</code>: transition time in seconds (optional)</p>
+    </div>
+
+    <div class="capability">
+        <h3 id="ChangeLevel">ChangeLevel</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td colspan="3"><em>No additional attributes</em></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>startLevelChange(direction)</code>, <code>stopLevelChange()</code></p>
+        <p class="cap-note"><code>direction</code>: "up" or "down"</p>
+    </div>
+
+    <div class="capability">
+        <h3 id="Bulb">Bulb</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>switch</code></td><td>ENUM</td><td><code>on</code>, <code>off</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>on()</code>, <code>off()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="Light">Light</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>switch</code></td><td>ENUM</td><td><code>on</code>, <code>off</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>on()</code>, <code>off()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="Outlet">Outlet</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>switch</code></td><td>ENUM</td><td><code>on</code>, <code>off</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>on()</code>, <code>off()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="ColorControl">ColorControl</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Details</th></tr></thead>
+            <tbody>
+                <tr><td><code>color</code></td><td>STRING</td><td>Color name or hex</td></tr>
+                <tr><td><code>hue</code></td><td>NUMBER</td><td>0&ndash;100</td></tr>
+                <tr><td><code>saturation</code></td><td>NUMBER</td><td>0&ndash;100</td></tr>
+                <tr><td><code>colorName</code></td><td>STRING</td><td>Named color (e.g., "Red")</td></tr>
+                <tr><td><code>RGB</code></td><td>STRING</td><td>Hex RGB (e.g., "FF0000")</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>setColor(colorMap)</code>, <code>setHue(hue)</code>, <code>setSaturation(sat)</code></p>
+        <p class="cap-note"><code>colorMap</code>: <code>{"hue":N, "saturation":N, "level":N}</code> or <code>{"hex":"RRGGBB"}</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="ColorTemperature">ColorTemperature</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Unit</th></tr></thead>
+            <tbody>
+                <tr><td><code>colorTemperature</code></td><td>NUMBER</td><td>K (Kelvin)</td></tr>
+                <tr><td><code>colorName</code></td><td>STRING</td><td>Named temp (e.g., "Warm White")</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>setColorTemperature(kelvin)</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="ColorMode">ColorMode</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>colorMode</code></td><td>ENUM</td><td><code>CT</code>, <code>RGB</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="Lock">Lock</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>lock</code></td><td>ENUM</td><td><code>locked</code>, <code>unlocked</code>, <code>unknown</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>lock()</code>, <code>unlock()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="LockCodes">LockCodes</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Details</th></tr></thead>
+            <tbody>
+                <tr><td><code>codeLength</code></td><td>NUMBER</td><td>Max code length</td></tr>
+                <tr><td><code>lockCodes</code></td><td>JSON_OBJECT</td><td>Map of codes</td></tr>
+                <tr><td><code>maxCodes</code></td><td>NUMBER</td><td>Maximum code slots</td></tr>
+                <tr><td><code>lastCodeName</code></td><td>STRING</td><td>Name of last code used</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>setCode(slot, code, name)</code>, <code>deleteCode(slot)</code>, <code>getCodes()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="DoorControl">DoorControl</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>door</code></td><td>ENUM</td><td><code>open</code>, <code>closed</code>, <code>opening</code>, <code>closing</code>, <code>unknown</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>open()</code>, <code>close()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="GarageDoorControl">GarageDoorControl</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>door</code></td><td>ENUM</td><td><code>open</code>, <code>closed</code>, <code>opening</code>, <code>closing</code>, <code>unknown</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>open()</code>, <code>close()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="Valve">Valve</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>valve</code></td><td>ENUM</td><td><code>open</code>, <code>closed</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>open()</code>, <code>close()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="WindowShade">WindowShade</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>windowShade</code></td><td>ENUM</td><td><code>open</code>, <code>closed</code>, <code>opening</code>, <code>closing</code>, <code>partially open</code>, <code>unknown</code></td></tr>
+                <tr><td><code>position</code></td><td>NUMBER</td><td>0&ndash;100 (%)</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>open()</code>, <code>close()</code>, <code>setPosition(pos)</code>, <code>startPositionChange(direction)</code>, <code>stopPositionChange()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="FanControl">FanControl</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>speed</code></td><td>ENUM</td><td><code>low</code>, <code>medium-low</code>, <code>medium</code>, <code>medium-high</code>, <code>high</code>, <code>on</code>, <code>off</code>, <code>auto</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>setSpeed(speed)</code>, <code>cycleSpeed()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="Thermostat">Thermostat</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Details</th></tr></thead>
+            <tbody>
+                <tr><td><code>temperature</code></td><td>NUMBER</td><td>Current temp</td></tr>
+                <tr><td><code>heatingSetpoint</code></td><td>NUMBER</td><td>Heat target</td></tr>
+                <tr><td><code>coolingSetpoint</code></td><td>NUMBER</td><td>Cool target</td></tr>
+                <tr><td><code>thermostatSetpoint</code></td><td>NUMBER</td><td>Current setpoint</td></tr>
+                <tr><td><code>thermostatMode</code></td><td>ENUM</td><td><code>auto</code>, <code>off</code>, <code>heat</code>, <code>emergency heat</code>, <code>cool</code></td></tr>
+                <tr><td><code>thermostatFanMode</code></td><td>ENUM</td><td><code>on</code>, <code>circulate</code>, <code>auto</code></td></tr>
+                <tr><td><code>thermostatOperatingState</code></td><td>ENUM</td><td><code>heating</code>, <code>pending cool</code>, <code>pending heat</code>, <code>vent economizer</code>, <code>idle</code>, <code>cooling</code>, <code>fan only</code></td></tr>
+                <tr><td><code>supportedThermostatModes</code></td><td>JSON_OBJECT</td><td>List of supported modes</td></tr>
+                <tr><td><code>supportedThermostatFanModes</code></td><td>JSON_OBJECT</td><td>List of fan modes</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>setHeatingSetpoint(temp)</code>, <code>setCoolingSetpoint(temp)</code>, <code>setThermostatMode(mode)</code>, <code>setThermostatFanMode(fanmode)</code>, <code>auto()</code>, <code>cool()</code>, <code>emergencyHeat()</code>, <code>fanAuto()</code>, <code>fanCirculate()</code>, <code>fanOn()</code>, <code>heat()</code>, <code>off()</code></p>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2 id="alarm-caps">Alarm &amp; Security Capabilities</h2>
+
+    <div class="capability">
+        <h3 id="Alarm">Alarm</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>alarm</code></td><td>ENUM</td><td><code>off</code>, <code>siren</code>, <code>strobe</code>, <code>both</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>off()</code>, <code>siren()</code>, <code>strobe()</code>, <code>both()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="SecurityKeypad">SecurityKeypad</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Values</th></tr></thead>
+            <tbody>
+                <tr><td><code>securityKeypad</code></td><td>ENUM</td><td><code>disarmed</code>, <code>armed home</code>, <code>armed away</code>, <code>armed night</code>, <code>unknown</code></td></tr>
+                <tr><td><code>codeChanged</code></td><td>STRING</td><td>&mdash;</td></tr>
+                <tr><td><code>codeLength</code></td><td>NUMBER</td><td>&mdash;</td></tr>
+                <tr><td><code>lockCodes</code></td><td>JSON_OBJECT</td><td>&mdash;</td></tr>
+                <tr><td><code>maxCodes</code></td><td>NUMBER</td><td>&mdash;</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>armAway()</code>, <code>armHome()</code>, <code>armNight()</code>, <code>disarm()</code>, <code>setCode(slot, code, name)</code>, <code>deleteCode(slot)</code>, <code>getCodes()</code></p>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2 id="button-caps">Button Capabilities</h2>
+
+    <div class="capability">
+        <h3 id="PushableButton">PushableButton</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Details</th></tr></thead>
+            <tbody>
+                <tr><td><code>numberOfButtons</code></td><td>NUMBER</td><td>Total button count</td></tr>
+                <tr><td><code>pushed</code></td><td>NUMBER</td><td>Button number last pushed</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>push(buttonNumber)</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="HoldableButton">HoldableButton</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Details</th></tr></thead>
+            <tbody>
+                <tr><td><code>numberOfButtons</code></td><td>NUMBER</td><td>Total button count</td></tr>
+                <tr><td><code>held</code></td><td>NUMBER</td><td>Button number last held</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>hold(buttonNumber)</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="DoubleTapableButton">DoubleTapableButton</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Details</th></tr></thead>
+            <tbody>
+                <tr><td><code>doubleTapped</code></td><td>NUMBER</td><td>Button number last double-tapped</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>doubleTap(buttonNumber)</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="ReleasableButton">ReleasableButton</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Details</th></tr></thead>
+            <tbody>
+                <tr><td><code>released</code></td><td>NUMBER</td><td>Button number last released</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>release(buttonNumber)</code></p>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2 id="audio-caps">Audio &amp; Speech Capabilities</h2>
+
+    <div class="capability">
+        <h3 id="AudioVolume">AudioVolume</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Details</th></tr></thead>
+            <tbody>
+                <tr><td><code>volume</code></td><td>NUMBER</td><td>0&ndash;100</td></tr>
+                <tr><td><code>mute</code></td><td>ENUM</td><td><code>muted</code>, <code>unmuted</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>setVolume(vol)</code>, <code>volumeUp()</code>, <code>volumeDown()</code>, <code>mute()</code>, <code>unmute()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="MusicPlayer">MusicPlayer</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Details</th></tr></thead>
+            <tbody>
+                <tr><td><code>level</code></td><td>NUMBER</td><td>Volume level</td></tr>
+                <tr><td><code>mute</code></td><td>ENUM</td><td><code>muted</code>, <code>unmuted</code></td></tr>
+                <tr><td><code>status</code></td><td>STRING</td><td>Playback status</td></tr>
+                <tr><td><code>trackData</code></td><td>JSON_OBJECT</td><td>Current track info</td></tr>
+                <tr><td><code>trackDescription</code></td><td>STRING</td><td>Track description</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>mute()</code>, <code>nextTrack()</code>, <code>pause()</code>, <code>play()</code>, <code>playTrack(uri)</code>, <code>previousTrack()</code>, <code>restoreTrack(uri)</code>, <code>resumeTrack(uri)</code>, <code>setLevel(level)</code>, <code>setTrack(uri)</code>, <code>stop()</code>, <code>unmute()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="Notification">Notification</h3>
+        <p class="cap-commands">Commands: <code>deviceNotification(text)</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="SpeechSynthesis">SpeechSynthesis</h3>
+        <p class="cap-commands">Commands: <code>speak(text, volume?, voice?)</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="Tone">Tone</h3>
+        <p class="cap-commands">Commands: <code>beep()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="Chime">Chime</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Details</th></tr></thead>
+            <tbody>
+                <tr><td><code>soundEffects</code></td><td>JSON_OBJECT</td><td>Map of available sounds</td></tr>
+                <tr><td><code>soundName</code></td><td>STRING</td><td>Currently playing sound</td></tr>
+                <tr><td><code>status</code></td><td>STRING</td><td>playing / stopped</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>playSound(soundNumber)</code>, <code>stop()</code></p>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2 id="misc-caps">Miscellaneous Capabilities</h2>
+
+    <div class="capability">
+        <h3 id="Actuator">Actuator</h3>
+        <p>Marker capability &mdash; indicates device can be acted upon. No attributes or commands.</p>
+    </div>
+
+    <div class="capability">
+        <h3 id="Sensor">Sensor</h3>
+        <p>Marker capability &mdash; indicates device can report sensor data. No attributes or commands.</p>
+    </div>
+
+    <div class="capability">
+        <h3 id="Configuration">Configuration</h3>
+        <p class="cap-commands">Commands: <code>configure()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="Refresh">Refresh</h3>
+        <p class="cap-commands">Commands: <code>refresh()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="Initialize">Initialize</h3>
+        <p class="cap-commands">Commands: <code>initialize()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="Polling">Polling</h3>
+        <p class="cap-commands">Commands: <code>poll()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="HealthCheck">HealthCheck</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Details</th></tr></thead>
+            <tbody>
+                <tr><td><code>checkInterval</code></td><td>NUMBER</td><td>Seconds between health checks</td></tr>
+                <tr><td><code>healthStatus</code></td><td>ENUM</td><td><code>online</code>, <code>offline</code></td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <code>ping()</code></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="SignalStrength">SignalStrength</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Unit</th></tr></thead>
+            <tbody>
+                <tr><td><code>lqi</code></td><td>NUMBER</td><td>Link Quality Index</td></tr>
+                <tr><td><code>rssi</code></td><td>NUMBER</td><td>dBm</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <div class="capability">
+        <h3 id="ThreeAxis">ThreeAxis</h3>
+        <table>
+            <thead><tr><th>Attributes</th><th>Type</th><th>Details</th></tr></thead>
+            <tbody>
+                <tr><td><code>threeAxis</code></td><td>VECTOR3</td><td>[x, y, z] acceleration values</td></tr>
+            </tbody>
+        </table>
+        <p class="cap-commands">Commands: <em>none</em></p>
+    </div>
+
+    <footer>
+        <p>
+            Sources:
+            <a href="https://docs2.hubitat.com/en/developer/driver/capability-list">Official Capability List</a> |
+            <a href="https://docs2.hubitat.com/en/developer/capability-object">Capability Object</a> |
+            <a href="https://community.hubitat.com/t/maker-api-example-responses-for-lots-of-various-device-types/42083">Community Device Examples</a>
+        </p>
+    </footer>
+</div>
+</body>
+</html>

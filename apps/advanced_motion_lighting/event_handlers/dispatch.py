@@ -19,6 +19,7 @@ class EventDispatchMixin:
           - pushed/held/doubleTapped → _handle_button() (always, even when paused)
           - motion                   → _handle_motion()
           - switch                   → _handle_switch()
+          - level / colorTemperature → _handle_level_color() (dim/color override detection)
           - illuminance              → _handle_illuminance()
           - contact                  → _handle_contact()
 
@@ -41,6 +42,8 @@ class EventDispatchMixin:
                 self._handle_motion(event)
             elif event.event_type == 'switch':
                 self._handle_switch(event)
+            elif event.event_type in ('level', 'colorTemperature'):
+                self._handle_level_color(event)
             elif event.event_type == 'illuminance':
                 self._handle_illuminance(event)
             elif event.event_type == 'contact':

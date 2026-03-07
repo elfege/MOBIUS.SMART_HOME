@@ -27,6 +27,7 @@ class AMLMemoizationMixin:
         """
         self._memoization.setdefault('switch_state', {})
         self._memoization.setdefault('dim_level', {})
+        self._memoization.setdefault('color_state', {})
 
         switch_state = self._memoization['switch_state']
 

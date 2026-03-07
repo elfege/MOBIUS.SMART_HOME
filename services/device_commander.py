@@ -328,6 +328,52 @@ class DeviceCommander:
     # Core Execution (runs in thread)
     # =========================================================================
 
+    def _resolve_native_hub(
+        self,
+        device_id: str,
+        device_name: str,
+    ) -> tuple:
+        """
+        Resolve the native hub and device ID for a device.
+
+        Looks up the device_hub_mapping to find which hub physically owns
+        the device, and returns the appropriate client + native device ID.
+        Falls back to the default (MAIN) client if no mapping is found.
+
+        Args:
+            device_id: Device ID as known on the MAIN hub
+            device_name: Human-readable label for log context
+
+        Returns:
+            Tuple of (HubitatClient, device_id_to_use, hub_name)
+        """
+        try:
+            from services.hub_classifier import get_native_hub_by_device_id
+            native_info = get_native_hub_by_device_id(device_id, hub_name="MAIN")
+
+            if native_info and native_info["hub_name"] != "MAIN":
+                from services.hubitat_client import get_hub_client
+                native_client = get_hub_client(native_info["hub_name"])
+
+                if native_client:
+                    logger.info(
+                        f"[Route] {_C}{device_name}{_R} → "
+                        f"native hub {native_info['hub_name']} "
+                        f"({native_info['hub_ip']}) "
+                        f"device_id={native_info['native_device_id']} "
+                        f"(was {device_id} on MAIN)"
+                    )
+                    return (
+                        native_client,
+                        native_info["native_device_id"],
+                        native_info["hub_name"],
+                    )
+        except Exception as e:
+            logger.debug(f"Native hub lookup failed for {device_id}: {e}")
+
+        # Fallback: use MAIN hub client with original device ID
+        return (self._client, device_id, "MAIN")
+
     def _execute_command_sync(
         self,
         device_id: str,
@@ -337,10 +383,16 @@ class DeviceCommander:
         device_name: str,
     ) -> CommandResult:
         """
-        Synchronous command execution with nested retries.
+        Synchronous command execution with nested retries and native-hub routing.
 
         Runs in a ThreadPoolExecutor thread. This is the heart of the
         command execution pipeline:
+
+        NATIVE HUB ROUTING:
+            Before sending, resolves which hub physically owns the device
+            via device_hub_mapping. Sends command to the native hub's
+            Maker API directly (bypasses Hub Mesh relay for lower latency).
+            Falls back to MAIN hub if no mapping exists.
 
         OUTER LOOP (operation retries):
             Send command to hub (INNER retries in _make_request)
@@ -351,7 +403,7 @@ class DeviceCommander:
             Sleep operation_delay, re-send
 
         Args:
-            device_id: Hubitat device ID
+            device_id: Hubitat device ID (as known on MAIN hub)
             command: Command name
             args: Optional arguments
             verify: Whether to verify state after command
@@ -360,6 +412,11 @@ class DeviceCommander:
         Returns:
             CommandResult with full execution details
         """
+        # Resolve native hub — may remap device_id and client
+        effective_client, effective_device_id, hub_name = (
+            self._resolve_native_hub(device_id, device_name)
+        )
+
         result = CommandResult(
             device_id=device_id,
             device_name=device_name or device_id,
@@ -374,10 +431,11 @@ class DeviceCommander:
         # Set device status to UPDATING
         self._set_device_status(device_id, CommandStatus.UPDATING)
 
+        hub_tag = f" @{hub_name}" if hub_name != "MAIN" else ""
         log_prefix = (
             f"[Cmd] {_C}{device_name or device_id}{_R} "
-            f"({device_id}/{command}"
-            f"{'/' + str(args) if args else ''})"
+            f"({effective_device_id}/{command}"
+            f"{'/' + str(args) if args else ''}{hub_tag})"
         )
 
         try:
@@ -386,8 +444,11 @@ class DeviceCommander:
 
                 # ----- SEND COMMAND -----
                 # Inner retries (network) handled by hubitat_client._make_request()
+                # Uses effective_client (native hub) and effective_device_id
                 try:
-                    send_ok = self._client.send_command(device_id, command, args)
+                    send_ok = effective_client.send_command(
+                        effective_device_id, command, args
+                    )
                 except Exception as e:
                     logger.error(
                         f"{log_prefix} send_command exception on attempt "
@@ -449,7 +510,10 @@ class DeviceCommander:
 
                     try:
                         # LIVE API call — bypasses cache
-                        device_data = self._client.get_device(device_id)
+                        # Use effective_client + effective_device_id for native hub
+                        device_data = effective_client.get_device(
+                            effective_device_id
+                        )
                         if device_data:
                             actual = extract_attribute(
                                 device_data, expected['attribute']

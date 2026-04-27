@@ -603,8 +603,16 @@ class InstanceManager:
             app_class = self._app_types[app_type_name]
             app_instance = app_class(instance_data, self)
 
-            # Initialize (sets up subscriptions, schedules, etc.)
+            # Initialize in-memory state (timers, schedulers, runtime).
+            # NOTE: this does NOT touch the device_subscriptions DB table.
             app_instance.initialize()
+
+            # Self-heal device_subscriptions from the current DB row. Without
+            # this, an instance whose subs were ever wiped (e.g. via an old
+            # update_instance path that deleted-without-recreating) stays
+            # silent forever because the webhook router has nothing to route.
+            # Rebuilding on every start makes ./start.sh idempotent.
+            self._rebuild_subscriptions(instance_id)
 
             # Track
             self._running_instances[instance_id] = app_instance
@@ -733,6 +741,15 @@ class InstanceManager:
             'keep_on_switches': 'switch'
         }
 
+        # Build deduped subscription set. The same device can appear under
+        # multiple categories that map to the same event_type (e.g. a switch
+        # listed in both `switches` and `keep_off_switches` both produce
+        # 'switch' events), and the device_subscriptions table has a unique
+        # constraint on (instance_id, hubitat_device_id, event_type).
+        # PostgREST 409s the whole bulk POST if duplicates appear *within* the
+        # same payload — `Prefer: resolution=ignore-duplicates` only handles
+        # conflicts against existing rows, not within the request body.
+        sub_keys = set()
         subscriptions = []
 
         for category, device_ids in device_selections.items():
@@ -741,6 +758,10 @@ class InstanceManager:
                 continue
 
             for device_id in device_ids:
+                key = (str(device_id), event_type)
+                if key in sub_keys:
+                    continue
+                sub_keys.add(key)
                 subscriptions.append({
                     'hubitat_device_id': str(device_id),
                     'instance_id': instance_id,
@@ -749,7 +770,7 @@ class InstanceManager:
 
         if subscriptions:
             try:
-                requests.post(
+                response = requests.post(
                     f"{self.postgrest_url}/device_subscriptions",
                     json=subscriptions,
                     headers={
@@ -758,6 +779,11 @@ class InstanceManager:
                     },
                     timeout=10
                 )
+                if response.status_code not in (200, 201, 204):
+                    self.logger.error(
+                        f"Failed to create subscriptions for instance {instance_id}: "
+                        f"HTTP {response.status_code} — {response.text}"
+                    )
             except Exception as e:
                 self.logger.error(f"Failed to create subscriptions: {e}", exc_info=True)
 
@@ -817,3 +843,4 @@ def get_instance_manager() -> InstanceManager:
     if _instance_manager is None:
         _instance_manager = InstanceManager()
     return _instance_manager
+# reload

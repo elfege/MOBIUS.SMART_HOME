@@ -421,7 +421,30 @@ export class InstanceWizardController {
                         ? `${label} · #${id}`
                         : `(unknown #${id})`;
                     const cls = label ? 'device-tag' : 'device-tag device-tag-orphan';
-                    return `<span class="${cls}"><span class="device-tag-name" data-device-id="${id}" data-device-name="${utils.escapeHtml(label || '')}">${utils.escapeHtml(display)}</span><span class="device-tag-remove" onclick="event.stopPropagation(); wizard.removeDevice('${categoryKey}', '${id}')">&times;</span></span>`;
+
+                    // The chip's label part is a link to the device's edit
+                    // page on its OWN hub — multi-hub aware. Hub IP comes
+                    // from the canonical devices row (joined with hub_config
+                    // server-side), hubitat_id is the per-hub Hubitat id.
+                    // Falls back to a plain span when we don't know the hub.
+                    let nameNode;
+                    if (dev && dev.hub_ip && dev.hubitat_id != null) {
+                        const href = `http://${dev.hub_ip}/device/edit/${dev.hubitat_id}`;
+                        nameNode =
+                            `<a class="device-tag-name" `
+                            + `href="${href}" target="_blank" rel="noopener" `
+                            + `data-device-id="${id}" data-device-name="${utils.escapeHtml(label || '')}" `
+                            + `title="Open ${utils.escapeHtml(label || '')} on hub ${dev.hub_ip}" `
+                            + `onclick="event.stopPropagation()">`
+                            + `${utils.escapeHtml(display)}</a>`;
+                    } else {
+                        nameNode =
+                            `<span class="device-tag-name" `
+                            + `data-device-id="${id}" `
+                            + `data-device-name="${utils.escapeHtml(label || '')}">`
+                            + `${utils.escapeHtml(display)}</span>`;
+                    }
+                    return `<span class="${cls}">${nameNode}<span class="device-tag-remove" onclick="event.stopPropagation(); wizard.removeDevice('${categoryKey}', '${id}')">&times;</span></span>`;
                 }).join('');
             }
         }

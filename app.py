@@ -572,11 +572,10 @@ async def get_devices(capability: Optional[str] = Query(None)):
 @app.get("/api/devices/{device_id}", tags=["devices"])
 async def get_device(device_id: str):
     """Get device details."""
-    from services.hubitat_client import get_default_client
+    from services.hub_classifier import fetch_device_live
 
     try:
-        client = get_default_client()
-        device = client.get_device(device_id)
+        device = fetch_device_live(device_id)
         if device:
             return device
         raise HTTPException(status_code=404, detail="Device not found")
@@ -1201,9 +1200,8 @@ async def matter_update_match(body: UpdateMatterDeviceMatchRequest):
     # Get the Maker API device name for display
     maker_name = ''
     try:
-        from services.hubitat_client import get_default_client
-        client = get_default_client()
-        device = client.get_device(body.maker_api_device_id)
+        from services.hub_classifier import fetch_device_live
+        device = fetch_device_live(body.maker_api_device_id)
         if device:
             maker_name = device.get('label') or device.get('name', '')
     except Exception:
@@ -1495,21 +1493,22 @@ async def get_test_devices(instance_id: int):
     to the browser.
     """
     from services.instance_manager import get_instance_manager
-    from services.hubitat_client import get_default_client
+    from services.hub_classifier import fetch_device_live
 
     manager = get_instance_manager()
     instance = manager.get_instance(instance_id)
     if not instance:
         raise HTTPException(status_code=404, detail="Instance not found")
 
-    client = get_default_client()
     device_selections = instance.get("device_selections", {})
 
     result = {}
     for category, device_ids in device_selections.items():
         devices = []
         for did in device_ids:
-            device = client.get_device(str(did))
+            # Selection ids are canonical PKs (Phase 5). fetch_device_live
+            # resolves them to (hub, hubitat_id) and queries the right hub.
+            device = fetch_device_live(did)
             if device:
                 devices.append(device)
             else:

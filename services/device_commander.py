@@ -441,7 +441,7 @@ class DeviceCommander:
         # Set device status to UPDATING
         self._set_device_status(device_id, CommandStatus.UPDATING)
 
-        hub_tag = f" @{hub_name}" if hub_name != "MAIN" else ""
+        hub_tag = f" @{hub_name}" if hub_name and hub_name != "default" else ""
         log_prefix = (
             f"[Cmd] {_C}{device_name or device_id}{_R} "
             f"({effective_device_id}/{command}"

@@ -334,45 +334,54 @@ class DeviceCommander:
         device_name: str,
     ) -> tuple:
         """
-        Resolve the native hub and device ID for a device.
+        Resolve a CANONICAL devices.id to (client, hubitat_id, hub_name).
 
-        Looks up the device_hub_mapping to find which hub physically owns
-        the device, and returns the appropriate client + native device ID.
-        Falls back to the default (MAIN) client if no mapping is found.
+        Post-Phase-5: app code passes canonical PKs. We look up the row in
+        the canonical `devices` table (joined against editable `hub_config`
+        for IP/name) and translate to the per-hub Hubitat id we need to
+        talk to that hub's Maker API. As a safety net for any caller that
+        still passes a Hubitat id, we also try get_hub_for_device(hubitat_id).
 
         Args:
-            device_id: Device ID as known on the MAIN hub
+            device_id: Canonical devices.id PK (preferred) or, transitionally,
+                       a Hubitat per-hub id.
             device_name: Human-readable label for log context
 
         Returns:
-            Tuple of (HubitatClient, device_id_to_use, hub_name)
+            (HubitatClient, hubitat_id_to_send, hub_name)
+            Falls back to (default_client, device_id, 'default') if unresolvable.
         """
-        # Source of truth for hub routing is the `devices` Postgres table.
-        # No hardcoded hub IPs or assumptions about which hub a device is
-        # "supposed to" live on. If the id isn't in `devices`, we fall back
-        # to the default client and let it return whatever it returns
-        # (typically a 404, which is loud and visible).
         try:
-            from services.hub_classifier import get_hub_for_device
+            from services.hub_classifier import (
+                get_device_by_canonical_id, get_hub_for_device,
+            )
             from services.hubitat_client import get_hub_client_by_ip
 
-            row = get_hub_for_device(device_id)
+            # Preferred path: canonical id lookup
+            row = get_device_by_canonical_id(device_id)
+            if not row or not row.get("hub_ip"):
+                # Transitional fallback: maybe caller still hands a hubitat id
+                row = get_hub_for_device(device_id)
+
             if row and row.get("hub_ip"):
                 hub_ip = row["hub_ip"]
                 client = get_hub_client_by_ip(hub_ip)
-                if client and client is not self._client:
-                    logger.info(
-                        f"[Route] {_C}{device_name}{_R} → "
-                        f"hub {row.get('hub_name') or hub_ip} "
-                        f"({hub_ip}) device_id={device_id} "
-                        f"label={row.get('label')!r}"
-                    )
                 if client:
-                    return (client, device_id, row.get("hub_name") or hub_ip)
+                    hubitat_id = str(row.get("hubitat_id") or device_id)
+                    if client is not self._client:
+                        logger.info(
+                            f"[Route] {_C}{device_name}{_R} → "
+                            f"hub {row.get('hub_name') or hub_ip} "
+                            f"({hub_ip}) canon={row.get('id')} "
+                            f"hubitat_id={hubitat_id} "
+                            f"label={row.get('label')!r}"
+                        )
+                    return (client, hubitat_id, row.get("hub_name") or hub_ip)
         except Exception as e:
             logger.debug(f"DB-backed hub lookup failed for {device_id}: {e}")
 
-        # Fallback: default client with original device ID
+        # Fallback: default client with original id (Hubitat will 404 loudly
+        # if it doesn't recognize the id — that's the correct failure mode).
         return (self._client, device_id, "default")
 
     def _execute_command_sync(

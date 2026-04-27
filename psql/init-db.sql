@@ -116,15 +116,7 @@ CREATE TABLE IF NOT EXISTS device_subscriptions (
     -- Canonical device reference. Hubitat per-hub ids are NOT unique across
     -- a multi-hub setup (the same id can identify different physical devices
     -- on different hubs), so the routing key is our own devices.id PK.
-    -- The table is created BEFORE `devices` in legacy installs, so this
-    -- column needs to be added by the bootstrap path; see ALTER below.
-    -- For fresh DB creation, the column is created here directly.
     device_id BIGINT NOT NULL,
-
-    -- Hubitat per-hub id is kept as a denormalized helper for debugging
-    -- and for legacy paths that haven't been migrated yet. Routing does
-    -- NOT use this column.
-    hubitat_device_id VARCHAR(50) NOT NULL,
 
     -- Instance reference
     instance_id BIGINT NOT NULL REFERENCES app_instances(id) ON DELETE CASCADE,
@@ -143,10 +135,6 @@ CREATE TABLE IF NOT EXISTS device_subscriptions (
 -- Primary index for event routing: device_id + event_type → instance_ids
 CREATE INDEX IF NOT EXISTS idx_device_subscriptions_canonical
     ON device_subscriptions(device_id, event_type);
-
--- Legacy index on hubitat id (kept for debugging queries)
-CREATE INDEX IF NOT EXISTS idx_device_subscriptions_lookup
-    ON device_subscriptions(hubitat_device_id, event_type);
 
 -- Secondary index for cleanup when instance deleted (handled by CASCADE)
 CREATE INDEX IF NOT EXISTS idx_device_subscriptions_instance

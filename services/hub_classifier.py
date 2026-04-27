@@ -640,10 +640,13 @@ def get_native_hub_by_device_id(
     if not _cache_loaded:
         _load_routing_cache()
 
+    target = str(device_id)
+
+    # PASS 1: privileged lookup on the named hub (fast path for callers that
+    # really do know which hub the id came from).
     for label, entry in _routing_cache.items():
-        # Check if this is the native device on the queried hub
         if (entry.get("native_hub_name") == hub_name
-                and entry.get("native_device_id") == str(device_id)):
+                and entry.get("native_device_id") == target):
             return {
                 "hub_name": entry.get("native_hub_name"),
                 "hub_ip": entry.get("native_hub_ip"),
@@ -651,12 +654,10 @@ def get_native_hub_by_device_id(
                 "protocol": entry.get("protocol"),
                 "device_label": label,
             }
-
-        # Check mirrors for the device_id on the queried hub
         mirrors = entry.get("mirrors", {})
         if isinstance(mirrors, dict):
             hub_mirror = mirrors.get(hub_name, {})
-            if isinstance(hub_mirror, dict) and hub_mirror.get("id") == str(device_id):
+            if isinstance(hub_mirror, dict) and hub_mirror.get("id") == target:
                 return {
                     "hub_name": entry.get("native_hub_name"),
                     "hub_ip": entry.get("native_hub_ip"),
@@ -665,6 +666,35 @@ def get_native_hub_by_device_id(
                     "device_label": label,
                 }
 
+    # PASS 2: fall back to a hub-agnostic search. After the device-selections
+    # migration to canonical native IDs, the ID a caller hands us is the
+    # NATIVE id on whichever hub physically owns the device — not necessarily
+    # the hub named in `hub_name` (which is a legacy default of 'MAIN').
+    # Match the first entry whose native_device_id equals our id; that IS
+    # the native hub by definition.
+    for label, entry in _routing_cache.items():
+        if entry.get("native_device_id") == target:
+            return {
+                "hub_name": entry.get("native_hub_name"),
+                "hub_ip": entry.get("native_hub_ip"),
+                "native_device_id": entry.get("native_device_id"),
+                "protocol": entry.get("protocol"),
+                "device_label": label,
+            }
+        # Last resort: search all hubs' mirror IDs (handles legacy subs that
+        # were never migrated, where the id is a mirror of some native).
+        mirrors = entry.get("mirrors", {})
+        if isinstance(mirrors, dict):
+            for m in mirrors.values():
+                if isinstance(m, dict) and m.get("id") == target:
+                    return {
+                        "hub_name": entry.get("native_hub_name"),
+                        "hub_ip": entry.get("native_hub_ip"),
+                        "native_device_id": entry.get("native_device_id"),
+                        "protocol": entry.get("protocol"),
+                        "device_label": label,
+                    }
+
     return None
 
 
@@ -672,4 +702,88 @@ def invalidate_cache() -> None:
     """Force reload of the routing cache on next lookup."""
     global _cache_loaded
     _cache_loaded = False
+
+
+# In-process cache of (hubitat_id) → {hub_ip, hub_name, hubitat_id, label, id}
+# resolved against the `devices` table. Cleared on classifier reruns.
+_device_lookup_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+
+
+def get_hub_for_device(hubitat_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Resolve a Hubitat device id to its native hub via the canonical `devices`
+    table. THIS IS THE PREFERRED LOOKUP — it asks Postgres directly, with no
+    hardcoded hub IPs or assumptions about which hub a device 'should' be on.
+
+    Returns:
+        {
+          'id':         <canonical devices.id>,
+          'hub_ip':     <ip of the hub that natively owns this device>,
+          'hub_name':   <hub name from _HUB_ENV_MAP, or None if no env match>,
+          'hubitat_id': <same id passed in, echoed for symmetry with caller>,
+          'label':      <devices.label>,
+        }
+        or None if the id is not in the `devices` table.
+
+    Note: hubitat_id is not globally unique across hubs in raw Hubitat
+    data. If multiple rows match (collision across hubs), this returns the
+    first row and emits a warning. Post-migration, device_selections store
+    only native ids so collisions should be rare.
+    """
+    if not hubitat_id:
+        return None
+    key = str(hubitat_id)
+    if key in _device_lookup_cache:
+        return _device_lookup_cache[key]
+
+    postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+
+    # JOIN against hub_config via the hub_id FK so hub_ip / hub_name come
+    # from the editable hubs table — devices.hub_ip is denormalized cache,
+    # hub_config is the source of truth. PostgREST embedded resource syntax:
+    # /devices?select=...,hub_config(...)
+    try:
+        resp = requests.get(
+            f"{postgrest_url}/devices",
+            params={
+                "select": "id,hubitat_id,label,hub_id,hub_config(hub_name,hub_ip,is_enabled)",
+                "hubitat_id": f"eq.{key}",
+            },
+            timeout=3,
+        )
+        if resp.status_code == 200:
+            rows = resp.json()
+            if not rows:
+                _device_lookup_cache[key] = None
+                return None
+            if len(rows) > 1:
+                logger.warning(
+                    f"get_hub_for_device({key}): {len(rows)} matching rows "
+                    f"in `devices` table — picking first ({rows[0].get('label')!r})"
+                )
+            row = rows[0]
+            hub = row.get("hub_config") or {}
+            result = {
+                "id":         row["id"],
+                "hub_id":     row.get("hub_id"),
+                "hub_ip":     hub.get("hub_ip"),
+                "hub_name":   hub.get("hub_name"),
+                "hub_enabled": hub.get("is_enabled", True),
+                "hubitat_id": row["hubitat_id"],
+                "label":      row.get("label"),
+            }
+            _device_lookup_cache[key] = result
+            return result
+    except Exception as e:
+        logger.debug(f"get_hub_for_device({key}) failed: {e}")
+
+    _device_lookup_cache[key] = None
+    return None
+
+
+def invalidate_device_lookup_cache() -> None:
+    """Drop the in-process devices-table lookup cache. Call after a
+    re-classification or any UPDATE/INSERT into the `devices` table."""
+    _device_lookup_cache.clear()
 # reload-canonical-devices
+# reload-resolve-fix

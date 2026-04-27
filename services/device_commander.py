@@ -347,32 +347,33 @@ class DeviceCommander:
         Returns:
             Tuple of (HubitatClient, device_id_to_use, hub_name)
         """
+        # Source of truth for hub routing is the `devices` Postgres table.
+        # No hardcoded hub IPs or assumptions about which hub a device is
+        # "supposed to" live on. If the id isn't in `devices`, we fall back
+        # to the default client and let it return whatever it returns
+        # (typically a 404, which is loud and visible).
         try:
-            from services.hub_classifier import get_native_hub_by_device_id
-            native_info = get_native_hub_by_device_id(device_id, hub_name="MAIN")
+            from services.hub_classifier import get_hub_for_device
+            from services.hubitat_client import get_hub_client_by_ip
 
-            if native_info and native_info["hub_name"] != "MAIN":
-                from services.hubitat_client import get_hub_client
-                native_client = get_hub_client(native_info["hub_name"])
-
-                if native_client:
+            row = get_hub_for_device(device_id)
+            if row and row.get("hub_ip"):
+                hub_ip = row["hub_ip"]
+                client = get_hub_client_by_ip(hub_ip)
+                if client and client is not self._client:
                     logger.info(
                         f"[Route] {_C}{device_name}{_R} → "
-                        f"native hub {native_info['hub_name']} "
-                        f"({native_info['hub_ip']}) "
-                        f"device_id={native_info['native_device_id']} "
-                        f"(was {device_id} on MAIN)"
+                        f"hub {row.get('hub_name') or hub_ip} "
+                        f"({hub_ip}) device_id={device_id} "
+                        f"label={row.get('label')!r}"
                     )
-                    return (
-                        native_client,
-                        native_info["native_device_id"],
-                        native_info["hub_name"],
-                    )
+                if client:
+                    return (client, device_id, row.get("hub_name") or hub_ip)
         except Exception as e:
-            logger.debug(f"Native hub lookup failed for {device_id}: {e}")
+            logger.debug(f"DB-backed hub lookup failed for {device_id}: {e}")
 
-        # Fallback: use MAIN hub client with original device ID
-        return (self._client, device_id, "MAIN")
+        # Fallback: default client with original device ID
+        return (self._client, device_id, "default")
 
     def _execute_command_sync(
         self,

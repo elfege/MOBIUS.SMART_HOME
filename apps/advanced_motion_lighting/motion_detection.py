@@ -53,7 +53,9 @@ class MotionDetectionMixin:
         # --- Tier 2: live device state from Hubitat (Groovy: currentValue) ---
         try:
             for sensor_id in functional:
-                device = self.hubitat.get_device(sensor_id)
+                # Per-device client picks the hub that natively owns the
+                # sensor (devices may live on any of our 4 hubs).
+                device = self.get_hubitat_for(sensor_id).get_device(sensor_id)
                 if device and 'attributes' in device:
                     for attr in device['attributes']:
                         if (attr.get('name') == 'motion'
@@ -68,7 +70,7 @@ class MotionDetectionMixin:
         # --- Tier 3: event history within timeout window (Groovy: eventsSince) ---
         try:
             for sensor_id in functional:
-                events = self.hubitat.get_device_events(sensor_id, max_events=20)
+                events = self.get_hubitat_for(sensor_id).get_device_events(sensor_id, max_events=20)
                 for event in events:
                     if event.get('name') == 'motion' and event.get('value') == 'active':
                         event_date_str = event.get('date', '')

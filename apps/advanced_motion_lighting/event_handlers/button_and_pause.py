@@ -5,36 +5,13 @@ Button events always reach this handler even when the instance is paused
 (they are the unpause mechanism). Only the configured buttonEventType is
 acted on — other event types (pushed vs held vs doubleTapped) are ignored
 to prevent double-toggle when Hubitat sends multiple event types for one press.
-
-Per-device debounce: Hubitat sometimes fires the same held=1 event twice
-within a few seconds for a single physical press (verified 2026-04-27 in
-the user's instance: 3:42:02 → 3:42:08, 6 seconds apart). Each fires the
-pause/resume toggle, producing erratic on→off→on cascades on the pause
-switches. A short cooldown window per (instance, device) suppresses the
-duplicate without affecting legitimate repeated presses (which are
-typically >5 s apart for a 'hold' gesture).
 """
 
-import time
-
 from apps.advanced_motion_lighting.constants import _C, _R
-
-# Cooldown window in seconds. Anything shorter than this for the SAME
-# (instance, device) is treated as a duplicate driver fire and dropped.
-# Tuned just above the observed 6-second duplicate window. Legitimate
-# repeated holds for the SAME button (e.g., "I changed my mind, pause
-# again immediately") within this window are rare and the user can wait
-# 5 s between presses.
-_BUTTON_DEBOUNCE_SECS = 5.0
 
 
 class ButtonAndPauseMixin:
     """Mixin: button-triggered pause/resume and pause-switch actuation."""
-
-    # Per-instance map: device_id → monotonic timestamp of last accepted press.
-    # Lazily initialised in _handle_button so existing instances pick it up
-    # without an __init__ change.
-    _button_last_accepted: dict
 
     def _handle_button(self, event) -> None:
         """
@@ -53,21 +30,6 @@ class ButtonAndPauseMixin:
                 f" — ignoring (configured for '{expected_type}')"
             )
             return
-
-        # Per-device debounce — see module docstring.
-        if not hasattr(self, '_button_last_accepted'):
-            self._button_last_accepted = {}
-        now = time.monotonic()
-        last = self._button_last_accepted.get(event.device_id, 0.0)
-        elapsed = now - last
-        if elapsed < _BUTTON_DEBOUNCE_SECS:
-            self.logger.info(
-                f"Button {event.event_type}: {_C}{event.device_name}{_R}"
-                f" — duplicate suppressed ({elapsed:.1f}s since last "
-                f"accepted press, cooldown {_BUTTON_DEBOUNCE_SECS}s)"
-            )
-            return
-        self._button_last_accepted[event.device_id] = now
 
         self.logger.info(f"Button {event.event_type}: {_C}{event.device_name}{_R}")
 

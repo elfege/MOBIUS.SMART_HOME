@@ -167,8 +167,10 @@ END$devsubsfk$;
 -- Refreshed on events and periodically via TTL
 
 CREATE TABLE IF NOT EXISTS device_cache (
-    -- Device identification (Hubitat device ID)
-    hubitat_device_id VARCHAR(50) PRIMARY KEY,
+    -- Canonical devices.id PK (post-Phase-5). Hubitat per-hub ids are NOT
+    -- unique across hubs, so the cache primary key must be our own PK.
+    -- See `devices` table for the canonical hub_ip + hubitat_id pair.
+    device_id BIGINT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
 
     -- Device metadata
     device_name VARCHAR(200),

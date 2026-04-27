@@ -347,11 +347,13 @@ class WebhookRouter:
         # raw_payload also contains it under 'deviceId'.
         event.hubitat_id = device_id
 
-        # Update device cache with new attribute value (cache still keyed by
-        # hubitat_device_id — only canonical routing changed for now).
-        if self.device_cache:
+        # Update device cache with new attribute value. Cache is now keyed
+        # by canonical devices.id PK — pass canonical_id directly. If the
+        # event has no canonical row (unclassified device), skip the cache
+        # write.
+        if self.device_cache and canonical_id is not None:
             self.device_cache.update_device_attribute(
-                device_id, event_name, event_value
+                canonical_id, event_name, event_value
             )
 
         # Find subscribed instances by canonical id

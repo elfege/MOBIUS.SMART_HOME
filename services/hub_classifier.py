@@ -616,25 +616,28 @@ def get_native_hub(device_label: str) -> Optional[Dict[str, str]]:
 
 def get_native_hub_by_device_id(
     device_id: str,
-    hub_name: str = "MAIN"
+    hub_name: Optional[str] = None
 ) -> Optional[Dict[str, str]]:
     """
-    Look up the native hub for a device using its device ID on a specific hub.
+    DEPRECATED — use get_device_by_canonical_id() or get_hub_for_device()
+    instead. Kept for backwards compatibility with the old in-memory
+    routing-cache path.
 
-    Searches the mirrors JSONB for the device_id on the given hub,
-    then returns the native hub info.
+    Look up the native hub for a device given a Hubitat per-hub id.
 
-    This is the primary lookup path: the app has the MAIN hub device ID
-    (from device_subscriptions), and we need to find which hub natively
-    owns that device and what its native device ID is.
+    If `hub_name` is provided, the function does a fast first-pass match
+    against that hub. Otherwise (or if the fast pass misses) it falls back
+    to a hub-agnostic search across the routing cache. This avoids the
+    legacy implicit assumption that ids without context belong to MAIN.
 
     Args:
-        device_id: Device ID as known on the specified hub
-        hub_name: Which hub this device_id belongs to (default: 'MAIN')
+        device_id: Hubitat per-hub device ID
+        hub_name: Optional hint about which hub this id came from. None
+                  means "search all hubs".
 
     Returns:
-        Dict with 'hub_name', 'hub_ip', 'native_device_id', 'protocol'
-        or None if not found
+        Dict with 'hub_name', 'hub_ip', 'native_device_id', 'protocol',
+        'device_label' — or None if not found.
     """
     global _cache_loaded
     if not _cache_loaded:
@@ -788,6 +791,44 @@ def invalidate_device_lookup_cache() -> None:
     _canonical_id_cache.clear()
 
 
+def fetch_device_live(device_id: Any) -> Optional[Dict[str, Any]]:
+    """
+    Fetch a device's live state from the hub that natively owns it.
+
+    Accepts either a canonical devices.id PK (preferred) or a Hubitat
+    per-hub id (legacy). Resolves to (hub_ip, hubitat_id) via the
+    canonical `devices` table, picks the right HubitatClient, and
+    returns the Maker API device dict (or None if unresolvable).
+
+    This is the unified replacement for the legacy pattern of
+    `get_default_client().get_device(device_id)` everywhere — it
+    eliminates the implicit assumption that device_id lives on MAIN.
+    """
+    if device_id is None:
+        return None
+    from services.hubitat_client import get_hub_client_by_ip, get_default_client
+
+    row = get_device_by_canonical_id(device_id) or get_hub_for_device(device_id)
+    if row and row.get("hub_ip"):
+        client = get_hub_client_by_ip(row["hub_ip"])
+        if client is not None:
+            try:
+                return client.get_device(str(row.get("hubitat_id") or device_id))
+            except Exception as e:
+                logger.debug(
+                    f"fetch_device_live({device_id}) failed on hub "
+                    f"{row.get('hub_ip')}: {e}"
+                )
+                return None
+
+    # Last-resort fallback: default client with the raw id. Surfaces a
+    # 404 if the id doesn't exist there (loud failure, easy to debug).
+    try:
+        return get_default_client().get_device(str(device_id))
+    except Exception:
+        return None
+
+
 # Cache canonical_id → row {hub_ip, hub_name, hubitat_id, label}.
 # Populated alongside the hubitat-id cache so canonical-id lookups
 # don't always need a separate roundtrip.
@@ -856,3 +897,4 @@ def get_device_by_canonical_id(canonical_id: Any) -> Optional[Dict[str, Any]]:
     return None
 # reload-canonical-devices
 # reload-resolve-fix
+# reload-main-sweep

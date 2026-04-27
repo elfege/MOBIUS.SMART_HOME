@@ -1120,7 +1120,13 @@ export class E2ETestModal {
      *                        'warning', 'device', 'command', 'ws'
      */
     _appendLog(message, type) {
-        const time = new Date().toLocaleTimeString();
+        // HH:MM:SS.mmm — milliseconds matter for ordering closely-spaced
+        // events (e.g. mesh-mirror duplicates that arrive within the same
+        // second).
+        const _now = new Date();
+        const time =
+            _now.toLocaleTimeString([], { hour12: false })
+            + '.' + String(_now.getMilliseconds()).padStart(3, '0');
         const cssClass = `e2e-log-${type}`;
         const lineHtml =
             `<div class="e2e-log-line ${cssClass}">`

@@ -1502,6 +1502,12 @@ async def get_test_devices(instance_id: int):
 
     device_selections = instance.get("device_selections", {})
 
+    # Pre-resolve every selected canonical id to its (hub_ip, hubitat_id)
+    # via the canonical devices row joined with hub_config — used to enrich
+    # the response so the frontend can render hub-specific links and open
+    # one EventSocket per distinct hub without an extra roundtrip.
+    from services.hub_classifier import get_device_by_canonical_id
+
     result = {}
     for category, device_ids in device_selections.items():
         devices = []
@@ -1509,13 +1515,27 @@ async def get_test_devices(instance_id: int):
             # Selection ids are canonical PKs (Phase 5). fetch_device_live
             # resolves them to (hub, hubitat_id) and queries the right hub.
             device = fetch_device_live(did)
+            row = get_device_by_canonical_id(did)
+            extras = {}
+            if row:
+                extras = {
+                    "_canonical_id": row["id"],
+                    "_hub_ip":       row.get("hub_ip"),
+                    "_hub_name":     row.get("hub_name"),
+                    "_hubitat_id":   row.get("hubitat_id"),
+                }
             if device:
+                # Carry canonical/hub metadata alongside the Maker API
+                # device dict. Underscore-prefixed so they don't collide
+                # with any future Hubitat field names.
+                device.update(extras)
                 devices.append(device)
             else:
                 devices.append({
                     "id": did,
-                    "label": f"Device {did}",
-                    "error": "not found in Maker API"
+                    "label": (row.get("label") if row else f"Device {did}"),
+                    "error": "not found in Maker API",
+                    **extras,
                 })
         result[category] = devices
 

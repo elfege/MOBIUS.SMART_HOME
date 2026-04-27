@@ -208,6 +208,81 @@ def _parse_source_hub(device_name: str) -> Optional[str]:
     return None
 
 
+def _ingest_into_devices(native_entries: List[Dict[str, Any]], hub_ip: str) -> None:
+    """
+    Upsert native devices from one hub into the canonical `devices` table.
+
+    Calls the upsert_device() PL/pgSQL function for each device. The function
+    decides INSERT (new physical device), UPDATE (refresh existing), or
+    SKIP_MESH (a different hub already owns this name — Hub Mesh mirror).
+
+    Errors are swallowed per-device so one bad row can't poison the rest.
+    """
+    if not native_entries:
+        return
+
+    postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    counts = {"INSERT": 0, "UPDATE": 0, "SKIP_MESH": 0, "ERROR": 0}
+
+    for e in native_entries:
+        # The Maker API returns attributes as a list of {name, currentValue}
+        # dicts; we want a flat {name: value} map so the JSONB column is
+        # sane to query. Tolerate both shapes since classify_hub may have
+        # already passed it through.
+        raw_attrs = e.get("attributes", {})
+        if isinstance(raw_attrs, list):
+            attrs_map = {}
+            for a in raw_attrs:
+                if isinstance(a, dict) and "name" in a:
+                    attrs_map[a["name"]] = a.get("currentValue")
+            attrs = attrs_map
+        elif isinstance(raw_attrs, dict):
+            attrs = raw_attrs
+        else:
+            attrs = {}
+
+        try:
+            r = requests.post(
+                f"{postgrest_url}/rpc/upsert_device",
+                json={
+                    "p_hub_ip":       hub_ip,
+                    "p_hubitat_id":   str(e.get("id", "")),
+                    "p_name":         e.get("name", ""),
+                    "p_label":        e.get("label", ""),
+                    "p_device_type":  e.get("type", ""),
+                    "p_protocol":     e.get("protocol", "unknown"),
+                    "p_capabilities": e.get("capabilities", []),
+                    "p_attributes":   attrs,
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+            if r.status_code in (200, 201):
+                payload = r.json()
+                if isinstance(payload, list) and payload:
+                    payload = payload[0]
+                action = (payload or {}).get("action", "ERROR")
+                counts[action] = counts.get(action, 0) + 1
+            else:
+                counts["ERROR"] += 1
+                logger.warning(
+                    f"upsert_device failed for {e.get('name')!r} "
+                    f"on hub {hub_ip}: HTTP {r.status_code} {r.text[:200]}"
+                )
+        except Exception as ex:
+            counts["ERROR"] += 1
+            logger.warning(
+                f"upsert_device exception for {e.get('name')!r} "
+                f"on hub {hub_ip}: {ex}"
+            )
+
+    logger.info(
+        f"devices table ingest from {hub_ip}: "
+        f"INSERT={counts['INSERT']} UPDATE={counts['UPDATE']} "
+        f"SKIP_MESH={counts['SKIP_MESH']} ERROR={counts['ERROR']}"
+    )
+
+
 def classify_hub(
     hub_name: str,
     hub_ip: str,
@@ -249,12 +324,27 @@ def classify_hub(
             "protocol": protocol,
             "is_linked": is_linked,
             "source_hub": source_hub,
+            # Carry full Maker API fields through so the canonical-devices
+            # ingester can populate capabilities + attributes without a
+            # second fetch. These are only consumed by _ingest_into_devices.
+            "capabilities": d.get("capabilities", []),
+            "attributes":   d.get("attributes", {}),
         }
 
         if is_linked:
             linked.append(entry)
         else:
             native.append(entry)
+
+    # Defense-in-depth: also push native devices into the canonical
+    # `devices` table via the upsert_device() psql function. The function
+    # is mesh-phobic — it returns SKIP_MESH if a different hub tries to
+    # claim a name that another hub already owns. Failures here MUST NOT
+    # break classify_hub; the legacy device_hub_mapping path still works.
+    try:
+        _ingest_into_devices(native, hub_ip)
+    except Exception as e:
+        logger.warning(f"_ingest_into_devices failed for hub {hub_name}: {e}")
 
     logger.info(
         f"{_C}Hub {hub_name}{_R} ({hub_ip}): "
@@ -577,3 +667,4 @@ def invalidate_cache() -> None:
     """Force reload of the routing cache on next lookup."""
     global _cache_loaded
     _cache_loaded = False
+# reload-canonical-devices

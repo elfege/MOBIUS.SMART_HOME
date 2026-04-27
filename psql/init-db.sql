@@ -420,16 +420,18 @@ CREATE INDEX IF NOT EXISTS idx_device_hub_mapping_protocol
 -- Home2). The legacy device_cache used hubitat_device_id as PK, so cross-hub
 -- collisions silently overwrote each other. This table fixes that:
 --   - id: our own stable PK (used by subscriptions and selections)
---   - (hub_ip, hubitat_id): the per-hub identity, UNIQUE so we never insert
+--   - (hub_ip, hubitat_id): per-hub identity, UNIQUE so we never insert
 --     the same hub-id pair twice
---   - name: physical device identity (Hubitat 'name'), UNIQUE so a meshed
---     mirror trying to claim the same physical device under a second hub
---     gets ON CONFLICT (name) DO NOTHING and the original keeps its row
+--   - label: Hubitat user-assigned label, UNIQUE because this IS one-per-
+--     physical-device. (The Hubitat 'name' field is the driver type and
+--     IS NOT unique — many devices share the same driver name.) A second
+--     hub trying to register the same label hits the upsert_device()
+--     SKIP_MESH branch and the first row wins.
 --
 -- Ingestion is double-defended:
 --   1. hub_classifier._is_mesh_linked() filters mirrors at fetch time
 --      (presence of hubMeshDisabled attribute = mirror, skip)
---   2. UNIQUE (name) + ON CONFLICT DO NOTHING enforces it at the DB level
+--   2. UNIQUE (label) + upsert_device() function enforces it at the DB
 
 CREATE TABLE IF NOT EXISTS devices (
     -- Our own auto-incrementing primary key
@@ -441,12 +443,16 @@ CREATE TABLE IF NOT EXISTS devices (
     -- Device's id on that hub (Hubitat's internal id field)
     hubitat_id VARCHAR(50) NOT NULL,
 
-    -- Hubitat 'name' field — canonical physical-device identity.
-    -- UNIQUE so meshed duplicates collide and are rejected on insert.
-    name VARCHAR(255) NOT NULL UNIQUE,
+    -- Hubitat 'name' field — driver type (e.g. 'Generic Zigbee Motion
+    -- Sensor', 'Aeon Multisensor 6'). NOT unique per physical device —
+    -- many devices share the same driver. Stored for diagnostics only.
+    name VARCHAR(255) NOT NULL,
 
-    -- Hubitat 'label' (user-friendly, can change without breaking identity)
-    label VARCHAR(255),
+    -- Hubitat 'label' — user-assigned device identity (e.g. 'Motion
+    -- Sensor Living Bookshelves'). UNIQUE: this IS one-per-physical-
+    -- device, so it's the right key for mesh-duplicate rejection.
+    -- A second hub trying to register the same label gets SKIP_MESH.
+    label VARCHAR(255) NOT NULL UNIQUE,
 
     -- Driver type (e.g. 'Generic Z-Wave Smart Switch')
     device_type VARCHAR(200),
@@ -500,10 +506,11 @@ DECLARE
     v_existing_hub_ip     TEXT;
     v_existing_hubitat_id TEXT;
 BEGIN
+    -- Lookup by label (canonical user-facing identity, unique per device)
     SELECT d.id, d.hub_ip, d.hubitat_id
       INTO v_existing_id, v_existing_hub_ip, v_existing_hubitat_id
       FROM devices d
-     WHERE d.name = p_name
+     WHERE d.label = p_label
      LIMIT 1;
 
     IF v_existing_id IS NULL THEN
@@ -520,7 +527,7 @@ BEGIN
 
     ELSIF v_existing_hub_ip = p_hub_ip AND v_existing_hubitat_id = p_hubitat_id THEN
         UPDATE devices SET
-            label          = p_label,
+            name           = p_name,
             device_type    = p_device_type,
             protocol       = p_protocol,
             capabilities   = p_capabilities,

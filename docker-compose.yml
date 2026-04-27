@@ -24,6 +24,14 @@ services:
       PYTHONUNBUFFERED: "1"
       WEBHOOK_PORT: "5050"
       WEBHOOK_TARGETS: ${WEBHOOK_TARGETS:-http://smarthome-app:${APP_INTERNAL_PORT:-5000}/api/webhook/event,http://tiles-app:80/api/webhook/event}
+    # Bind the dispatcher source from the host so edits persist across
+    # container recreates. Without this, the only copy of the script is
+    # the one COPYed into the image at build time, and changes (such as
+    # the _hub_ip injection that drives the router's mesh-mirror filter)
+    # silently revert every restart cycle. Image rebuild only required
+    # when dependencies change.
+    volumes:
+      - ./services/webhook_dispatcher.py:/app/webhook_dispatcher.py:ro
     restart: unless-stopped
     networks:
       - smarthome-net

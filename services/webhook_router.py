@@ -93,6 +93,51 @@ class WebhookRouter:
         self._instance_queues: Dict[int, asyncio.Queue] = {}
         self._instance_workers: Dict[int, asyncio.Task] = {}
 
+        # Cache (hub_ip, hubitat_id) → devices.id so webhook routing doesn't
+        # query PostgREST on every event. Misses are negative-cached as None.
+        self._device_id_cache: Dict[tuple, Optional[int]] = {}
+
+    def _lookup_canonical_id(self, hub_ip: str, hubitat_id: str) -> Optional[int]:
+        """
+        Translate (hub_ip, hubitat_id) → devices.id.
+
+        Cached in-memory because the mapping is stable per restart and we
+        hit it on every webhook. Cache invalidates only on classifier reruns
+        which are rare.
+        """
+        if not hub_ip or not hubitat_id:
+            return None
+        cache_key = (hub_ip, hubitat_id)
+        if cache_key in self._device_id_cache:
+            return self._device_id_cache[cache_key]
+        try:
+            r = requests.get(
+                f"{self.postgrest_url}/devices",
+                params={
+                    "select": "id",
+                    "hub_ip": f"eq.{hub_ip}",
+                    "hubitat_id": f"eq.{hubitat_id}",
+                },
+                timeout=3,
+            )
+            if r.status_code == 200:
+                rows = r.json()
+                if rows:
+                    canon_id = rows[0]["id"]
+                    self._device_id_cache[cache_key] = canon_id
+                    return canon_id
+        except Exception as e:
+            self.logger.debug(f"_lookup_canonical_id failed: {e}")
+        # Negative-cache misses too, otherwise meshed mirror events with no
+        # canonical row would re-query the DB on every webhook.
+        self._device_id_cache[cache_key] = None
+        return None
+
+    def invalidate_device_cache(self) -> None:
+        """Drop the (hub_ip, hubitat_id) → devices.id cache. Call after a
+        classifier rerun that may have added/removed canonical devices."""
+        self._device_id_cache.clear()
+
     def _get_or_create_queue(self, instance_id: int) -> asyncio.Queue:
         """Lazily create the queue + worker task for an instance on first use."""
         queue = self._instance_queues.get(instance_id)
@@ -152,16 +197,27 @@ class WebhookRouter:
         event_name = webhook_payload.get('name', '')
         event_value = webhook_payload.get('value', '')
         display_name = webhook_payload.get('displayName', '')
+        # Hub IP is injected by webhook_dispatcher.py from request.remote_addr.
+        # Empty for direct-Hubitat or test callers; that's fine, callers that
+        # need hub-disambiguated lookup must send through the dispatcher.
+        hub_ip = str(webhook_payload.get('_hub_ip', ''))
 
         if not device_id or not event_name:
             self.logger.warning(f"Invalid webhook payload: {webhook_payload}")
             return 0
 
+        # Resolve to canonical devices.id when hub_ip is known. Phase 2 only
+        # logs the resolution; the actual routing still uses hubitat_device_id
+        # via device_subscriptions. Phase 3 will switch routing to canonical id.
+        canonical_id = self._lookup_canonical_id(hub_ip, device_id) if hub_ip else None
+
         # Color the value based on active/on vs inactive/off
         val_color = _GREEN if event_value in ('active', 'on', 'open') else _RED
+        canonical_tag = f" {_DIM}canon:{canonical_id}{_R}" if canonical_id else ""
+        hub_tag = f" {_DIM}hub:{hub_ip}{_R}" if hub_ip else ""
         self.logger.info(
             f"EVENT  {_CYAN}{display_name}{_R} "
-            f"[{_DIM}id:{device_id}{_R}]  "
+            f"[{_DIM}id:{device_id}{_R}{canonical_tag}{hub_tag}]  "
             f"{_YELLOW}{event_name}{_R} = {val_color}{event_value}{_R}"
         )
 
@@ -397,3 +453,5 @@ def get_webhook_router() -> WebhookRouter:
     if _webhook_router is None:
         _webhook_router = WebhookRouter()
     return _webhook_router
+# reload-phase2
+# reload-phase2-cache-flush

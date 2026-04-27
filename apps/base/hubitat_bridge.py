@@ -20,11 +20,34 @@ class HubitatMixin:
 
     @property
     def hubitat(self):
-        """Get the Hubitat client (lazy loaded on first access)."""
+        """
+        Get the DEFAULT Hubitat client (lazy). Use this only when you don't
+        have a specific device id — for per-device queries use
+        get_hubitat_for(device_id) so the call hits the hub that natively
+        owns the id (the default client only knows MAIN-hub ids).
+        """
         if self._hubitat is None:
             from services.hubitat_client import get_default_client
             self._hubitat = get_default_client()
         return self._hubitat
+
+    def get_hubitat_for(self, device_id):
+        """
+        Resolve the Hubitat client for a given device_id by looking up
+        which hub natively owns it in the canonical `devices` table
+        (joined against `hub_config`). Falls back to the default client.
+        """
+        try:
+            from services.hub_classifier import get_hub_for_device
+            from services.hubitat_client import get_hub_client_by_ip
+            row = get_hub_for_device(str(device_id))
+            if row and row.get("hub_ip"):
+                client = get_hub_client_by_ip(row["hub_ip"])
+                if client:
+                    return client
+        except Exception:
+            pass
+        return self.hubitat
 
     def send_command(
         self,
@@ -99,3 +122,4 @@ class HubitatMixin:
         from services.device_cache import get_default_cache
         cache = get_default_cache()
         return cache.get_device(device_id)
+# reload-hub-aware-bridge

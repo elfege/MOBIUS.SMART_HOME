@@ -130,10 +130,15 @@ class DeviceCacheRefreshService:
         3. If discrepancy → log, update cache
         """
         from services.device_cache import get_default_cache
-        from services.hubitat_client import get_default_client
+        from services.hubitat_client import get_default_client, get_hub_client_by_ip
+        from services.hub_classifier import get_hub_for_device
         from services.matter_client import get_all_matter_mappings
 
         cache = get_default_cache()
+        # Default client is only used as a fallback for devices we can't
+        # locate in the routing cache. Per-device, the actual fetch goes to
+        # the hub that natively owns that device id (post-migration, ids in
+        # device_cache may live on any hub, not just the default/MAIN).
         hubitat = get_default_client()
 
         # Load all Matter mappings upfront (one DB query)
@@ -168,9 +173,22 @@ class DeviceCacheRefreshService:
                 )
                 mapping = matter_map.get(str(device_id))
 
+                # Resolve the hub via the canonical `devices` table (joined
+                # against `hub_config` for editable hub IP/name). This is
+                # the single source of truth for hub routing — no env-var
+                # or in-memory routing-cache assumptions.
+                row = get_hub_for_device(str(device_id))
+                if not row or not row.get("hub_ip"):
+                    # Stale legacy id (likely a Hub Mesh mirror id that lost
+                    # its place after the device-selections migration). It
+                    # would 404 on every hub. Skip — the canonical table is
+                    # the only valid universe of device ids now.
+                    continue
+                fetch_client = get_hub_client_by_ip(row["hub_ip"]) or hubitat
+
                 # Get live state (Matter first, API fallback)
                 live_state = await self._get_live_state(
-                    device_id, mapping, hubitat
+                    device_id, mapping, fetch_client
                 )
 
                 if not live_state:
@@ -389,3 +407,5 @@ def stop_cache_refresh() -> None:
     global _service
     if _service:
         _service.stop()
+# reload-db-routing
+# reload-skip-stale

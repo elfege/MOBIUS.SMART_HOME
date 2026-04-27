@@ -311,7 +311,12 @@ def classify_hub(
     for d in devices:
         is_linked = _is_mesh_linked(d)
         name = d.get("name", "")
-        label = d.get("label", name)
+        # Hubitat sometimes propagates labels across hubs with trailing
+        # whitespace (mesh artifact). Strip on ingest so the canonical
+        # table stores one normalized label per physical device, and the
+        # webhook router's label lookup matches even when the firing hub
+        # had a slightly different whitespace variant.
+        label = (d.get("label") or name).strip()
         device_type = d.get("type", "")
         protocol = detect_protocol(device_type)
         source_hub = _parse_source_hub(name) if is_linked else None

@@ -11,12 +11,18 @@ dispatches them to all subscribed instances.
 """
 
 import os
+import re
 import asyncio
 import logging
 import traceback
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 import requests
+
+# Hubitat appends " on Home N" to the LABEL of mesh-mirrored devices on
+# non-native hubs. The native row keeps the clean label. To detect
+# mirrors, strip this suffix before looking up the canonical row.
+_MESH_SUFFIX_RE = re.compile(r" on Home \d+$")
 
 from models.event import DeviceEvent
 from services.instance_manager import get_instance_manager
@@ -97,6 +103,10 @@ class WebhookRouter:
         # query PostgREST on every event. Misses are negative-cached as None.
         self._device_id_cache: Dict[tuple, Optional[int]] = {}
 
+        # Cache label → canonical row {id, hub_ip, hubitat_id}. Used to
+        # detect mesh-mirror events (event hub_ip != canonical hub_ip → mirror).
+        self._label_to_canonical: Dict[str, Optional[Dict[str, Any]]] = {}
+
     def _lookup_canonical_id(self, hub_ip: str, hubitat_id: str) -> Optional[int]:
         """
         Translate (hub_ip, hubitat_id) → devices.id.
@@ -133,10 +143,65 @@ class WebhookRouter:
         self._device_id_cache[cache_key] = None
         return None
 
+    def _lookup_canonical_by_label(self, label: str) -> Optional[Dict[str, Any]]:
+        """
+        Find the canonical devices row for a given Hubitat label. Used to
+        detect mesh-mirror events: an incoming event whose _hub_ip differs
+        from the canonical row's hub_ip is firing from a mirror, not the
+        native device, and should be dropped.
+
+        Hubitat sometimes propagates labels across hubs with trailing
+        whitespace differences (e.g. native='Motion Sensor Living' vs
+        mirror='Motion Sensor Living '). Both ingest and lookup TRIM so
+        the strings match.
+
+        Returns dict with {id, hub_ip, hubitat_id} or None if no row exists.
+        Cached by trimmed label.
+        """
+        if not label:
+            return None
+        # Try the trimmed label first (the native version has no suffix);
+        # if that misses, strip a trailing ' on Home N' (mirror artifact)
+        # and retry against the clean label, which is what got stored.
+        key = label.strip()
+        if not key:
+            return None
+        candidates = [key]
+        base = _MESH_SUFFIX_RE.sub("", key).strip()
+        if base and base != key:
+            candidates.append(base)
+
+        for candidate in candidates:
+            if candidate in self._label_to_canonical:
+                cached = self._label_to_canonical[candidate]
+                if cached is not None:
+                    return cached
+                continue
+            try:
+                r = requests.get(
+                    f"{self.postgrest_url}/devices",
+                    params={
+                        "select": "id,hub_ip,hubitat_id",
+                        "label": f"eq.{candidate}",
+                    },
+                    timeout=3,
+                )
+                if r.status_code == 200:
+                    rows = r.json()
+                    if rows:
+                        self._label_to_canonical[candidate] = rows[0]
+                        return rows[0]
+                    self._label_to_canonical[candidate] = None
+            except Exception as e:
+                self.logger.debug(f"_lookup_canonical_by_label failed: {e}")
+                self._label_to_canonical[candidate] = None
+        return None
+
     def invalidate_device_cache(self) -> None:
         """Drop the (hub_ip, hubitat_id) → devices.id cache. Call after a
         classifier rerun that may have added/removed canonical devices."""
         self._device_id_cache.clear()
+        self._label_to_canonical.clear()
 
     def _get_or_create_queue(self, instance_id: int) -> asyncio.Queue:
         """Lazily create the queue + worker task for an instance on first use."""
@@ -206,10 +271,32 @@ class WebhookRouter:
             self.logger.warning(f"Invalid webhook payload: {webhook_payload}")
             return 0
 
-        # Resolve to canonical devices.id when hub_ip is known. Phase 2 only
-        # logs the resolution; the actual routing still uses hubitat_device_id
-        # via device_subscriptions. Phase 3 will switch routing to canonical id.
-        canonical_id = self._lookup_canonical_id(hub_ip, device_id) if hub_ip else None
+        # Mesh-mirror filter: when we know which hub originated the event
+        # AND the canonical devices row for this label lives on a DIFFERENT
+        # hub, this event is firing from a Hub Mesh mirror, not the native
+        # device. Drop it — the native hub will fire its own event and we
+        # don't want to route the same physical change multiple times.
+        #
+        # Skip the filter when hub_ip is unknown (legacy/test path) or
+        # when the device hasn't been classified yet (no canonical row),
+        # so newly-paired devices keep working before the next classifier
+        # cycle.
+        canonical_row = self._lookup_canonical_by_label(display_name) if hub_ip else None
+        if (
+            hub_ip
+            and canonical_row is not None
+            and canonical_row.get("hub_ip") != hub_ip
+        ):
+            self.logger.info(
+                f"  {_DIM}drop mesh mirror: {display_name!r} from {hub_ip} "
+                f"(native is {canonical_row.get('hub_ip')}){_R}"
+            )
+            return 0
+
+        # Resolve to canonical devices.id (still informational; subscription
+        # routing remains keyed on hubitat_device_id pending the schema
+        # migration that moves device_subscriptions onto devices.id).
+        canonical_id = canonical_row["id"] if canonical_row else None
 
         # Color the value based on active/on vs inactive/off
         val_color = _GREEN if event_value in ('active', 'on', 'open') else _RED
@@ -455,3 +542,5 @@ def get_webhook_router() -> WebhookRouter:
     return _webhook_router
 # reload-phase2
 # reload-phase2-cache-flush
+# reload-phase3
+# reload-mesh-suffix

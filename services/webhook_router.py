@@ -11,6 +11,7 @@ dispatches them to all subscribed instances.
 """
 
 import os
+import asyncio
 import logging
 import traceback
 from datetime import datetime
@@ -58,11 +59,11 @@ class WebhookRouter:
     Example usage:
         router = WebhookRouter()
 
-        # In Flask route handler:
-        @app.route('/api/webhook/event', methods=['POST'])
-        def handle_webhook():
-            payload = request.get_json()
-            routed_count = router.route_event(payload)
+        # In FastAPI route handler:
+        @app.post('/api/webhook/event')
+        async def handle_webhook(request: Request):
+            payload = await request.json()
+            routed_count = await router.route_event(payload)
             return {'routed_to': routed_count}
     """
 
@@ -84,7 +85,59 @@ class WebhookRouter:
         self.device_cache = device_cache
         self.logger = logging.getLogger(__name__)
 
-    def route_event(self, webhook_payload: Dict[str, Any]) -> int:
+        # Per-instance event queues + worker tasks. Events for the same
+        # instance are serialized through its queue (no races in master());
+        # different instances' workers run concurrently. Workers offload
+        # the synchronous on_event() to a thread so the asyncio event loop
+        # is never blocked by Hubitat command verification cycles.
+        self._instance_queues: Dict[int, asyncio.Queue] = {}
+        self._instance_workers: Dict[int, asyncio.Task] = {}
+
+    def _get_or_create_queue(self, instance_id: int) -> asyncio.Queue:
+        """Lazily create the queue + worker task for an instance on first use."""
+        queue = self._instance_queues.get(instance_id)
+        if queue is None:
+            queue = asyncio.Queue()
+            self._instance_queues[instance_id] = queue
+            self._instance_workers[instance_id] = asyncio.create_task(
+                self._instance_worker(instance_id, queue),
+                name=f"instance_worker_{instance_id}"
+            )
+        return queue
+
+    async def _instance_worker(self, instance_id: int, queue: asyncio.Queue) -> None:
+        """
+        Background worker: drains events for one instance and dispatches
+        them to its on_event() in a thread. Serial per instance, so master()
+        cannot race against itself; concurrent across instances.
+        """
+        instance_manager = get_instance_manager()
+        while True:
+            event = await queue.get()
+            try:
+                app = instance_manager.get_running_instance(instance_id)
+                if app is not None:
+                    await asyncio.to_thread(app.on_event, event)
+            except Exception as e:
+                self.logger.error(
+                    f"Worker for instance {instance_id} failed on event {event}: {e}",
+                    exc_info=True
+                )
+            finally:
+                queue.task_done()
+
+    def stop_instance_worker(self, instance_id: int) -> None:
+        """
+        Cancel and discard the worker + queue for an instance. Called by
+        InstanceManager.stop_instance() so removed instances don't keep
+        consuming or holding queued events.
+        """
+        task = self._instance_workers.pop(instance_id, None)
+        if task is not None:
+            task.cancel()
+        self._instance_queues.pop(instance_id, None)
+
+    async def route_event(self, webhook_payload: Dict[str, Any]) -> int:
         """
         Route incoming webhook to relevant instances.
 
@@ -138,21 +191,25 @@ class WebhookRouter:
             event_type=event_name
         )
 
-        # Dispatch to each instance
+        # Enqueue to each instance's worker queue. The webhook handler returns
+        # immediately; workers process events in background threads so a slow
+        # Hubitat command (verify retries up to 30s) cannot stall the event
+        # loop or other instances.
         routed_to = []
         for instance_id in subscribed_ids:
             try:
                 app = instance_manager.get_running_instance(instance_id)
-                if app:
-                    app.on_event(event)
-                    routed_to.append(instance_id)
-                else:
+                if app is None:
                     self.logger.warning(
                         f"Instance {instance_id} subscribed but not running"
                     )
+                    continue
+                queue = self._get_or_create_queue(instance_id)
+                await queue.put(event)
+                routed_to.append(instance_id)
             except Exception as e:
                 self.logger.error(
-                    f"Failed to dispatch event to instance {instance_id}: {e}",
+                    f"Failed to enqueue event for instance {instance_id}: {e}",
                     exc_info=True
                 )
 
@@ -223,12 +280,13 @@ class WebhookRouter:
 
         return len(routed_to)
 
-    def route_mode_change(self, webhook_payload: Dict[str, Any]) -> int:
+    async def route_mode_change(self, webhook_payload: Dict[str, Any]) -> int:
         """
         Route mode change event to all active instances.
 
         Mode changes affect all instances (unlike device events which
-        are subscription-based).
+        are subscription-based). on_mode_change() is offloaded to a thread
+        per instance so a slow handler does not block the event loop.
 
         Args:
             webhook_payload: Mode change webhook payload
@@ -244,20 +302,30 @@ class WebhookRouter:
 
         self.logger.info(f"Mode changed to: {new_mode}")
 
-        # Notify all running instances
+        # Notify all running instances concurrently in threads
         instance_manager = get_instance_manager()
-        notified = 0
+        targets = [
+            (iid, app)
+            for iid, app in instance_manager._running_instances.items()
+            if hasattr(app, 'on_mode_change')
+        ]
 
-        for instance_id, app in instance_manager._running_instances.items():
+        async def _notify(instance_id: int, app: Any) -> bool:
             try:
-                if hasattr(app, 'on_mode_change'):
-                    app.on_mode_change(new_mode)
-                    notified += 1
+                await asyncio.to_thread(app.on_mode_change, new_mode)
+                return True
             except Exception as e:
                 self.logger.error(
                     f"Failed to notify instance {instance_id} of mode change: {e}",
                     exc_info=True
                 )
+                return False
+
+        results = await asyncio.gather(
+            *(_notify(iid, app) for iid, app in targets),
+            return_exceptions=False
+        )
+        notified = sum(1 for ok in results if ok)
 
         # Update location_modes table
         self._update_mode(new_mode)

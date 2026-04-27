@@ -288,6 +288,10 @@ class InstanceManager:
         """
         Update an instance.
 
+        The running instance is killed BEFORE the DB patch. After a successful
+        patch, a fresh instance is started from the new DB state. This avoids
+        stale in-memory state surviving a failed or partial reload.
+
         Args:
             instance_id: Instance ID
             label: New label (optional)
@@ -304,15 +308,6 @@ class InstanceManager:
 
         if device_selections is not None:
             update_data['device_selections'] = device_selections
-            # Update subscriptions
-            self._delete_subscriptions(instance_id)
-            instance = self.get_instance(instance_id)
-            if instance:
-                app_type = self._get_app_type_name(instance['app_type_id'])
-                self._create_subscriptions(
-                    instance_id, device_selections, app_type,
-                    settings=instance.get('settings', {})
-                )
 
         if settings is not None:
             # Merge with existing settings
@@ -325,6 +320,9 @@ class InstanceManager:
         if not update_data:
             return True  # Nothing to update
 
+        # Kill the running instance FIRST — guarantees no stale in-memory state
+        self.stop_instance(instance_id)
+
         try:
             response = requests.patch(
                 f"{self.postgrest_url}/app_instances",
@@ -334,18 +332,29 @@ class InstanceManager:
                 timeout=10
             )
 
-            if response.status_code in (200, 204):
-                # Reload running instance
-                self._reload_instance(instance_id)
-                self.logger.info(f"Updated instance {instance_id}")
-                return True
+            if response.status_code not in (200, 204):
+                self.logger.error(
+                    f"Failed to patch instance {instance_id}: "
+                    f"HTTP {response.status_code} — {response.text}"
+                )
+                # Restart from old DB state so the instance isn't left dead
+                self._start_from_db(instance_id)
+                return False
 
-            self.logger.error(f"Failed to update instance: {response.text}")
-            return False
+            self.logger.info(f"Patched instance {instance_id} in DB")
 
         except Exception as e:
-            self.logger.error(f"Failed to update instance: {e}", exc_info=True)
+            self.logger.error(f"Failed to patch instance {instance_id}: {e}", exc_info=True)
+            # Restart from old DB state so the instance isn't left dead
+            self._start_from_db(instance_id)
             return False
+
+        # Rebuild subscriptions and start fresh instance from new DB state
+        self._rebuild_subscriptions(instance_id)
+        started = self._start_from_db(instance_id)
+        if not started:
+            self.logger.error(f"Instance {instance_id} updated in DB but failed to restart")
+        return True
 
     def delete_instance(self, instance_id: int) -> bool:
         """
@@ -358,7 +367,7 @@ class InstanceManager:
             True if deletion succeeded
         """
         # Stop running instance
-        self._stop_instance(instance_id)
+        self.stop_instance(instance_id)
 
         # Subscriptions deleted by CASCADE
         try:
@@ -599,42 +608,102 @@ class InstanceManager:
 
             # Track
             self._running_instances[instance_id] = app_instance
-            self.logger.debug(f"Started instance {instance_id}")
+            self.logger.info(
+                f"Started instance {instance_id} ({app_instance.label}) "
+                f"— devices: {list(instance_data.get('device_selections', {}).keys())}"
+            )
             return True
 
         except Exception as e:
             self.logger.error(f"Failed to start instance {instance_id}: {e}", exc_info=True)
             return False
 
-    def _stop_instance(self, instance_id: int) -> None:
-        """Stop a runtime instance."""
-        if instance_id in self._running_instances:
-            try:
-                self._running_instances[instance_id].shutdown()
-            except Exception as e:
-                self.logger.warning(f"Error shutting down instance: {e}", exc_info=True)
-            del self._running_instances[instance_id]
-            self.logger.debug(f"Stopped instance {instance_id}")
-
-    def _reload_instance(self, instance_id: int) -> None:
-        """Reload an instance after settings change.
-
-        Also rebuilds device subscriptions to ensure any newly added
-        device categories (e.g. keep_off_switches) get webhook routing.
+    def stop_instance(self, instance_id: int) -> bool:
         """
-        self._stop_instance(instance_id)
+        Kill a running instance — cancel all scheduler jobs, remove from
+        tracking dict. Safe to call even if the instance is not running.
+
+        Returns:
+            True if an instance was stopped, False if nothing was running.
+        """
+        if instance_id not in self._running_instances:
+            self.logger.info(f"stop_instance({instance_id}): not running, nothing to stop")
+            return False
+
+        label = getattr(self._running_instances[instance_id], 'label', '?')
+        self.logger.info(f"Stopping instance {instance_id} ({label})")
+
+        try:
+            self._running_instances[instance_id].shutdown()
+        except Exception as e:
+            self.logger.warning(
+                f"Error in shutdown() for instance {instance_id}: {e}", exc_info=True
+            )
+
+        # Cancel the per-instance event worker so its queue is dropped
+        # together with the instance. Imported lazily to avoid a circular
+        # import at module load time.
+        try:
+            from services.webhook_router import get_webhook_router
+            get_webhook_router().stop_instance_worker(instance_id)
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to stop event worker for instance {instance_id}: {e}",
+                exc_info=True
+            )
+
+        del self._running_instances[instance_id]
+        self.logger.info(f"Stopped instance {instance_id} ({label})")
+        return True
+
+    def _start_from_db(self, instance_id: int) -> bool:
+        """
+        Fetch the current DB row for an instance and start it.
+
+        Returns:
+            True if started successfully, False otherwise.
+        """
         instance = self.get_instance(instance_id)
-        if instance:
-            # Rebuild subscriptions from current device_selections
-            device_selections = instance.get('device_selections', {})
-            app_type = self._get_app_type_name(instance['app_type_id'])
-            if device_selections and app_type:
-                self._delete_subscriptions(instance_id)
-                self._create_subscriptions(
-                    instance_id, device_selections, app_type,
-                    settings=instance.get('settings', {})
-                )
-            self._start_instance(instance_id, instance)
+        if not instance:
+            self.logger.error(f"_start_from_db({instance_id}): instance not found in DB")
+            return False
+
+        started = self._start_instance(instance_id, instance)
+        if started:
+            self.logger.info(
+                f"Started instance {instance_id} ({instance.get('label', '?')})"
+            )
+        else:
+            self.logger.error(
+                f"_start_from_db({instance_id}): _start_instance returned False"
+            )
+        return started
+
+    def _rebuild_subscriptions(self, instance_id: int) -> None:
+        """
+        Delete all subscriptions for an instance and recreate them from the
+        current DB state.
+        """
+        self._delete_subscriptions(instance_id)
+
+        instance = self.get_instance(instance_id)
+        if not instance:
+            self.logger.warning(
+                f"_rebuild_subscriptions({instance_id}): instance not found in DB"
+            )
+            return
+
+        device_selections = instance.get('device_selections', {})
+        app_type = self._get_app_type_name(instance['app_type_id'])
+
+        if device_selections and app_type:
+            self._create_subscriptions(
+                instance_id, device_selections, app_type,
+                settings=instance.get('settings', {})
+            )
+            self.logger.info(
+                f"Rebuilt subscriptions for instance {instance_id}"
+            )
 
     # =========================================================================
     # Subscription Management

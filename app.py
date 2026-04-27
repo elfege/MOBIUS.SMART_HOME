@@ -209,10 +209,47 @@ async def lifespan(app: FastAPI):
 
     threading.Thread(target=_startup_classification, name="startup-hub-classify", daemon=True).start()
 
+    # Start Samsung TV client (WS + HTTP power-poll background tasks).
+    # Config is read from env vars (set in docker-compose or start.sh).
+    # on_power_change pushes state to all registered Hubitat callbacks via
+    # the blueprint's push_state_changes() so Hubitat stays in sync in real-time.
+    from services.samsung_tv_client import get_tv_client
+    from apps.samsung_tv.blueprint import push_state_changes as _tv_push, _persist_token
+
+    async def _on_tv_state_change(state) -> None:
+        """Bridge TV power OR connection state changes → Hubitat LAN push."""
+        nonlocal _tv_client
+        await _tv_push(_tv_client)
+
+    async def _on_tv_token_save(new_token: str) -> None:
+        """Persist a newly-issued TV auth token so it survives container restarts."""
+        os.environ["SAMSUNG_TV_TOKEN"] = new_token
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _persist_token, new_token)
+
+    # Token loaded from env var — populated by start.sh from ./state/samsung_tv_token.txt.
+    _saved_token = os.environ.get("SAMSUNG_TV_TOKEN", "")
+
+    _tv_client = get_tv_client(
+        tv_ip            = os.environ.get("SAMSUNG_TV_IP",   "<LAN_IP>"),
+        mac_address      = os.environ.get("SAMSUNG_TV_MAC",  "D0C24EE93390"),
+        token            = _saved_token,
+        use_ssl          = os.environ.get("SAMSUNG_TV_SSL",  "true").lower() == "true",
+        name             = os.environ.get("SAMSUNG_TV_NAME", "living_room_tv"),
+        on_power_change  = _on_tv_state_change,
+        on_conn_change   = _on_tv_state_change,
+        on_token_save    = _on_tv_token_save,
+    )
+    await _tv_client.start()
+
     yield
 
     stop_cache_refresh()
     stop_matter_discovery()
+
+    # Stop Samsung TV client cleanly
+    await _tv_client.stop()
+
     logger.info("Shutting down...")
 
 
@@ -239,6 +276,9 @@ templates = Jinja2Templates(directory="templates")
 
 from apps.advanced_motion_lighting.blueprint import router as motion_router  # noqa: E402
 app.include_router(motion_router)
+
+from apps.samsung_tv.blueprint import router as samsung_tv_router  # noqa: E402
+app.include_router(samsung_tv_router)
 
 
 # =============================================================================
@@ -371,6 +411,35 @@ async def delete_instance(instance_id: int):
     raise HTTPException(status_code=500, detail="Failed to delete instance")
 
 
+@app.post("/api/instances/{instance_id}/stop", tags=["instances"])
+async def stop_instance(instance_id: int):
+    """Kill a running instance (e.g. when entering edit mode).
+
+    The instance stays in the DB but is no longer processing events.
+    Call POST .../start or PUT to restart it.
+    """
+    from services.instance_manager import get_instance_manager
+    manager = get_instance_manager()
+    was_running = manager.stop_instance(instance_id)
+    return {"message": "Instance stopped", "was_running": was_running}
+
+
+@app.post("/api/instances/{instance_id}/start", tags=["instances"])
+async def start_instance(instance_id: int):
+    """Start an instance from its current DB state.
+
+    Used after cancelling an edit (instance was stopped on edit entry).
+    """
+    from services.instance_manager import get_instance_manager
+    manager = get_instance_manager()
+    # Stop first in case it's somehow still running
+    manager.stop_instance(instance_id)
+    started = manager._start_from_db(instance_id)
+    if started:
+        return {"message": "Instance started"}
+    raise HTTPException(status_code=500, detail="Failed to start instance")
+
+
 @app.post("/api/instances/{instance_id}/pause", tags=["instances"])
 async def pause_instance(instance_id: int, body: PauseInstanceRequest = PauseInstanceRequest()):
     """Pause an instance."""
@@ -459,7 +528,9 @@ async def update_initialize_instance(instance_id: int):
     # Reset memoization on reload (stale memo causes incorrect behavior)
     manager.update_memoization(instance_id, {})
 
-    manager._reload_instance(instance_id)
+    manager.stop_instance(instance_id)
+    manager._rebuild_subscriptions(instance_id)
+    manager._start_from_db(instance_id)
     return {"message": "Instance reloaded with memoization reset"}
 
 
@@ -581,7 +652,7 @@ async def handle_event_webhook(request: Request):
         logger.debug(f"Webhook received: {payload}")
 
         router = get_webhook_router()
-        routed_count = router.route_event(payload)
+        routed_count = await router.route_event(payload)
 
         return {"routed_to": routed_count}
     except Exception as e:
@@ -599,7 +670,7 @@ async def handle_mode_webhook(request: Request):
         logger.info(f"Mode change webhook: {payload}")
 
         router = get_webhook_router()
-        notified = router.route_mode_change(payload)
+        notified = await router.route_mode_change(payload)
 
         return {"notified": notified}
     except Exception as e:

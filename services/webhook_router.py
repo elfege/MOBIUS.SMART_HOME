@@ -271,17 +271,21 @@ class WebhookRouter:
             self.logger.warning(f"Invalid webhook payload: {webhook_payload}")
             return 0
 
-        # Mesh-mirror filter: when we know which hub originated the event
-        # AND the canonical devices row for this label lives on a DIFFERENT
-        # hub, this event is firing from a Hub Mesh mirror, not the native
-        # device. Drop it — the native hub will fire its own event and we
-        # don't want to route the same physical change multiple times.
-        #
-        # Skip the filter when hub_ip is unknown (legacy/test path) or
-        # when the device hasn't been classified yet (no canonical row),
-        # so newly-paired devices keep working before the next classifier
-        # cycle.
-        canonical_row = self._lookup_canonical_by_label(display_name) if hub_ip else None
+        # Resolve to canonical devices.id. Three possible paths, in order:
+        #   1. Label match in `devices` table (real Hubitat events with
+        #      meaningful displayNames).
+        #   2. (mesh-mirror filter — only when both hub_ip + label hit)
+        #   3. deviceId itself IS a canonical PK (e2e test injection
+        #      bypasses the dispatcher and sends synthesized displayNames
+        #      like "E2E Test Motion 241", so the label path always misses;
+        #      after Phase 5, device_selections store canonical PKs, so
+        #      tests author scenarios with deviceId = canonical id).
+        canonical_row = self._lookup_canonical_by_label(display_name)
+
+        # Mesh-mirror filter: only meaningful when we know the source hub
+        # AND the canonical row was found by label. If the canonical row's
+        # native hub differs from the event's source hub, this is a Hub
+        # Mesh mirror — drop it so we don't double-process.
         if (
             hub_ip
             and canonical_row is not None
@@ -293,14 +297,21 @@ class WebhookRouter:
             )
             return 0
 
-        # Resolve to canonical devices.id. After Phase 5, this is THE routing
-        # key — subscriptions and selections both reference devices.id.
         canonical_id = canonical_row["id"] if canonical_row else None
 
-        # If no canonical row exists, the event is for a device that's not
-        # in our `devices` table — either unclassified yet, or a true
-        # mesh-mirror-with-no-native (rare). Either way it can't route to
-        # any instance under the new scheme. Log + drop.
+        # Fallback: if label lookup failed but the payload's deviceId looks
+        # like an integer in range, try it as a canonical PK directly.
+        # This unblocks: (a) e2e test injection that sends synthetic
+        # displayNames, (b) any caller that already passes canonical ids
+        # in the deviceId field.
+        if canonical_id is None and device_id.isdigit():
+            from services.hub_classifier import get_device_by_canonical_id
+            row = get_device_by_canonical_id(int(device_id))
+            if row is not None:
+                canonical_id = row["id"]
+
+        # If still no canonical row, the event is for a device that's not
+        # in our `devices` table. Log + drop — can't route under Phase 5.
         if canonical_id is None:
             self.logger.debug(
                 f"No canonical row for {display_name!r} (hubitat_id={device_id}, "

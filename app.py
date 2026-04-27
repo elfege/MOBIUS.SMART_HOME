@@ -11,7 +11,7 @@ import asyncio
 import logging
 import traceback
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Request, Query, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -1556,6 +1556,27 @@ async def run_test_scenario(instance_id: int, scenario_id: str):
     }
 
 
+@app.post("/api/e2e/test/{instance_id}/stop", tags=["e2e-testing"])
+async def stop_test(instance_id: int):
+    """
+    Cancel the currently-running scenario for this instance, if any.
+
+    Sets the runner's cancel flag; the scenario loop checks it between
+    steps. Returns immediately — does NOT block waiting for the in-flight
+    step to actually unwind.
+    """
+    from services.e2e_test_runner import get_active_runner
+    runner = get_active_runner(instance_id)
+    if runner is None:
+        return {"ok": True, "stopped": False, "reason": "no active run"}
+    try:
+        await runner.cancel()
+        return {"ok": True, "stopped": True}
+    except Exception as e:
+        logger.error(f"stop_test({instance_id}) failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/e2e/test/{instance_id}/run-all", tags=["e2e-testing"])
 async def run_all_test_scenarios(instance_id: int):
     """
@@ -1688,6 +1709,199 @@ async def stream_instance_events(instance_id: int):
 async def matter_page(request: Request):
     """Matter device management page."""
     return templates.TemplateResponse(request, "matter.html")
+
+
+@app.get("/hubs", response_class=HTMLResponse, include_in_schema=False)
+async def hubs_page(request: Request):
+    """Hub configuration page — edit hub_config rows."""
+    return templates.TemplateResponse(request, "hubs.html")
+
+
+# =============================================================================
+# Hub config CRUD
+# =============================================================================
+# All routing in the app reads from hub_config (joined into devices via
+# hub_id FK). Editing hub_config from the UI lets the user change a hub's
+# IP / app number / token env without redeploying. After every write we
+# invalidate the in-process lookup caches so changes take effect within
+# a single event-loop tick.
+
+@app.get("/api/hubs", tags=["hubs"])
+async def list_hubs():
+    """List all configured Hubitat hubs (rows of hub_config)."""
+    import requests as _requests
+    try:
+        r = _requests.get(
+            f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/hub_config",
+            params={"order": "id"},
+            timeout=5,
+        )
+        if r.status_code == 200:
+            return r.json()
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"list_hubs failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _invalidate_hub_caches():
+    """Drop in-process caches that reference hub_config rows."""
+    try:
+        from services.hub_classifier import invalidate_device_lookup_cache
+        invalidate_device_lookup_cache()
+    except Exception:
+        pass
+    try:
+        from services.webhook_router import get_webhook_router
+        get_webhook_router().invalidate_device_cache()
+    except Exception:
+        pass
+
+
+@app.patch("/api/hubs/{hub_id}", tags=["hubs"])
+async def update_hub(hub_id: int, body: Dict[str, Any]):
+    """
+    Update a hub_config row. Accepts any subset of:
+      hub_name, hub_ip, maker_api_app_number, maker_api_token_env,
+      is_primary, is_enabled.
+    Other fields are ignored.
+
+    On success, invalidates the in-process device-lookup caches and
+    re-syncs `devices.hub_ip` from the new `hub_config.hub_ip` for any
+    rows that referenced this hub (denormalized cache stays consistent).
+    """
+    import requests as _requests
+    allowed = {
+        "hub_name", "hub_ip", "maker_api_app_number",
+        "maker_api_token_env", "is_primary", "is_enabled",
+    }
+    patch = {k: v for k, v in body.items() if k in allowed}
+    if not patch:
+        raise HTTPException(status_code=400, detail="No editable fields in body")
+
+    postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+
+    # If the user is setting is_primary=true, clear it on every other row
+    # first — exactly one primary at a time.
+    if patch.get("is_primary") is True:
+        try:
+            _requests.patch(
+                f"{postgrest_url}/hub_config",
+                params={"id": f"neq.{hub_id}"},
+                json={"is_primary": False},
+                headers={"Content-Type": "application/json"},
+                timeout=5,
+            )
+        except Exception as e:
+            logger.warning(f"Could not clear is_primary on others: {e}")
+
+    try:
+        r = _requests.patch(
+            f"{postgrest_url}/hub_config",
+            params={"id": f"eq.{hub_id}"},
+            json=patch,
+            headers={
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            timeout=5,
+        )
+        if r.status_code not in (200, 204):
+            raise HTTPException(status_code=r.status_code, detail=r.text)
+
+        # If hub_ip changed, mirror it into devices.hub_ip (denormalized).
+        if "hub_ip" in patch:
+            try:
+                _requests.patch(
+                    f"{postgrest_url}/devices",
+                    params={"hub_id": f"eq.{hub_id}"},
+                    json={"hub_ip": patch["hub_ip"]},
+                    headers={"Content-Type": "application/json"},
+                    timeout=10,
+                )
+            except Exception as e:
+                logger.warning(f"Could not resync devices.hub_ip: {e}")
+
+        _invalidate_hub_caches()
+        return r.json() if r.status_code == 200 else {"ok": True, "id": hub_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"update_hub({hub_id}) failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/hubs", tags=["hubs"])
+async def create_hub(body: Dict[str, Any]):
+    """Create a new hub_config row."""
+    import requests as _requests
+    required = ("hub_name", "hub_ip", "maker_api_app_number", "maker_api_token_env")
+    missing = [k for k in required if not body.get(k)]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing fields: {missing}")
+
+    payload = {k: body[k] for k in required}
+    payload["is_primary"] = bool(body.get("is_primary", False))
+    payload["is_enabled"] = bool(body.get("is_enabled", True))
+
+    postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    try:
+        r = _requests.post(
+            f"{postgrest_url}/hub_config",
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            timeout=5,
+        )
+        if r.status_code not in (200, 201):
+            raise HTTPException(status_code=r.status_code, detail=r.text)
+        _invalidate_hub_caches()
+        return r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"create_hub failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/hubs/{hub_id}", tags=["hubs"])
+async def delete_hub(hub_id: int):
+    """
+    Delete a hub. Refuses if any device still references this hub via FK.
+    User must move or remove those devices first (or run a fresh classifier
+    cycle that lets them be re-homed).
+    """
+    import requests as _requests
+    postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    try:
+        r = _requests.get(
+            f"{postgrest_url}/devices",
+            params={"hub_id": f"eq.{hub_id}", "select": "id", "limit": "1"},
+            timeout=5,
+        )
+        if r.status_code == 200 and r.json():
+            raise HTTPException(
+                status_code=409,
+                detail="Hub has devices; remove or re-classify them first",
+            )
+        d = _requests.delete(
+            f"{postgrest_url}/hub_config",
+            params={"id": f"eq.{hub_id}"},
+            timeout=5,
+        )
+        if d.status_code not in (200, 204):
+            raise HTTPException(status_code=d.status_code, detail=d.text)
+        _invalidate_hub_caches()
+        return {"ok": True, "id": hub_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"delete_hub({hub_id}) failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/instance/{instance_id}", response_class=HTMLResponse, include_in_schema=False)

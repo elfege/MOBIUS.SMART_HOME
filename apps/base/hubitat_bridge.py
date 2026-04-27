@@ -31,16 +31,17 @@ class HubitatMixin:
             self._hubitat = get_default_client()
         return self._hubitat
 
-    def get_hubitat_for(self, device_id):
+    def get_hubitat_for(self, hubitat_id):
         """
-        Resolve the Hubitat client for a given device_id by looking up
-        which hub natively owns it in the canonical `devices` table
-        (joined against `hub_config`). Falls back to the default client.
+        DEPRECATED post-Phase-5: takes a Hubitat per-hub id and returns
+        the right client. Kept only for paths that still hand around
+        Hubitat ids. New code should use get_device_state_live() /
+        get_device_events_live() with a canonical devices.id.
         """
         try:
             from services.hub_classifier import get_hub_for_device
             from services.hubitat_client import get_hub_client_by_ip
-            row = get_hub_for_device(str(device_id))
+            row = get_hub_for_device(str(hubitat_id))
             if row and row.get("hub_ip"):
                 client = get_hub_client_by_ip(row["hub_ip"])
                 if client:
@@ -48,6 +49,61 @@ class HubitatMixin:
         except Exception:
             pass
         return self.hubitat
+
+    def _resolve_canonical(self, canonical_id):
+        """
+        Translate a canonical devices.id PK into (client, hubitat_id, hub_name).
+        Returns (None, None, None) if the canonical id has no row or no
+        reachable client.
+        """
+        try:
+            from services.hub_classifier import get_device_by_canonical_id
+            from services.hubitat_client import get_hub_client_by_ip
+            row = get_device_by_canonical_id(canonical_id)
+            if not row or not row.get("hub_ip"):
+                return (None, None, None)
+            client = get_hub_client_by_ip(row["hub_ip"])
+            if not client:
+                return (None, None, None)
+            return (client, row["hubitat_id"], row.get("hub_name"))
+        except Exception:
+            return (None, None, None)
+
+    def get_device_state_live(self, canonical_id):
+        """
+        Fetch live device state from the hub that natively owns this
+        canonical device. Returns the Maker API device dict or None.
+
+        Replaces the old `self.hubitat.get_device(hubitat_id)` pattern
+        for app handlers that iterate device_selections (which now store
+        canonical PKs).
+        """
+        client, hubitat_id, _ = self._resolve_canonical(canonical_id)
+        if client is None:
+            return None
+        try:
+            return client.get_device(hubitat_id)
+        except Exception as e:
+            self.logger.debug(
+                f"get_device_state_live({canonical_id}) failed: {e}"
+            )
+            return None
+
+    def get_device_events_live(self, canonical_id, max_events=20):
+        """
+        Fetch device event history for a canonical device id. Returns
+        the Maker API events list or [].
+        """
+        client, hubitat_id, _ = self._resolve_canonical(canonical_id)
+        if client is None:
+            return []
+        try:
+            return client.get_device_events(hubitat_id, max_events=max_events)
+        except Exception as e:
+            self.logger.debug(
+                f"get_device_events_live({canonical_id}) failed: {e}"
+            )
+            return []
 
     def send_command(
         self,
@@ -108,18 +164,33 @@ class HubitatMixin:
 
     def get_device_state(self, device_id: str) -> Optional[Dict[str, Any]]:
         """
-        Get current device state from the local device cache.
+        Get current device state from the local cache.
 
-        The cache is kept fresh by DeviceCacheRefreshService (polls every ~2 min)
-        and updated in real-time by verified DeviceCommander writes.
+        Accepts either a canonical devices.id PK (preferred — what's in
+        device_selections post-Phase-5) or a Hubitat per-hub id (legacy).
+        For canonical ids we resolve to the hubitat_id before hitting the
+        cache, since the cache is still keyed by hubitat_device_id.
 
         Args:
-            device_id: Hubitat device ID
+            device_id: Canonical PK or Hubitat id (string or int)
 
         Returns:
             Device state dict or None if not cached
         """
         from services.device_cache import get_default_cache
+        from services.hub_classifier import get_device_by_canonical_id
         cache = get_default_cache()
-        return cache.get_device(device_id)
+
+        # Try canonical first (numeric ids that exist in `devices`)
+        try:
+            row = get_device_by_canonical_id(device_id)
+            if row and row.get("hubitat_id"):
+                hit = cache.get_device(str(row["hubitat_id"]))
+                if hit is not None:
+                    return hit
+        except Exception:
+            pass
+
+        # Fallback: caller passed a hubitat id directly
+        return cache.get_device(str(device_id))
 # reload-hub-aware-bridge

@@ -113,7 +113,17 @@ CREATE INDEX IF NOT EXISTS idx_app_instances_paused ON app_instances(is_paused) 
 CREATE TABLE IF NOT EXISTS device_subscriptions (
     id BIGSERIAL PRIMARY KEY,
 
-    -- Device reference (Hubitat device ID as string)
+    -- Canonical device reference. Hubitat per-hub ids are NOT unique across
+    -- a multi-hub setup (the same id can identify different physical devices
+    -- on different hubs), so the routing key is our own devices.id PK.
+    -- The table is created BEFORE `devices` in legacy installs, so this
+    -- column needs to be added by the bootstrap path; see ALTER below.
+    -- For fresh DB creation, the column is created here directly.
+    device_id BIGINT NOT NULL,
+
+    -- Hubitat per-hub id is kept as a denormalized helper for debugging
+    -- and for legacy paths that haven't been migrated yet. Routing does
+    -- NOT use this column.
     hubitat_device_id VARCHAR(50) NOT NULL,
 
     -- Instance reference
@@ -125,18 +135,42 @@ CREATE TABLE IF NOT EXISTS device_subscriptions (
     -- Subscription metadata
     created_at TIMESTAMPTZ DEFAULT NOW(),
 
-    -- Unique constraint: one subscription per device/instance/event combination
+    -- Unique constraint: one subscription per (canonical device, instance, event)
     CONSTRAINT device_subscriptions_unique
-        UNIQUE (hubitat_device_id, instance_id, event_type)
+        UNIQUE (device_id, instance_id, event_type)
 );
 
 -- Primary index for event routing: device_id + event_type → instance_ids
+CREATE INDEX IF NOT EXISTS idx_device_subscriptions_canonical
+    ON device_subscriptions(device_id, event_type);
+
+-- Legacy index on hubitat id (kept for debugging queries)
 CREATE INDEX IF NOT EXISTS idx_device_subscriptions_lookup
     ON device_subscriptions(hubitat_device_id, event_type);
 
 -- Secondary index for cleanup when instance deleted (handled by CASCADE)
 CREATE INDEX IF NOT EXISTS idx_device_subscriptions_instance
     ON device_subscriptions(instance_id);
+
+-- Add the FK to devices(id) only after `devices` is created (later in this file).
+-- Idempotent: skipped on existing installs that already have it.
+DO $devsubsfk$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'device_subscriptions_device_id_fkey'
+    ) THEN
+        BEGIN
+            ALTER TABLE device_subscriptions
+              ADD CONSTRAINT device_subscriptions_device_id_fkey
+              FOREIGN KEY (device_id) REFERENCES devices(id);
+        EXCEPTION WHEN undefined_table THEN
+            -- `devices` not yet created in this run; the constraint will be
+            -- added at the bottom of this file in a follow-up DO block.
+            NULL;
+        END;
+    END IF;
+END$devsubsfk$;
 
 -- =============================================================================
 -- DEVICE CACHE TABLE

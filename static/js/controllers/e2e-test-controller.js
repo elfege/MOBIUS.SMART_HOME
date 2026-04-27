@@ -217,6 +217,9 @@ export class E2ETestModal {
                                 <span id="e2e-ws-label-${this.instanceId}">Hub4 WS</span>
                             </span>
                             <button class="btn btn-primary btn-small e2e-run-all">Run All Tests</button>
+                            <button class="btn btn-danger btn-small e2e-stop" disabled title="Stop the currently-running scenario">Stop</button>
+                            <button class="btn btn-secondary btn-small e2e-reset" title="Clear scenario pass/fail markers">Reset Results</button>
+                            <button class="btn btn-secondary btn-small e2e-clear-log" title="Clear the terminal log pane">Clear Log</button>
                             <button class="btn btn-secondary btn-small e2e-close">Close</button>
                         </div>
                     </div>
@@ -264,6 +267,15 @@ export class E2ETestModal {
 
         // Run All button
         $modal.find('.e2e-run-all').on('click', () => this._runAllScenarios());
+
+        // Stop button — cancel any in-flight scenario run
+        $modal.find('.e2e-stop').on('click', () => this._stopRun());
+
+        // Reset Results — clear pass/fail markers from scenario rows in the UI
+        $modal.find('.e2e-reset').on('click', () => this._resetScenarioResults());
+
+        // Clear Log — wipe the terminal pane (does NOT cancel a run)
+        $modal.find('.e2e-clear-log').on('click', () => this._clearLog());
 
         // Backdrop click intentionally disabled — prevents accidental
         // loss of test results. Use the Close button or Escape key instead.
@@ -628,6 +640,8 @@ export class E2ETestModal {
             );
         } else if (type === 'scenario_start') {
             this._appendLog(`--- Starting: ${data.scenario_name} ---`, 'info');
+            // Stop is enabled while any scenario is in flight.
+            this._setRunning(true);
         } else if (type === 'scenario_complete') {
             this._updateScenarioSummary(data);
             const status = data.failed > 0 ? 'fail' : 'pass';
@@ -636,6 +650,10 @@ export class E2ETestModal {
                 + `${data.failed} failed, ${data.skipped} skipped ---`,
                 status
             );
+            // Run-all chains scenario_complete events; the next scenario
+            // will re-enable Stop via scenario_start. End-of-run leaves
+            // Stop disabled, which is the correct idle state.
+            this._setRunning(false);
         } else if (type === 'wait_tick') {
             // Could show countdown in UI; for now just ignore
         }
@@ -1001,10 +1019,12 @@ export class E2ETestModal {
         $(`#e2e-steps-${scenarioId} .e2e-step-message`).text('');
         $(`#e2e-summary-${scenarioId}`).text('');
 
+        this._setRunning(true);
         try {
             await api.post(`/e2e/test/${this.instanceId}/run/${scenarioId}`);
         } catch (err) {
             this._appendLog(`Failed to start scenario: ${err.message}`, 'fail');
+            this._setRunning(false);
         }
     }
 
@@ -1020,11 +1040,72 @@ export class E2ETestModal {
         $(this.modalEl).find('.e2e-step-message').text('');
         $(this.modalEl).find('.e2e-scenario-summary').text('');
 
+        this._setRunning(true);
         try {
             await api.post(`/e2e/test/${this.instanceId}/run-all`);
         } catch (err) {
             this._appendLog(`Failed to start tests: ${err.message}`, 'fail');
+            this._setRunning(false);
         }
+    }
+
+    /**
+     * Toggle Run-All disabled / Stop enabled while a run is in flight.
+     * The SSE 'scenario_complete' / 'all_complete' / 'cancelled' handlers
+     * call this with false to flip back when the run unwinds.
+     */
+    _setRunning(isRunning) {
+        const $modal = $(this.modalEl);
+        $modal.find('.e2e-run-all').prop('disabled', isRunning);
+        $modal.find('.e2e-stop').prop('disabled', !isRunning);
+    }
+
+    /**
+     * Cancel any currently-running scenario via the backend stop endpoint.
+     * Backend sets the runner's cancel flag; the next step boundary will
+     * mark remaining steps as SKIP and emit scenario_complete.
+     */
+    async _stopRun() {
+        try {
+            const res = await api.post(`/e2e/test/${this.instanceId}/stop`);
+            if (res?.stopped) {
+                this._appendLog('Stop requested — current step will finish, then cancel', 'warning');
+            } else {
+                this._appendLog('No active run to stop', 'info');
+                this._setRunning(false);
+            }
+        } catch (err) {
+            this._appendLog(`Stop failed: ${err.message}`, 'fail');
+        }
+    }
+
+    /**
+     * Reset all scenario pass/fail markers in the UI without touching
+     * the backend or the log pane. Use to clear visual noise before a
+     * fresh run.
+     */
+    _resetScenarioResults() {
+        const $modal = $(this.modalEl);
+        $modal.find('.e2e-step-indicator')
+            .removeClass('e2e-pass e2e-fail e2e-skip e2e-running')
+            .addClass('e2e-pending');
+        $modal.find('.e2e-step-message').text('');
+        $modal.find('.e2e-scenario-summary').text('');
+        // Wipe the persisted scenarioResults too so the markers don't
+        // come back when the modal is closed/reopened.
+        const state = _persistedState[this.instanceId];
+        if (state) state.scenarioResults = {};
+        this._appendLog('Scenario results reset', 'info');
+    }
+
+    /**
+     * Wipe the terminal log pane and the persisted log buffer.
+     */
+    _clearLog() {
+        const logEl = document.getElementById(`e2e-log-${this.instanceId}`);
+        if (logEl) logEl.innerHTML = '';
+        const state = _persistedState[this.instanceId];
+        if (state) state.logLines = [];
     }
 
     // =========================================================================

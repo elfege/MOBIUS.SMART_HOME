@@ -196,27 +196,25 @@ class HubitatClient:
         This returns more detail than get_all_devices(), including current
         state of all attributes (e.g., switch: 'on', level: 75).
 
+        NOTE: post-Phase-5 the device cache is keyed by canonical devices.id
+        PKs, not by per-hub Hubitat ids. HubitatClient operates per-hub with
+        Hubitat ids and has no canonical context, so we no longer touch the
+        cache from inside this method. Callers that want the cached state
+        should hit DeviceCache directly with a canonical id (or use
+        HubitatMixin.get_device_state).
+
         Args:
-            device_id: Hubitat device ID
-            use_cache: Whether to use cached data
+            device_id: Hubitat per-hub device ID
+            use_cache: Ignored (kept for signature compatibility)
 
         Returns:
             Device dictionary with full details or None if not found
         """
-        if use_cache and self.cache:
-            cached = self.cache.get_device(device_id)
-            if cached:
-                return cached
-
         device = self._make_request(f"/devices/{device_id}")
 
         if device is None:
             self.logger.warning(f"Device not found: {device_id}")
             return None
-
-        # Update cache with this device's data
-        if self.cache:
-            self.cache.update_device(device_id, device)
 
         return device
 

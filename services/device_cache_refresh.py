@@ -131,7 +131,7 @@ class DeviceCacheRefreshService:
         """
         from services.device_cache import get_default_cache
         from services.hubitat_client import get_default_client, get_hub_client_by_ip
-        from services.hub_classifier import get_hub_for_device
+        from services.hub_classifier import get_device_by_canonical_id
         from services.matter_client import get_all_matter_mappings
 
         cache = get_default_cache()
@@ -164,31 +164,33 @@ class DeviceCacheRefreshService:
         refreshed = 0
         discrepancies = 0
 
-        for device_id, cached_data in list(cached_devices.items()):
+        for canonical_id, cached_data in list(cached_devices.items()):
             try:
                 cached_attrs = cached_data.get('attributes', {})
                 device_name = cached_data.get(
                     'device_label',
-                    cached_data.get('device_name', device_id)
+                    cached_data.get('device_name', canonical_id)
                 )
-                mapping = matter_map.get(str(device_id))
 
-                # Resolve the hub via the canonical `devices` table (joined
-                # against `hub_config` for editable hub IP/name). This is
-                # the single source of truth for hub routing — no env-var
-                # or in-memory routing-cache assumptions.
-                row = get_hub_for_device(str(device_id))
+                # Cache keys are CANONICAL devices.id PKs (post-Phase-5).
+                # Resolve to (hub_ip, hubitat_id) — Matter uses canonical_id
+                # via the matter_map, Maker API needs the per-hub id.
+                row = get_device_by_canonical_id(canonical_id)
                 if not row or not row.get("hub_ip"):
-                    # Stale legacy id (likely a Hub Mesh mirror id that lost
-                    # its place after the device-selections migration). It
-                    # would 404 on every hub. Skip — the canonical table is
-                    # the only valid universe of device ids now.
+                    # No canonical row — stale entry. Cache write would
+                    # have been blocked by the FK; this row shouldn't
+                    # exist. Skip defensively.
                     continue
-                fetch_client = get_hub_client_by_ip(row["hub_ip"]) or hubitat
+                hub_ip = row["hub_ip"]
+                hubitat_id = str(row.get("hubitat_id") or "")
+                fetch_client = get_hub_client_by_ip(hub_ip) or hubitat
 
-                # Get live state (Matter first, API fallback)
+                mapping = matter_map.get(str(canonical_id)) or matter_map.get(hubitat_id)
+
+                # Get live state (Matter first, API fallback). Pass the
+                # per-hub Hubitat id since that's what the Maker API needs.
                 live_state = await self._get_live_state(
-                    device_id, mapping, fetch_client
+                    hubitat_id, mapping, fetch_client
                 )
 
                 if not live_state:
@@ -201,8 +203,11 @@ class DeviceCacheRefreshService:
 
                 if diffs:
                     for attr, cached_val, live_val in diffs:
+                        # Pass canonical_id to the handler — the cache is
+                        # keyed canonically and update_device_attribute
+                        # expects canonical PKs.
                         self._handle_discrepancy(
-                            device_id, device_name, attr,
+                            canonical_id, device_name, attr,
                             cached_val, live_val, live_state.get('source', '?'),
                             cache
                         )
@@ -212,7 +217,7 @@ class DeviceCacheRefreshService:
 
             except Exception as e:
                 logger.debug(
-                    f"[CacheRefresh] Error refreshing {device_id}: {e}"
+                    f"[CacheRefresh] Error refreshing {canonical_id}: {e}"
                 )
 
         if discrepancies > 0:
@@ -334,7 +339,7 @@ class DeviceCacheRefreshService:
 
     def _handle_discrepancy(
         self,
-        device_id: str,
+        device_id,
         device_name: str,
         attribute: str,
         cached_val: Any,
@@ -346,7 +351,7 @@ class DeviceCacheRefreshService:
         Handle a single attribute discrepancy: log and update cache.
 
         Args:
-            device_id: Hubitat device ID
+            device_id: Canonical devices.id PK (post-Phase-5)
             device_name: Human-readable device name
             attribute: Attribute name (switch, level, etc.)
             cached_val: Value in cache

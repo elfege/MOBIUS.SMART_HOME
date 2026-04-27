@@ -162,35 +162,17 @@ class HubitatMixin:
             pass
         return device_id
 
-    def get_device_state(self, device_id: str) -> Optional[Dict[str, Any]]:
+    def get_device_state(self, device_id) -> Optional[Dict[str, Any]]:
         """
         Get current device state from the local cache.
 
-        Accepts either a canonical devices.id PK (preferred — what's in
-        device_selections post-Phase-5) or a Hubitat per-hub id (legacy).
-        For canonical ids we resolve to the hubitat_id before hitting the
-        cache, since the cache is still keyed by hubitat_device_id.
-
         Args:
-            device_id: Canonical PK or Hubitat id (string or int)
+            device_id: Canonical devices.id PK (post-Phase-5 the cache is
+                       keyed on this exclusively — no translation needed)
 
         Returns:
             Device state dict or None if not cached
         """
         from services.device_cache import get_default_cache
-        from services.hub_classifier import get_device_by_canonical_id
-        cache = get_default_cache()
-
-        # Try canonical first (numeric ids that exist in `devices`)
-        try:
-            row = get_device_by_canonical_id(device_id)
-            if row and row.get("hubitat_id"):
-                hit = cache.get_device(str(row["hubitat_id"]))
-                if hit is not None:
-                    return hit
-        except Exception:
-            pass
-
-        # Fallback: caller passed a hubitat id directly
-        return cache.get_device(str(device_id))
+        return get_default_cache().get_device(device_id)
 # reload-hub-aware-bridge

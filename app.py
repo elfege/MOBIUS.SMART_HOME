@@ -559,8 +559,16 @@ async def get_devices(capability: Optional[str] = Query(None)):
         else:
             devices = client.get_all_devices()
 
-        # Update cache
-        cache.update_all(devices)
+        # update_all needs to know which hub these devices came from so
+        # it can resolve the per-hub Hubitat ids to canonical PKs (the
+        # cache's primary key post-Phase-5). client.config.hub_ip is set
+        # at HubitatClient construction time.
+        try:
+            hub_ip = getattr(client, 'config', None) and client.config.hub_ip
+        except Exception:
+            hub_ip = None
+        if hub_ip:
+            cache.update_all(devices, hub_ip=hub_ip)
 
         return devices
 

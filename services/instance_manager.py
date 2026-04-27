@@ -512,26 +512,30 @@ class InstanceManager:
 
     def get_subscribed_instances(
         self,
-        device_id: str,
+        device_id: int,
         event_type: str
     ) -> List[int]:
         """
-        Get instance IDs subscribed to a device/event combination.
+        Get instance IDs subscribed to a (canonical) device + event_type.
 
-        Used by WebhookRouter to dispatch events.
+        Used by WebhookRouter to dispatch events. The caller MUST resolve
+        the inbound Hubitat id + hub_ip to a canonical devices.id before
+        calling this — that is the only sub-routing key now (Phase 5).
 
         Args:
-            device_id: Hubitat device ID
+            device_id: Canonical devices.id PK
             event_type: Event type (motion, switch, etc.)
 
         Returns:
             List of instance IDs
         """
+        if device_id is None:
+            return []
         try:
             response = requests.get(
                 f"{self.postgrest_url}/device_subscriptions",
                 params={
-                    "hubitat_device_id": f"eq.{device_id}",
+                    "device_id": f"eq.{device_id}",
                     "event_type": f"eq.{event_type}",
                     "select": "instance_id"
                 },
@@ -741,14 +745,36 @@ class InstanceManager:
             'keep_on_switches': 'switch'
         }
 
-        # Build deduped subscription set. The same device can appear under
-        # multiple categories that map to the same event_type (e.g. a switch
-        # listed in both `switches` and `keep_off_switches` both produce
-        # 'switch' events), and the device_subscriptions table has a unique
-        # constraint on (instance_id, hubitat_device_id, event_type).
-        # PostgREST 409s the whole bulk POST if duplicates appear *within* the
-        # same payload — `Prefer: resolution=ignore-duplicates` only handles
-        # conflicts against existing rows, not within the request body.
+        # device_selections now stores CANONICAL devices.id PKs, not Hubitat
+        # per-hub IDs. Subscriptions are keyed on the canonical device_id FK
+        # so routing is hub-aware by construction (devices.hub_id tells us
+        # which hub a sub event must come from). hubitat_device_id is kept
+        # populated as a denormalized helper for debugging and legacy paths.
+        canon_ids = sorted({
+            int(d) for cat, ids in device_selections.items()
+            for d in (ids or [])
+            if str(d).isdigit()
+        })
+        hubitat_by_canon: Dict[int, str] = {}
+        if canon_ids:
+            try:
+                resp = requests.get(
+                    f"{self.postgrest_url}/devices",
+                    params={
+                        "select": "id,hubitat_id",
+                        "id": f"in.({','.join(str(i) for i in canon_ids)})",
+                    },
+                    timeout=5,
+                )
+                if resp.status_code == 200:
+                    for row in resp.json():
+                        hubitat_by_canon[int(row["id"])] = str(row["hubitat_id"])
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to load canonical→hubitat map for instance {instance_id}: {e}",
+                    exc_info=True
+                )
+
         sub_keys = set()
         subscriptions = []
 
@@ -758,14 +784,31 @@ class InstanceManager:
                 continue
 
             for device_id in device_ids:
-                key = (str(device_id), event_type)
+                # Selection entries are canonical PKs (post-Phase-5 schema).
+                try:
+                    canonical_id = int(device_id)
+                except (TypeError, ValueError):
+                    self.logger.warning(
+                        f"Skipping non-numeric selection {device_id!r} "
+                        f"in instance {instance_id} ({category})"
+                    )
+                    continue
+                key = (canonical_id, event_type)
                 if key in sub_keys:
                     continue
                 sub_keys.add(key)
+                hubitat_id = hubitat_by_canon.get(canonical_id)
+                if hubitat_id is None:
+                    self.logger.warning(
+                        f"Selection {canonical_id} in instance {instance_id} "
+                        f"({category}) has no canonical row — sub skipped"
+                    )
+                    continue
                 subscriptions.append({
-                    'hubitat_device_id': str(device_id),
-                    'instance_id': instance_id,
-                    'event_type': event_type
+                    'device_id':         canonical_id,
+                    'hubitat_device_id': hubitat_id,
+                    'instance_id':       instance_id,
+                    'event_type':        event_type,
                 })
 
         if subscriptions:
@@ -844,3 +887,4 @@ def get_instance_manager() -> InstanceManager:
         _instance_manager = InstanceManager()
     return _instance_manager
 # reload
+# reload-phase5

@@ -785,5 +785,74 @@ def invalidate_device_lookup_cache() -> None:
     """Drop the in-process devices-table lookup cache. Call after a
     re-classification or any UPDATE/INSERT into the `devices` table."""
     _device_lookup_cache.clear()
+    _canonical_id_cache.clear()
+
+
+# Cache canonical_id → row {hub_ip, hub_name, hubitat_id, label}.
+# Populated alongside the hubitat-id cache so canonical-id lookups
+# don't always need a separate roundtrip.
+_canonical_id_cache: Dict[int, Optional[Dict[str, Any]]] = {}
+
+
+def get_device_by_canonical_id(canonical_id: Any) -> Optional[Dict[str, Any]]:
+    """
+    Resolve a canonical devices.id PK to its hub + Hubitat id.
+
+    This is the post-Phase-5 inverse of get_hub_for_device(): selections
+    and subscriptions store canonical ids, but Hubitat APIs need the
+    per-hub hubitat_id. JOIN against hub_config so callers get hub IP/name
+    from the editable hubs table.
+
+    Returns:
+        {
+          'id':         <canonical devices.id>,
+          'hub_id':     <hub_config.id>,
+          'hub_ip':     <ip from hub_config>,
+          'hub_name':   <hub_config.hub_name>,
+          'hubitat_id': <Hubitat per-hub id>,
+          'label':      <devices.label>,
+        }
+        or None if no row matches.
+    """
+    if canonical_id is None:
+        return None
+    try:
+        key = int(canonical_id)
+    except (TypeError, ValueError):
+        return None
+    if key in _canonical_id_cache:
+        return _canonical_id_cache[key]
+
+    postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    try:
+        resp = requests.get(
+            f"{postgrest_url}/devices",
+            params={
+                "select": "id,hubitat_id,label,hub_id,hub_config(hub_name,hub_ip,is_enabled)",
+                "id": f"eq.{key}",
+            },
+            timeout=3,
+        )
+        if resp.status_code == 200:
+            rows = resp.json()
+            if rows:
+                row = rows[0]
+                hub = row.get("hub_config") or {}
+                result = {
+                    "id":          row["id"],
+                    "hub_id":      row.get("hub_id"),
+                    "hub_ip":      hub.get("hub_ip"),
+                    "hub_name":    hub.get("hub_name"),
+                    "hub_enabled": hub.get("is_enabled", True),
+                    "hubitat_id":  row["hubitat_id"],
+                    "label":       row.get("label"),
+                }
+                _canonical_id_cache[key] = result
+                return result
+    except Exception as e:
+        logger.debug(f"get_device_by_canonical_id({key}) failed: {e}")
+
+    _canonical_id_cache[key] = None
+    return None
 # reload-canonical-devices
 # reload-resolve-fix

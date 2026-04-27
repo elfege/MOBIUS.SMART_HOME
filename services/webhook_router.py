@@ -293,10 +293,19 @@ class WebhookRouter:
             )
             return 0
 
-        # Resolve to canonical devices.id (still informational; subscription
-        # routing remains keyed on hubitat_device_id pending the schema
-        # migration that moves device_subscriptions onto devices.id).
+        # Resolve to canonical devices.id. After Phase 5, this is THE routing
+        # key — subscriptions and selections both reference devices.id.
         canonical_id = canonical_row["id"] if canonical_row else None
+
+        # If no canonical row exists, the event is for a device that's not
+        # in our `devices` table — either unclassified yet, or a true
+        # mesh-mirror-with-no-native (rare). Either way it can't route to
+        # any instance under the new scheme. Log + drop.
+        if canonical_id is None:
+            self.logger.debug(
+                f"No canonical row for {display_name!r} (hubitat_id={device_id}, "
+                f"hub_ip={hub_ip or '?'}); event will not route"
+            )
 
         # Color the value based on active/on vs inactive/off
         val_color = _GREEN if event_value in ('active', 'on', 'open') else _RED
@@ -308,9 +317,12 @@ class WebhookRouter:
             f"{_YELLOW}{event_name}{_R} = {val_color}{event_value}{_R}"
         )
 
-        # Create event object
+        # Create event object. event.device_id is the CANONICAL devices.id;
+        # the original Hubitat per-hub id is preserved as event.hubitat_id
+        # for any handler that needs it (most don't — they should compare
+        # against their canonical-id selections).
         event = DeviceEvent(
-            device_id=device_id,
+            device_id=str(canonical_id) if canonical_id is not None else device_id,
             device_name=display_name,
             event_type=event_name,
             value=event_value,
@@ -318,21 +330,25 @@ class WebhookRouter:
             description=webhook_payload.get('descriptionText'),
             source='hubitat_webhook',
             timestamp=datetime.now(),
-            raw_payload=webhook_payload
+            raw_payload=webhook_payload,
         )
+        # Stash the per-hub Hubitat id for debugging / legacy lookups.
+        # raw_payload also contains it under 'deviceId'.
+        event.hubitat_id = device_id
 
-        # Update device cache with new attribute value
+        # Update device cache with new attribute value (cache still keyed by
+        # hubitat_device_id — only canonical routing changed for now).
         if self.device_cache:
             self.device_cache.update_device_attribute(
                 device_id, event_name, event_value
             )
 
-        # Find subscribed instances
+        # Find subscribed instances by canonical id
         instance_manager = get_instance_manager()
         subscribed_ids = instance_manager.get_subscribed_instances(
-            device_id=device_id,
+            device_id=canonical_id,
             event_type=event_name
-        )
+        ) if canonical_id is not None else []
 
         # Enqueue to each instance's worker queue. The webhook handler returns
         # immediately; workers process events in background threads so a slow

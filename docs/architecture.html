@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>0_MOBIUS.SMART_HOME - Engineering Architecture (February 23, 2026)</title>
+    <title>0_MOBIUS.SMART_HOME - Engineering Architecture (February 21, 2026)</title>
     <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
     <style>
         body {
@@ -196,12 +196,12 @@
         <h1>0_MOBIUS.SMART_HOME - Engineering Architecture</h1>
 
         <div class="critical-note">
-            <strong>System Overview:</strong> 0_MOBIUS.SMART_HOME is a multi-instance home automation platform built with Python/FastAPI, PostgreSQL, and a modular ES6+jQuery frontend. It migrates Hubitat Groovy apps to a modern web-based system where users create independent automation instances (e.g., "Office Lights", "Bedroom Lights") from app blueprints. Events from Hubitat hubs flow through a central webhook dispatcher, are routed to subscribed instances, and trigger automation logic with memoization, scheduling, and health monitoring. Device commands go through a centralized <code>DeviceCommander</code> with nested retries and state verification, with optional dual-path execution via Matter protocol. All configuration is managed via AWS Secrets Manager. <em>Last updated: February 23, 2026.</em>
+            <strong>System Overview:</strong> 0_MOBIUS.SMART_HOME is a multi-instance home automation platform built with Python/FastAPI, PostgreSQL, and a modular ES6+jQuery frontend. It migrates Hubitat Groovy apps to a modern web-based system where users create independent automation instances (e.g., "Office Lights", "Bedroom Lights") from app blueprints. Events from Hubitat hubs flow through a central webhook dispatcher, are routed to subscribed instances, and trigger automation logic with memoization, scheduling, and health monitoring. All configuration is managed via AWS Secrets Manager. <em>Last updated: February 21, 2026.</em>
         </div>
 
         <div class="key-metrics">
             <div class="metric-card">
-                <div class="metric-value">6</div>
+                <div class="metric-value">5</div>
                 <div class="metric-label">Docker Services</div>
             </div>
             <div class="metric-card">
@@ -213,12 +213,8 @@
                 <div class="metric-label">App Type (Extensible)</div>
             </div>
             <div class="metric-card">
-                <div class="metric-value">10</div>
+                <div class="metric-value">8</div>
                 <div class="metric-label">Database Tables</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-value">45</div>
-                <div class="metric-label">API Endpoints</div>
             </div>
         </div>
 
@@ -228,7 +224,7 @@
         <h2>Level 1: System Overview</h2>
 
         <div class="architecture-note">
-            <strong>High-Level Architecture:</strong> Hubitat hubs generate device events (motion, switch, illuminance, etc.) which POST to a central Webhook Dispatcher (Flask, port 5050). The dispatcher fans out events to all registered apps. The FastAPI core application receives events, routes them to subscribed app instances via PostgREST-backed subscriptions, and executes automation logic. Device commands flow through a centralized <code>DeviceCommander</code> with threaded execution, nested retries, and state verification. For Matter-capable devices, commands are sent simultaneously via both Hubitat and Matter protocols. A background cache refresh service periodically polls device state to prevent stale cache. The frontend provides a wizard-based UI for creating and managing instances, with HomeKit-style device tile modals for quick device control. All secrets and configuration flow from AWS Secrets Manager through <code>start.sh</code> into Docker environment variables.
+            <strong>High-Level Architecture:</strong> Hubitat hubs generate device events (motion, switch, illuminance, etc.) which POST to a central Webhook Dispatcher (Flask, port 5050). The dispatcher fans out events to all registered apps. The FastAPI core application receives events, routes them to subscribed app instances via PostgREST-backed subscriptions, and executes automation logic. The frontend provides a wizard-based UI for creating and managing instances. All secrets and configuration flow from AWS Secrets Manager through <code>start.sh</code> into Docker environment variables.
         </div>
 
         <div class="diagram-container">
@@ -236,16 +232,16 @@
                 graph LR
                     HUB[Hubitat Hubs<br/>4 Hubs on LAN] -->|Maker API Events| WD[Webhook Dispatcher<br/>Flask :5050]
                     WD -->|Fan-out POST| APP[FastAPI App<br/>:5001 → :5000]
-                    WD -->|Fan-out POST| OTHER[Other Apps<br/>0_TILES etc.]
+                    WD -->|Fan-out POST| OTHER[Other Apps<br/>0_MOBIUS.TILES etc.]
 
                     APP -->|REST API| UI[Web Browser<br/>ES6 + jQuery]
-                    APP -->|PostgREST| PG[(PostgreSQL<br/>:5433 → :5432)]
+                    APP -->|PostgREST| PG[(PostgreSQL<br/>:5435 → :5432)]
                     APP -->|Maker API| HUB
 
-                    PR[PostgREST<br/>:3002 → :3001] -->|Auto-REST| PG
+                    PR[PostgREST<br/>:3003 → :3001] -->|Auto-REST| PG
                     APP -->|CRUD via| PR
 
-                    NGX[Nginx<br/>:8445 HTTPS] -->|Reverse Proxy| APP
+                    NGX[Nginx<br/>:8444 HTTPS] -->|Reverse Proxy| APP
                     UI -->|HTTPS| NGX
 
                     AWS[(AWS Secrets<br/>Manager)] -.->|start.sh| APP
@@ -304,11 +300,10 @@
                 <li><strong>Backend:</strong> Python 3.11 + FastAPI + Uvicorn (single worker for SSE compatibility)</li>
                 <li><strong>Frontend:</strong> Jinja2 Templates + ES6 Modules + jQuery</li>
                 <li><strong>Database:</strong> PostgreSQL 16 + PostgREST v12 (auto-generated REST API from schema)</li>
-                <li><strong>Webhook Fan-out:</strong> Flask-based dispatcher (shared with 0_TILES, 0_MOBIUS.NVR)</li>
+                <li><strong>Webhook Fan-out:</strong> Flask-based dispatcher (shared with 0_MOBIUS.TILES, 0_MOBIUS.NVR)</li>
                 <li><strong>Scheduling:</strong> APScheduler with PostgreSQL persistence</li>
                 <li><strong>Proxy:</strong> Nginx 1.27 with self-signed TLS</li>
-                <li><strong>Matter Protocol:</strong> python-matter-server (WebSocket API for direct device control, mDNS discovery)</li>
-                <li><strong>Containerization:</strong> Docker Compose (6 services)</li>
+                <li><strong>Containerization:</strong> Docker Compose (5 services)</li>
                 <li><strong>Secrets:</strong> AWS Secrets Manager (no .env files)</li>
             </ul>
         </div>
@@ -319,7 +314,7 @@
         <h2>Level 2: Container Architecture</h2>
 
         <div class="architecture-note">
-            <strong>Docker Compose Services:</strong> Six containers orchestrated by <code>docker-compose.yml</code>. The webhook dispatcher is shared across projects (0_MOBIUS.SMART_HOME, 0_TILES) via hardlinks from <code>~/0_SCRIPTS/webhook_dispatcher/</code>. Only one dispatcher container runs system-wide (whichever project starts first wins). The FastAPI app runs with a single Uvicorn worker because SSE requires shared in-process memory. The Matter server runs on host networking for mDNS device discovery.
+            <strong>Docker Compose Services:</strong> Five containers orchestrated by <code>docker-compose.yml</code>. The webhook dispatcher is shared across projects (0_MOBIUS.SMART_HOME, 0_MOBIUS.TILES) via hardlinks from <code>~/0_SCRIPTS/webhook_dispatcher/</code>. Only one dispatcher container runs system-wide (whichever project starts first wins). The FastAPI app runs with a single Uvicorn worker because SSE requires shared in-process memory.
         </div>
 
         <div class="diagram-container">
@@ -328,13 +323,9 @@
                     subgraph DockerCompose["Docker Compose Network"]
                         WD[webhook-dispatcher<br/>Flask :5050<br/>Python 3.11-slim]
                         APP[smarthome-app<br/>FastAPI :5001→:5000<br/>Python 3.11 + Uvicorn]
-                        PG[smarthome-postgres<br/>PostgreSQL :5433→:5432<br/>postgres:16-alpine]
-                        PR[smarthome-postgrest<br/>PostgREST :3002→:3001<br/>postgrest:v12.0.2]
-                        NGX[smarthome-nginx<br/>Nginx :8082/:8445→:80/:443<br/>nginx:1.27-alpine]
-                    end
-
-                    subgraph HostNetwork["Host Network"]
-                        MATTER[smarthome-matter-server<br/>python-matter-server :5580<br/>mDNS discovery]
+                        PG[smarthome-postgres<br/>PostgreSQL :5435→:5432<br/>postgres:16-alpine]
+                        PR[smarthome-postgrest<br/>PostgREST :3003→:3001<br/>postgrest:v12.0.2]
+                        NGX[smarthome-nginx<br/>Nginx :8080/:8444→:80/:443<br/>nginx:1.27-alpine]
                     end
 
                     subgraph External["External"]
@@ -344,20 +335,17 @@
 
                     HUB -->|POST /api/webhook/event| WD
                     WD -->|POST to smarthome-app:5000| APP
-                    BROWSER -->|HTTPS :8445| NGX
+                    BROWSER -->|HTTPS :8444| NGX
                     NGX -->|proxy_pass :5000| APP
                     APP -->|REST :3001| PR
                     PR -->|SQL :5432| PG
                     APP -->|Maker API HTTP| HUB
-                    APP -->|WebSocket :5580| MATTER
-                    MATTER -.->|Matter protocol| HUB
 
                     style WD fill:#fd7e14,color:#fff
                     style APP fill:#667eea,color:#fff
                     style PG fill:#17a2b8,color:#fff
                     style PR fill:#6f42c1,color:#fff
                     style NGX fill:#28a745,color:#fff
-                    style MATTER fill:#e83e8c,color:#fff
                     style HUB fill:#d4edda
                     style BROWSER fill:#e1f5ff
             </div>
@@ -394,7 +382,7 @@
                 <tr>
                     <td><strong>smarthome-postgres</strong></td>
                     <td>postgres:16-alpine</td>
-                    <td>5433</td>
+                    <td>5435</td>
                     <td>5432</td>
                     <td>Database</td>
                     <td>Schema from <code>psql/init-db.sql</code></td>
@@ -402,7 +390,7 @@
                 <tr>
                     <td><strong>smarthome-postgrest</strong></td>
                     <td>postgrest/postgrest:v12.0.2</td>
-                    <td>3002</td>
+                    <td>3003</td>
                     <td>3001</td>
                     <td>Auto-REST from schema</td>
                     <td>All CRUD via REST, no raw SQL in app</td>
@@ -410,18 +398,10 @@
                 <tr>
                     <td><strong>smarthome-nginx</strong></td>
                     <td>nginx:1.27-alpine</td>
-                    <td>8082 / 8445</td>
+                    <td>8080 / 8444</td>
                     <td>80 / 443</td>
                     <td>HTTPS reverse proxy</td>
                     <td>Self-signed certs generated by start.sh</td>
-                </tr>
-                <tr>
-                    <td><strong>smarthome-matter-server</strong></td>
-                    <td>python-matter-server:stable</td>
-                    <td>5580</td>
-                    <td>5580</td>
-                    <td>Matter protocol controller</td>
-                    <td>Host networking (mDNS). Privileged for BLE.</td>
                 </tr>
             </tbody>
         </table>
@@ -505,47 +485,45 @@
         <h2>Level 4: Webhook Event Flow</h2>
 
         <div class="architecture-note">
-            <strong>End-to-End Event Pipeline:</strong> A physical device event (e.g., motion sensor activates) travels from the Hubitat hub through the webhook dispatcher, into the FastAPI app, through the webhook router which queries subscriptions, and finally dispatches to the appropriate app instance's <code>on_event()</code> method. The event is logged, the device cache is updated, and the automation logic executes.
+            <strong>End-to-End Event Pipeline (post-Phase-5):</strong> A physical device event arrives at the Webhook Dispatcher, which tags the payload with the source hub's IP and forwards to the FastAPI app. The router resolves the incoming <code>(hubitat_id, hub_ip)</code> pair to a canonical <code>devices.id</code> via the <code>devices</code> table, drops mesh-mirror duplicates whose source hub doesn't match the device's native hub, then queries <code>device_subscriptions</code> by canonical id. Each subscribed instance gets the event enqueued on its per-instance asyncio worker queue, which dispatches <code>on_event()</code> on a thread so the event loop is never blocked. App handlers consuming <code>device_selections</code> work entirely in canonical PKs and translate to <code>(hub, hubitat_id)</code> only at the actual API call boundary.
         </div>
 
         <div class="diagram-container">
             <div class="mermaid">
                 sequenceDiagram
                     participant Hub as Hubitat Hub
-                    participant Disp as Webhook Dispatcher<br/>:5050
+                    participant Disp as Webhook Dispatcher<br/>:5050<br/>(tags _hub_ip)
                     participant API as FastAPI<br/>/api/webhook/event
                     participant Router as WebhookRouter
-                    participant Cache as DeviceCache
-                    participant Sub as device_subscriptions<br/>(PostgREST)
-                    participant App as AppInstance<br/>(in-memory)
+                    participant Devs as devices<br/>(canonical table)
+                    participant Sub as device_subscriptions<br/>(by device_id FK)
+                    participant Q as Per-instance Queue<br/>+ Worker Task
+                    participant App as AppInstance<br/>(asyncio.to_thread)
                     participant Sched as SchedulerService
-                    participant Log as event_log<br/>(PostgREST)
+                    participant Log as event_log
 
-                    Hub->>Disp: POST {content: {deviceId, name, value, ...}}
-                    Note over Disp: Unwrap 'content' envelope
-                    Disp->>API: POST {deviceId, name, value, ...}
-
-                    API->>Router: route_event(payload)
-                    Router->>Router: Create DeviceEvent object
-
-                    par Update cache & query subscriptions
-                        Router->>Cache: update_device_attribute(id, name, value)
-                        Router->>Sub: GET where device_id=X AND event_type=Y
+                    Hub->>Disp: POST {deviceId, name, value, displayName}
+                    Note over Disp: Inject _hub_ip = source IP
+                    Disp->>API: POST {..., _hub_ip}
+                    API->>Router: await route_event(payload)
+                    Router->>Devs: lookup by label → {id, hub_ip}
+                    alt event hub_ip != devices.hub_ip
+                        Router-->>API: drop mesh mirror
+                    else native event
+                        Router->>Sub: GET ?device_id=<canon>&event_type=Y
+                        Sub-->>Router: [instance_ids]
+                        loop For each subscribed instance
+                            Router->>Q: queue.put(event with canonical id)
+                        end
+                        Router-->>API: {routed_to: N}
                     end
 
-                    Sub-->>Router: [instance_id: 1, instance_id: 2, ...]
-
-                    loop For each subscribed instance
-                        Router->>App: app.on_event(event)
-                        App->>App: Check if paused
-                        App->>App: Route to handler (_handle_motion, etc.)
-                        App->>App: Execute master() logic
-                        App->>Hub: send_command(device_id, 'on')
-                        App->>Sched: schedule_timeout(300s)
-                    end
-
+                    Note over Q,App: Workers run concurrently per instance
+                    Q->>App: await asyncio.to_thread(on_event)
+                    App->>App: master() / _handle_motion ...
+                    App->>Hub: send_command(canonical_id) → resolves to (hub, hubitat_id)
+                    App->>Sched: schedule_timeout(...)
                     Router->>Log: Write event_log entry
-                    Router-->>API: {routed_to: N instances}
             </div>
         </div>
 
@@ -579,7 +557,7 @@
 
                     subgraph Targets["Webhook Targets"]
                         SM["smarthome-app:5000<br/>/api/webhook/event"]
-                        TILES["tiles-app:80<br/>/api/webhook/event"]
+                        TILES["host.docker.internal:80<br/>/api/webhook/event"]
                     end
 
                     H1 -->|POST| RX
@@ -609,7 +587,7 @@
         <h2>Level 5: Service Architecture</h2>
 
         <div class="architecture-note">
-            <strong>Internal Services:</strong> The application initializes singleton services at startup: <code>HubitatClient</code> for Maker API communication, <code>DeviceCache</code> for TTL-based device state caching, <code>DeviceCommander</code> for centralized command execution with nested retries and state verification, <code>InstanceManager</code> for instance CRUD and lifecycle, <code>WebhookRouter</code> for event routing, <code>SchedulerService</code> for APScheduler-backed background jobs, <code>DeviceCacheRefresh</code> for periodic live-state polling, and <code>MatterDiscovery</code> for automatic Matter device scanning and commissioning. All services use global factory functions (e.g., <code>get_instance_manager()</code>) to ensure single instances.
+            <strong>Internal Services:</strong> The application initializes singleton services at startup: <code>HubitatClient</code> for Maker API communication, <code>DeviceCache</code> for TTL-based device state caching, <code>InstanceManager</code> for instance CRUD and lifecycle, <code>WebhookRouter</code> for event routing, and <code>SchedulerService</code> for APScheduler-backed background jobs. All services use global factory functions (e.g., <code>get_instance_manager()</code>) to ensure single instances.
         </div>
 
         <div class="diagram-container">
@@ -619,22 +597,14 @@
                         INIT[initialize_services]
                         REG[initialize_registry]
                         LOAD[initialize_all_instances]
-                        MIGRATE[run_db_migrations]
-                        START_BG[start_matter_discovery<br/>+ start_cache_refresh]
                     end
 
                     subgraph Services["Singleton Services"]
                         HC[HubitatClient<br/>Maker API wrapper<br/>Connection pooling + retries]
                         DC[DeviceCache<br/>TTL 300s<br/>Memory + DB fallback]
-                        CMD[DeviceCommander<br/>ThreadPool 8 workers<br/>Nested retries + verification]
                         IM[InstanceManager<br/>Instance CRUD<br/>Runtime lifecycle]
                         WR[WebhookRouter<br/>Event routing<br/>Subscription queries]
                         SS[SchedulerService<br/>APScheduler<br/>DB persistence]
-                    end
-
-                    subgraph Background["Background Services"]
-                        DCR[DeviceCacheRefresh<br/>Periodic polling 120s<br/>Matter-first fallback]
-                        MD[MatterDiscovery<br/>Hub scanning 300s<br/>Auto-commission]
                     end
 
                     subgraph Registry["App Registry"]
@@ -645,49 +615,33 @@
                     subgraph External["External Dependencies"]
                         PREST[PostgREST :3001]
                         HAPI[Hubitat Maker API]
-                        MSVR[Matter Server :5580]
                     end
 
                     INIT --> HC
                     INIT --> DC
-                    INIT --> CMD
                     INIT --> IM
                     INIT --> WR
                     INIT --> SS
                     REG --> AR
                     AR --> AML
                     LOAD --> IM
-                    MIGRATE --> PREST
-                    START_BG --> DCR
-                    START_BG --> MD
 
                     HC --> HAPI
                     DC --> PREST
-                    CMD --> HC
-                    CMD --> MSVR
                     IM --> PREST
                     WR --> PREST
                     SS --> PREST
                     AR --> PREST
-                    DCR --> MSVR
-                    DCR --> HAPI
-                    MD --> HAPI
-                    MD --> MSVR
 
                     style INIT fill:#667eea,color:#fff
                     style REG fill:#667eea,color:#fff
                     style LOAD fill:#667eea,color:#fff
-                    style MIGRATE fill:#667eea,color:#fff
-                    style START_BG fill:#667eea,color:#fff
                     style HC fill:#28a745,color:#fff
                     style DC fill:#17a2b8,color:#fff
-                    style CMD fill:#dc3545,color:#fff
                     style IM fill:#fd7e14,color:#fff
-                    style WR fill:#e83e8c,color:#fff
+                    style WR fill:#dc3545,color:#fff
                     style SS fill:#6f42c1,color:#fff
                     style AR fill:#20c997,color:#fff
-                    style DCR fill:#17a2b8,color:#fff
-                    style MD fill:#e83e8c,color:#fff
             </div>
         </div>
 
@@ -731,30 +685,6 @@
                     <td><code>get_scheduler()</code></td>
                     <td><code>schedule_once()</code>, <code>reschedule()</code>, <code>cancel_for_instance()</code></td>
                 </tr>
-                <tr>
-                    <td><strong>DeviceCommander</strong></td>
-                    <td><code>services/device_commander.py</code></td>
-                    <td><code>get_device_commander()</code></td>
-                    <td><code>send_command()</code>, <code>send_command_sync()</code>, <code>get_device_status()</code></td>
-                </tr>
-                <tr>
-                    <td><strong>DeviceCacheRefresh</strong></td>
-                    <td><code>services/device_cache_refresh.py</code></td>
-                    <td><code>start_cache_refresh()</code></td>
-                    <td><code>_refresh_all_devices()</code>, <code>_get_live_state()</code>, <code>_detect_discrepancies()</code></td>
-                </tr>
-                <tr>
-                    <td><strong>MatterDiscovery</strong></td>
-                    <td><code>services/matter_discovery.py</code></td>
-                    <td><code>start_matter_discovery()</code></td>
-                    <td><code>_scan_and_commission()</code>, <code>_commission_devices()</code>, <code>_reconcile_mappings()</code></td>
-                </tr>
-                <tr>
-                    <td><strong>E2ETestRunner</strong></td>
-                    <td><code>services/e2e_test_runner.py</code></td>
-                    <td>per-instance</td>
-                    <td><code>run_scenario()</code>, <code>save_device_states()</code>, <code>restore_device_states()</code></td>
-                </tr>
             </tbody>
         </table>
 
@@ -764,7 +694,7 @@
         <h2>Level 6: Database Schema</h2>
 
         <div class="architecture-note">
-            <strong>Database Design:</strong> PostgreSQL 16 with PostgREST providing automatic REST endpoints. All application writes go through PostgREST (no raw SQL in the app). The schema centers on three core tables: <code>app_types</code> (blueprints), <code>app_instances</code> (user automations), and <code>device_subscriptions</code> (event routing). Supporting tables handle caching, logging, scheduling, hub config, location modes, and Matter protocol mappings. Total: 10 tables.
+            <strong>Database Design:</strong> PostgreSQL 16 with PostgREST providing automatic REST endpoints. All application writes go through PostgREST (no raw SQL in the app). The schema centers on five core tables: <code>app_types</code> (blueprints), <code>app_instances</code> (user automations), <code>hub_config</code> (Hubitat hubs — editable), <code>devices</code> (canonical mesh-phobic device registry, single source of truth), and <code>device_subscriptions</code> (event routing keyed on canonical <code>devices.id</code>). Hubitat per-hub IDs are not unique across hubs, so all routing references use our own auto-incrementing PK. Supporting tables handle caching, logging, scheduling, and location modes.
         </div>
 
         <div class="diagram-container">
@@ -774,6 +704,8 @@
                     app_instances ||--o{ device_subscriptions : "subscribes to"
                     app_instances ||--o{ scheduled_jobs : "schedules"
                     app_instances ||--o{ event_log : "receives events"
+                    hub_config ||--o{ devices : "owns"
+                    devices ||--o{ device_subscriptions : "is subscribed to (FK)"
 
                     app_types {
                         serial id PK
@@ -790,14 +722,30 @@
                         int app_type_id FK
                         varchar label
                         jsonb settings
-                        jsonb device_selections
+                        jsonb device_selections "canonical devices.id PKs"
                         boolean is_paused
                         jsonb memoization_state
                         timestamp last_activity_at
                     }
 
+                    devices {
+                        bigserial id PK
+                        int hub_id FK
+                        varchar hub_ip
+                        varchar hubitat_id
+                        varchar name "driver type"
+                        varchar label UK "physical-device identity"
+                        varchar device_type
+                        varchar protocol
+                        jsonb capabilities
+                        jsonb attributes
+                        timestamp last_synced_at
+                    }
+
                     device_subscriptions {
-                        varchar hubitat_device_id
+                        bigserial id PK
+                        bigint device_id FK "→ devices.id (Phase 5)"
+                        varchar hubitat_device_id "denormalized debug aid"
                         int instance_id FK
                         varchar event_type
                     }
@@ -842,27 +790,6 @@
                         varchar mode_name
                         boolean is_active
                     }
-
-                    device_matter_map {
-                        varchar hubitat_device_id PK
-                        int matter_node_id
-                        int matter_endpoint_id
-                        varchar device_name
-                        timestamp commissioned_at
-                    }
-
-                    hubitat_matter_devices {
-                        varchar unique_id PK
-                        varchar device_name
-                        varchar manufacturer
-                        varchar hub_ip
-                        varchar hubitat_device_id
-                        varchar match_confidence
-                        boolean is_commissioned
-                        int commission_attempts
-                    }
-
-                    device_matter_map }o--|| device_cache : "maps to"
             </div>
         </div>
 
@@ -911,30 +838,6 @@
                     <td>Persistent background tasks</td>
                     <td>job_type (timeout/pause_expire/health_check), execute_at, status</td>
                     <td><code>GET/POST/PATCH /scheduled_jobs</code></td>
-                </tr>
-                <tr>
-                    <td><strong>hub_config</strong></td>
-                    <td>Hubitat hub connection info</td>
-                    <td>hub_name, hub_ip, maker_api_app_number, maker_api_token_env, is_primary</td>
-                    <td><code>GET/POST/PATCH /hub_config</code></td>
-                </tr>
-                <tr>
-                    <td><strong>location_modes</strong></td>
-                    <td>Cached location modes</td>
-                    <td>mode_id, mode_name, is_active</td>
-                    <td><code>GET/POST/PATCH /location_modes</code></td>
-                </tr>
-                <tr>
-                    <td><strong>device_matter_map</strong></td>
-                    <td>Hubitat-to-Matter device mappings</td>
-                    <td>hubitat_device_id (PK), matter_node_id, matter_endpoint_id, device_name</td>
-                    <td><code>GET/POST/DELETE /device_matter_map</code></td>
-                </tr>
-                <tr>
-                    <td><strong>hubitat_matter_devices</strong></td>
-                    <td>Discovered Matter devices from hub scans</td>
-                    <td>unique_id (PK), device_name, manufacturer, hub_ip, is_commissioned, match_confidence</td>
-                    <td><code>GET/PATCH /hubitat_matter_devices</code></td>
                 </tr>
             </tbody>
         </table>
@@ -1064,13 +967,9 @@
                     INIT_REG --> SYNC_DB[Sync app_types to DB<br/>POST via PostgREST]
                     SYNC_DB --> LOAD_INST[initialize_all_instances<br/>Load all enabled instances]
                     LOAD_INST --> FOR_EACH[For each enabled instance]
-                    FOR_EACH --> INST_OBJ[Instantiate Python object<br/>app_class with instance_data]
-                    INST_OBJ --> INIT_APP[Call app.initialize<br/>Schedule health checks<br/>Enforce keep switches]
-                    INIT_APP --> MIGRATE[run_db_migrations<br/>Idempotent ALTER TABLE]
-                    MIGRATE --> BG_MATTER[start_matter_discovery<br/>Scan hubs every 300s]
-                    MIGRATE --> BG_CACHE[start_cache_refresh<br/>Poll devices every 120s]
-                    BG_MATTER --> READY([Application Ready<br/>Accepting webhooks + UI requests])
-                    BG_CACHE --> READY
+                    FOR_EACH --> INST_OBJ[Instantiate Python object<br/>app_class - instance_data, manager]
+                    INST_OBJ --> INIT_APP[Call app.initialize<br/>Schedule health checks etc.]
+                    INIT_APP --> READY([Application Ready<br/>Accepting webhooks + UI requests])
 
                     style START fill:#28a745,color:#fff
                     style AWS fill:#fff3cd
@@ -1079,9 +978,6 @@
                     style READY fill:#28a745,color:#fff
                     style INIT_SVC fill:#17a2b8,color:#fff
                     style LOAD_INST fill:#fd7e14,color:#fff
-                    style MIGRATE fill:#6f42c1,color:#fff
-                    style BG_MATTER fill:#e83e8c,color:#fff
-                    style BG_CACHE fill:#17a2b8,color:#fff
             </div>
         </div>
 
@@ -1091,101 +987,115 @@
         <h2>Level 9: REST API Endpoints</h2>
 
         <div class="architecture-note">
-            <strong>API Design:</strong> FastAPI with automatic OpenAPI docs at <code>/docs</code>. 45 endpoints covering health/status, app type discovery, instance CRUD and lifecycle, device queries and commands, webhook reception, mode management, Matter protocol operations (discovery, commissioning, mapping), and E2E testing infrastructure. The frontend consumes these via jQuery AJAX and ES6 fetch calls.
+            <strong>API Design:</strong> FastAPI with automatic OpenAPI docs at <code>/docs</code>. The API covers health checks, app type discovery, instance CRUD, device queries, webhook reception, and mode management. The frontend consumes these endpoints via jQuery AJAX and ES6 fetch calls.
         </div>
 
-        <h3>Health &amp; Status</h3>
         <table>
-            <thead><tr><th>Method</th><th>Endpoint</th><th>Purpose</th><th>Notes</th></tr></thead>
+            <thead>
+                <tr>
+                    <th>Method</th>
+                    <th>Endpoint</th>
+                    <th>Purpose</th>
+                    <th>Notes</th>
+                </tr>
+            </thead>
             <tbody>
-                <tr><td>GET</td><td><code>/api/health</code></td><td>Health check</td><td>Returns {status: "ok"}</td></tr>
-                <tr><td>GET</td><td><code>/api/status</code></td><td>Detailed status</td><td>Instance count, Hubitat connectivity</td></tr>
-            </tbody>
-        </table>
-
-        <h3>App Types</h3>
-        <table>
-            <thead><tr><th>Method</th><th>Endpoint</th><th>Purpose</th><th>Notes</th></tr></thead>
-            <tbody>
-                <tr><td>GET</td><td><code>/api/app-types</code></td><td>List app blueprints</td><td>For wizard type selection</td></tr>
-                <tr><td>GET</td><td><code>/api/app-types/{type}/schema</code></td><td>Settings + device schema</td><td>JSON Schema for dynamic form</td></tr>
-            </tbody>
-        </table>
-
-        <h3>Instances (CRUD + Lifecycle)</h3>
-        <table>
-            <thead><tr><th>Method</th><th>Endpoint</th><th>Purpose</th><th>Notes</th></tr></thead>
-            <tbody>
-                <tr><td>GET</td><td><code>/api/instances</code></td><td>List all instances</td><td>Dashboard data</td></tr>
-                <tr><td>POST</td><td><code>/api/instances</code></td><td>Create instance</td><td>Body: app_type, label, devices, settings</td></tr>
-                <tr><td>GET</td><td><code>/api/instances/{id}</code></td><td>Get instance details</td><td>Including current state</td></tr>
-                <tr><td>PUT</td><td><code>/api/instances/{id}</code></td><td>Update instance</td><td>Reloads runtime object</td></tr>
-                <tr><td>DELETE</td><td><code>/api/instances/{id}</code></td><td>Delete instance</td><td>Cascades subscriptions</td></tr>
-                <tr><td>POST</td><td><code>/api/instances/{id}/pause</code></td><td>Pause automation</td><td>Optional: duration_minutes, reason</td></tr>
-                <tr><td>POST</td><td><code>/api/instances/{id}/resume</code></td><td>Resume automation</td><td>Re-evaluates current state</td></tr>
-                <tr><td>GET</td><td><code>/api/instances/{id}/status</code></td><td>Runtime status</td><td>Running, paused, enabled flags</td></tr>
-                <tr><td>POST</td><td><code>/api/instances/{id}/run</code></td><td>Start/re-evaluate</td><td>Triggers master() logic</td></tr>
-                <tr><td>POST</td><td><code>/api/instances/{id}/update</code></td><td>Reload + reset memo</td><td>Hot-reload settings without restart</td></tr>
-                <tr><td>GET</td><td><code>/api/instances/{id}/events</code></td><td>Recent events</td><td>Events for subscribed devices</td></tr>
-            </tbody>
-        </table>
-
-        <h3>Devices</h3>
-        <table>
-            <thead><tr><th>Method</th><th>Endpoint</th><th>Purpose</th><th>Notes</th></tr></thead>
-            <tbody>
-                <tr><td>GET</td><td><code>/api/devices</code></td><td>List devices</td><td>Query: ?capability=motionSensor</td></tr>
-                <tr><td>GET</td><td><code>/api/devices/{id}</code></td><td>Device details</td><td>Full attributes + capabilities</td></tr>
-                <tr><td>POST</td><td><code>/api/devices/{id}/command</code></td><td>Send command</td><td>Via DeviceCommander with verification</td></tr>
-            </tbody>
-        </table>
-
-        <h3>Webhooks</h3>
-        <table>
-            <thead><tr><th>Method</th><th>Endpoint</th><th>Purpose</th><th>Notes</th></tr></thead>
-            <tbody>
-                <tr><td>POST</td><td><code>/api/webhook/event</code></td><td>Device event webhook</td><td>From dispatcher</td></tr>
-                <tr><td>POST</td><td><code>/api/webhook/mode</code></td><td>Mode change webhook</td><td>Notifies all instances</td></tr>
-            </tbody>
-        </table>
-
-        <h3>Modes</h3>
-        <table>
-            <thead><tr><th>Method</th><th>Endpoint</th><th>Purpose</th><th>Notes</th></tr></thead>
-            <tbody>
-                <tr><td>GET</td><td><code>/api/modes</code></td><td>Available modes</td><td>From Hubitat</td></tr>
-                <tr><td>GET</td><td><code>/api/modes/current</code></td><td>Current active mode</td><td>From Hubitat</td></tr>
-            </tbody>
-        </table>
-
-        <h3>Matter Protocol</h3>
-        <table>
-            <thead><tr><th>Method</th><th>Endpoint</th><th>Purpose</th><th>Notes</th></tr></thead>
-            <tbody>
-                <tr><td>GET</td><td><code>/api/matter/status</code></td><td>Matter server connection status</td><td>WebSocket health</td></tr>
-                <tr><td>GET</td><td><code>/api/matter/nodes</code></td><td>Commissioned Matter nodes</td><td>Enriched with device names</td></tr>
-                <tr><td>POST</td><td><code>/api/matter/reconcile</code></td><td>Reconcile device_matter_map</td><td>Sync mappings with commissioned nodes</td></tr>
-                <tr><td>POST</td><td><code>/api/matter/commission</code></td><td>Commission device</td><td>Body: pairing code</td></tr>
-                <tr><td>GET</td><td><code>/api/matter/map</code></td><td>All Hubitat-to-Matter mappings</td><td>device_matter_map table</td></tr>
-                <tr><td>POST</td><td><code>/api/matter/map</code></td><td>Create mapping</td><td>Link Hubitat device to Matter node</td></tr>
-                <tr><td>DELETE</td><td><code>/api/matter/map/{id}</code></td><td>Remove mapping</td><td>By hubitat_device_id</td></tr>
-                <tr><td>POST</td><td><code>/api/matter/discover</code></td><td>Scan hubs for Matter devices</td><td>Updates hubitat_matter_devices</td></tr>
-                <tr><td>GET</td><td><code>/api/matter/hubitat-devices</code></td><td>All discovered Matter devices</td><td>From DB scan results</td></tr>
-                <tr><td>PATCH</td><td><code>/api/matter/hubitat-devices/match</code></td><td>Correct device match</td><td>Manual Maker API ID override</td></tr>
-                <tr><td>POST</td><td><code>/api/matter/auto-commission</code></td><td>Auto-commission single device</td><td>Open pairing + commission</td></tr>
-                <tr><td>POST</td><td><code>/api/matter/auto-commission-all</code></td><td>Auto-commission all eligible</td><td>Parallel processing</td></tr>
-            </tbody>
-        </table>
-
-        <h3>E2E Testing</h3>
-        <table>
-            <thead><tr><th>Method</th><th>Endpoint</th><th>Purpose</th><th>Notes</th></tr></thead>
-            <tbody>
-                <tr><td>GET</td><td><code>/api/e2e/events/stream</code></td><td>SSE test progress stream</td><td>Query: ?instance_id=N</td></tr>
-                <tr><td>GET</td><td><code>/api/e2e/test/{id}/scenarios</code></td><td>Available test scenarios</td><td>Dynamic per-instance</td></tr>
-                <tr><td>GET</td><td><code>/api/e2e/test/{id}/devices</code></td><td>Instance devices with live state</td><td>Grouped by category</td></tr>
-                <tr><td>POST</td><td><code>/api/e2e/test/{id}/run/{scenario}</code></td><td>Run single scenario</td><td>Async background execution</td></tr>
-                <tr><td>POST</td><td><code>/api/e2e/test/{id}/run-all</code></td><td>Run all scenarios</td><td>Sequential with state save/restore</td></tr>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/health</code></td>
+                    <td>Health check</td>
+                    <td>Returns {status: "ok"}</td>
+                </tr>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/status</code></td>
+                    <td>Detailed status</td>
+                    <td>Instance count, Hubitat connectivity</td>
+                </tr>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/app-types</code></td>
+                    <td>List app blueprints</td>
+                    <td>For wizard type selection</td>
+                </tr>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/app-types/{type}/schema</code></td>
+                    <td>Settings + device schema</td>
+                    <td>JSON Schema for dynamic form</td>
+                </tr>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/instances</code></td>
+                    <td>List all instances</td>
+                    <td>Dashboard data</td>
+                </tr>
+                <tr>
+                    <td>POST</td>
+                    <td><code>/api/instances</code></td>
+                    <td>Create instance</td>
+                    <td>Body: app_type, label, devices, settings</td>
+                </tr>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/instances/{id}</code></td>
+                    <td>Get instance details</td>
+                    <td>Including current state</td>
+                </tr>
+                <tr>
+                    <td>PUT</td>
+                    <td><code>/api/instances/{id}</code></td>
+                    <td>Update instance</td>
+                    <td>Reloads runtime object</td>
+                </tr>
+                <tr>
+                    <td>DELETE</td>
+                    <td><code>/api/instances/{id}</code></td>
+                    <td>Delete instance</td>
+                    <td>Cascades subscriptions</td>
+                </tr>
+                <tr>
+                    <td>POST</td>
+                    <td><code>/api/instances/{id}/pause</code></td>
+                    <td>Pause automation</td>
+                    <td>Optional: duration_minutes, reason</td>
+                </tr>
+                <tr>
+                    <td>POST</td>
+                    <td><code>/api/instances/{id}/resume</code></td>
+                    <td>Resume automation</td>
+                    <td>Re-evaluates current state</td>
+                </tr>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/devices</code></td>
+                    <td>List devices</td>
+                    <td>Query: ?capability=motionSensor</td>
+                </tr>
+                <tr>
+                    <td>POST</td>
+                    <td><code>/api/devices/{id}/command</code></td>
+                    <td>Send device command</td>
+                    <td>Body: command, args</td>
+                </tr>
+                <tr>
+                    <td>POST</td>
+                    <td><code>/api/webhook/event</code></td>
+                    <td>Device event webhook</td>
+                    <td>From dispatcher</td>
+                </tr>
+                <tr>
+                    <td>POST</td>
+                    <td><code>/api/webhook/mode</code></td>
+                    <td>Mode change webhook</td>
+                    <td>Notifies all instances</td>
+                </tr>
+                <tr>
+                    <td>GET</td>
+                    <td><code>/api/modes</code></td>
+                    <td>Available location modes</td>
+                    <td>From Hubitat</td>
+                </tr>
             </tbody>
         </table>
 
@@ -1214,11 +1124,6 @@
                     <td><code>instance_detail.html</code></td>
                     <td>Edit instance devices/settings</td>
                 </tr>
-                <tr>
-                    <td><code>GET /matter</code></td>
-                    <td><code>matter.html</code></td>
-                    <td>Matter device management (discovery, commissioning, mapping)</td>
-                </tr>
             </tbody>
         </table>
 
@@ -1235,56 +1140,36 @@
                         DASH[dashboard.html<br/>Instance cards grid]
                         WIZ[instance_wizard.html<br/>Multi-step creation]
                         DET[instance_detail.html<br/>Edit instance]
-                        MAT[matter.html<br/>Matter device management]
                     end
 
                     subgraph JS["ES6 JavaScript Modules"]
                         MAIN[main.js<br/>Entry point + utilities]
-                        DCJ[dashboard-controller.js<br/>Instance list, status polling]
+                        DC[dashboard-controller.js<br/>Instance list, status polling]
                         IC[instance-controller.js<br/>Instance CRUD, device picker]
-                        MC[matter-controller.js<br/>Discovery, commissioning, mapping]
-                        E2E[e2e-test-controller.js<br/>Scenario runner + SSE stream]
-                    end
-
-                    subgraph Components["JS Components"]
-                        DTM[device-tile-modal.js<br/>HomeKit-style device control]
                     end
 
                     subgraph CSS["Stylesheets"]
-                        VARS[variables.css<br/>CSS custom properties]
                         MCSS[main.css<br/>Component-based styles]
-                        MATCSS[matter.css<br/>Matter UI styles]
-                        E2ECSS[e2e-test.css<br/>Test runner styles]
-                        DTMCSS[device-tile-modal.css<br/>Tile modal styles]
                     end
 
                     subgraph API["FastAPI Backend"]
-                        REST[REST API Endpoints<br/>45 endpoints]
+                        REST[REST API Endpoints]
                     end
 
                     BASE --> DASH
                     BASE --> WIZ
                     BASE --> DET
-                    BASE --> MAT
-                    DASH --> DCJ
+                    DASH --> DC
                     WIZ --> IC
                     DET --> IC
-                    MAT --> MC
-                    IC --> DTM
-                    DCJ -->|jQuery AJAX| REST
+                    DC -->|jQuery AJAX| REST
                     IC -->|jQuery AJAX| REST
-                    MC -->|jQuery AJAX| REST
-                    E2E -->|SSE + AJAX| REST
                     BASE --> MAIN
-                    BASE --> VARS
                     BASE --> MCSS
 
                     style BASE fill:#667eea,color:#fff
-                    style DCJ fill:#28a745,color:#fff
+                    style DC fill:#28a745,color:#fff
                     style IC fill:#28a745,color:#fff
-                    style MC fill:#28a745,color:#fff
-                    style E2E fill:#28a745,color:#fff
-                    style DTM fill:#e83e8c,color:#fff
                     style REST fill:#fd7e14,color:#fff
             </div>
         </div>
@@ -1292,16 +1177,12 @@
         <div class="architecture-note">
             <h3>Frontend Patterns</h3>
             <ul>
-                <li><strong>ES6 Modules:</strong> <code>import</code>/<code>export</code> for code organization; controllers in <code>static/js/controllers/</code>, components in <code>static/js/components/</code></li>
+                <li><strong>ES6 Modules:</strong> <code>import</code>/<code>export</code> for code organization; controllers in <code>static/js/controllers/</code></li>
                 <li><strong>jQuery DOM:</strong> <code>$().on()</code> for events, <code>$.ajax()</code> for API calls</li>
                 <li><strong>Jinja2 Templates:</strong> Server-side rendering with <code>url_for(path=)</code> (Starlette convention)</li>
-                <li><strong>CSS Modular:</strong> <code>variables.css</code> for design tokens, <code>main.css</code> for layout, per-feature CSS files (matter, e2e-test, device-tile-modal)</li>
                 <li><strong>Instance Wizard:</strong> Multi-step flow: Select App Type → Name Instance → Pick Devices → Configure Settings → Review & Create</li>
                 <li><strong>Device Picker:</strong> Dynamic device list from <code>/api/devices?capability=X</code>, supports multiple selection per category</li>
-                <li><strong>Device Tile Modal:</strong> Clickable device chips in wizard open HomeKit-style tile modal with toggle, dimmer slider, and color picker (optimistic state updates)</li>
                 <li><strong>Dashboard Polling:</strong> Periodic status refresh to show instance activity</li>
-                <li><strong>Matter UI:</strong> Discovery scan, name correction, manual mapping, auto-commission with progress cards</li>
-                <li><strong>E2E Test UI:</strong> SSE-powered scenario runner with step-by-step progress, device state save/restore</li>
             </ul>
         </div>
 
@@ -1319,7 +1200,7 @@
                 flowchart LR
                     subgraph AWS["AWS Secrets Manager"]
                         SM[SMARTHOME Secret<br/>Ports, DB creds, API token]
-                        HB[HUBITAT Secret<br/>Hub tokens, IPs, app numbers<br/>Shared with 0_TILES, 0_MOBIUS.NVR]
+                        HB[HUBITAT Secret<br/>Hub tokens, IPs, app numbers<br/>Shared with 0_MOBIUS.TILES, 0_MOBIUS.NVR]
                     end
 
                     subgraph StartSH["start.sh"]
@@ -1371,7 +1252,7 @@
                 <tr>
                     <td><strong>HUBITAT</strong></td>
                     <td>HUBITAT_API_TOKEN_1-4, HUBITAT_HUB_IP_1-4, HUBITAT_API_NUMBER_1-4</td>
-                    <td>Shared with 0_TILES, 0_MOBIUS.NVR</td>
+                    <td>Shared with 0_MOBIUS.TILES, 0_MOBIUS.NVR</td>
                 </tr>
             </tbody>
         </table>
@@ -1399,13 +1280,10 @@
                 <li><strong>Template Method (BaseApp):</strong> Abstract base class defines lifecycle skeleton; subclasses implement specific behavior</li>
                 <li><strong>Observer/Pub-Sub:</strong> Device subscriptions table acts as a subscription registry; webhook router dispatches events to observers</li>
                 <li><strong>PostgREST as Data Layer:</strong> All CRUD goes through REST API — uniform pattern, no raw SQL in Python code</li>
-                <li><strong>Memoization with Source Tracking:</strong> Persistent state tracks user manual overrides with four-source model (<code>app</code>, <code>manual</code>, <code>pause</code>, <code>unknown</code>). Only verified commands update memoization.</li>
-                <li><strong>DeviceCommander (Nested Retries):</strong> ThreadPoolExecutor(8) with three-level retry: network (3x) → verification polling (3x, 1s) → full operation (2x, 2s). State verified via live Hubitat API poll.</li>
-                <li><strong>Matter Dual-Path:</strong> Commands sent to both Hubitat and Matter simultaneously. Hubitat is source-of-truth; Matter is fire-and-forget for lower latency.</li>
-                <li><strong>TTL-Based Caching + Background Refresh:</strong> Device cache expires after 5 minutes; webhook events reset TTL. Background service polls live state every 120s (Matter-first, Maker API fallback).</li>
+                <li><strong>Memoization:</strong> Persistent state (saved to DB) tracks user manual overrides to avoid fighting user control</li>
+                <li><strong>TTL-Based Caching:</strong> Device cache expires after 5 minutes; webhook events reset TTL</li>
                 <li><strong>Timeout Rescheduling:</strong> On motion re-trigger, reschedule existing timeout instead of creating new one (prevents light flickering)</li>
-                <li><strong>Health Monitoring:</strong> Periodic sensor health checks (10 min) with configurable fail-safe behavior; also enforces always-off/on rules</li>
-                <li><strong>E2E Testing:</strong> Dynamic scenario generation from instance config. Device state save/restore. SSE streaming for real-time progress.</li>
+                <li><strong>Health Monitoring:</strong> Periodic sensor health checks with configurable fail-safe behavior</li>
             </ul>
         </div>
 
@@ -1424,10 +1302,8 @@
                 <li><strong>Persistent Scheduling:</strong> APScheduler with database backup for reliable timeout and health check jobs</li>
                 <li><strong>AWS-Only Config:</strong> All secrets in AWS Secrets Manager, no .env files, start.sh handles injection</li>
                 <li><strong>Single Worker SSE:</strong> Uvicorn with one worker for SSE compatibility; async event loop for concurrency</li>
-                <li><strong>Shared Webhook Dispatcher:</strong> One dispatcher serves multiple projects (0_MOBIUS.SMART_HOME, 0_TILES) via fan-out</li>
-                <li><strong>Matter Protocol:</strong> Direct device control via python-matter-server with auto-discovery, commissioning, and dual-path command execution</li>
-                <li><strong>E2E Testing:</strong> Dynamic test scenario generation, device state save/restore, SSE-powered progress streaming</li>
-                <li><strong>Docker-First:</strong> 6 containers orchestrated by docker-compose.yml; full rebuild via deploy.sh</li>
+                <li><strong>Shared Webhook Dispatcher:</strong> One dispatcher serves multiple projects (0_MOBIUS.SMART_HOME, 0_MOBIUS.TILES) via fan-out</li>
+                <li><strong>Docker-First:</strong> 5 containers orchestrated by docker-compose.yml; full rebuild via deploy.sh</li>
             </ul>
         </div>
 
@@ -1435,14 +1311,13 @@
             <h3>File Structure Reference</h3>
             <ul>
                 <li><strong>Entry Point:</strong> <code>app.py</code> — FastAPI application, routes, lifespan</li>
-                <li><strong>Services:</strong> <code>services/hubitat_client.py</code>, <code>device_cache.py</code>, <code>device_commander.py</code>, <code>device_cache_refresh.py</code>, <code>instance_manager.py</code>, <code>webhook_router.py</code>, <code>scheduler_service.py</code>, <code>matter_discovery.py</code>, <code>e2e_test_runner.py</code>, <code>e2e_events.py</code></li>
+                <li><strong>Services:</strong> <code>services/hubitat_client.py</code>, <code>device_cache.py</code>, <code>instance_manager.py</code>, <code>webhook_router.py</code>, <code>scheduler_service.py</code></li>
                 <li><strong>App Logic:</strong> <code>apps/base_app.py</code> (abstract base), <code>apps/app_registry.py</code> (registration + DB sync)</li>
-                <li><strong>App Implementations:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code> (1,240 lines)</li>
+                <li><strong>App Implementations:</strong> <code>apps/advanced_motion_lighting/app_logic.py</code></li>
                 <li><strong>Models:</strong> <code>models/event.py</code> (DeviceEvent), <code>models/instance.py</code> (RuntimeInstanceState), <code>models/device.py</code> (HubitatDevice)</li>
-                <li><strong>Database Schema:</strong> <code>psql/init-db.sql</code> (414 lines, 10 tables)</li>
-                <li><strong>Frontend JS:</strong> <code>static/js/controllers/</code> (dashboard, instance, matter, e2e-test), <code>static/js/components/</code> (device-tile-modal)</li>
-                <li><strong>Frontend CSS:</strong> <code>static/css/variables.css</code>, <code>main.css</code>, <code>matter.css</code>, <code>e2e-test.css</code>, <code>device-tile-modal.css</code></li>
-                <li><strong>Templates:</strong> <code>templates/base.html</code>, <code>dashboard.html</code>, <code>instance_wizard.html</code>, <code>instance_detail.html</code>, <code>matter.html</code></li>
+                <li><strong>Database Schema:</strong> <code>psql/init-db.sql</code></li>
+                <li><strong>Frontend:</strong> <code>static/js/controllers/</code>, <code>static/css/main.css</code></li>
+                <li><strong>Templates:</strong> <code>templates/base.html</code>, <code>dashboard.html</code>, <code>instance_wizard.html</code>, <code>instance_detail.html</code></li>
                 <li><strong>Infrastructure:</strong> <code>docker-compose.yml</code>, <code>Dockerfile</code>, <code>start.sh</code>, <code>deploy.sh</code>, <code>nginx/nginx.conf</code></li>
                 <li><strong>Webhook Dispatcher:</strong> <code>services/webhook_dispatcher.py</code>, <code>Dockerfile.dispatcher</code> (hardlinks from <code>~/0_SCRIPTS/webhook_dispatcher/</code>)</li>
             </ul>
@@ -1451,11 +1326,11 @@
         <div class="alert-note">
             <h3>Access Points</h3>
             <ul>
-                <li><strong>HTTPS (primary):</strong> <code>https://<LAN_IP>:8445/</code></li>
+                <li><strong>HTTPS (primary):</strong> <code>https://<LAN_IP>:8444/</code></li>
                 <li><strong>Direct (no proxy):</strong> <code>http://<LAN_IP>:5001/</code></li>
-                <li><strong>OpenAPI docs:</strong> <code>https://<LAN_IP>:8445/docs</code></li>
+                <li><strong>OpenAPI docs:</strong> <code>https://<LAN_IP>:8444/docs</code></li>
                 <li><strong>Webhook endpoint:</strong> <code>http://<LAN_IP>:5050/api/webhook/event</code></li>
-                <li><strong>PostgREST API:</strong> <code>http://<LAN_IP>:3002/</code></li>
+                <li><strong>PostgREST API:</strong> <code>http://localhost:3003/</code></li>
                 <li><strong>Database:</strong> <code>docker exec -it smarthome-postgres psql -U smarthome_api -d smarthome</code></li>
             </ul>
         </div>
@@ -1467,10 +1342,7 @@
                 <li><strong>PostgREST Dependency:</strong> All CRUD goes through PostgREST; if it's down, the app cannot persist state</li>
                 <li><strong>Webhook Dispatcher Singleton:</strong> Only one instance runs system-wide (Docker container name collision); whichever project starts first wins</li>
                 <li><strong>Self-Signed Certs:</strong> Browsers show warnings; not suitable for public-facing deployment without proper CA certs</li>
-                <li><strong>Memoization Source Tracking:</strong> Override detection uses source field (<code>app</code>/<code>manual</code>/<code>pause</code>/<code>unknown</code>). Only verified commands update memo. Conservative: unknown sources skip enforcement.</li>
-                <li><strong>Matter Host Networking:</strong> matter-server requires <code>network_mode: host</code> for mDNS; cannot use Docker bridge network. Communicates with app via host IP:5580.</li>
-                <li><strong>Matter PASE Concurrency:</strong> Only one device can be commissioned at a time (PASE sessions cannot overlap). Sequential processing with exponential backoff.</li>
-                <li><strong>Docker Volume Naming:</strong> PostgreSQL data volume is pinned to <code>external: true, name: 0_smart_home_postgres_data</code> to survive project directory renames.</li>
+                <li><strong>Memoization Heuristic:</strong> User manual control detection uses timing (less than 3s = app echo); edge cases with very fast manual interactions</li>
             </ul>
         </div>
     </div>

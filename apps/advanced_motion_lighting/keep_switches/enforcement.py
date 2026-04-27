@@ -57,7 +57,7 @@ class KeepSwitchEnforcementMixin:
             if not enforce_off:
                 break
             try:
-                live_device = self.get_hubitat_for(device_id).get_device(device_id)
+                live_device = self.get_device_state_live(device_id)
                 if not live_device:
                     continue
                 device_name = self._extract_device_name(live_device, device_id)
@@ -103,7 +103,7 @@ class KeepSwitchEnforcementMixin:
             if not enforce_on:
                 break
             try:
-                live_device = self.get_hubitat_for(device_id).get_device(device_id)
+                live_device = self.get_device_state_live(device_id)
                 if not live_device:
                     continue
                 device_name = self._extract_device_name(live_device, device_id)

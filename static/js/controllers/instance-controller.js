@@ -41,6 +41,27 @@ export class InstanceWizardController {
         try {
             this.existingInstance = await api.get(`/instances/${this.instanceId}`);
 
+            // Kill the running instance immediately on edit entry.
+            // It will be restarted on save (with new data) or on
+            // cancel/navigation away (with current DB data).
+            await api.post(`/instances/${this.instanceId}/stop`);
+            this._instanceStopped = true;
+
+            // Guard: if the user leaves the page without saving, restart
+            // the instance from its current DB state.
+            this._beforeUnloadHandler = () => {
+                if (this._instanceStopped) {
+                    // Fire-and-forget with keepalive so the request survives
+                    // page unload (sendBeacon can't set Content-Type: json)
+                    fetch(`/api/instances/${this.instanceId}/start`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        keepalive: true
+                    });
+                }
+            };
+            window.addEventListener('beforeunload', this._beforeUnloadHandler);
+
             // Resolve app type name from ID
             const types = await api.get('/app-types');
             const matchedType = types.find(t => t.id === this.existingInstance.app_type_id);
@@ -73,6 +94,23 @@ export class InstanceWizardController {
         } catch (error) {
             console.error('Failed to load instance:', error);
             utils.notify(`Failed to load instance: ${error.message}`, 'error');
+        }
+    }
+
+    /**
+     * Restart the instance from DB and clean up the beforeunload guard.
+     * Called when the user cancels editing without saving.
+     */
+    async _restartInstance() {
+        if (!this._instanceStopped) return;
+        try {
+            await api.post(`/instances/${this.instanceId}/start`);
+        } catch (e) {
+            console.error('Failed to restart instance:', e);
+        }
+        this._instanceStopped = false;
+        if (this._beforeUnloadHandler) {
+            window.removeEventListener('beforeunload', this._beforeUnloadHandler);
         }
     }
 
@@ -205,6 +243,18 @@ export class InstanceWizardController {
 
         // Cache loaded devices per category for tag rendering
         this._devicesByCategory = {};
+
+        // Cross-category fallback: every device in the canonical `devices`
+        // table by id. Used when a saved selection references a device the
+        // current category's capability filter wouldn't return (so the
+        // chip can still render the label, never a bare numeric id).
+        this._allDevicesById = {};
+        try {
+            const all = await api.get('/canonical-devices');
+            for (const d of (all || [])) {
+                this._allDevicesById[String(d.id)] = d;
+            }
+        } catch (_) { /* fallback not critical, chips degrade gracefully */ }
 
         // Render each category
         let html = '';
@@ -354,9 +404,24 @@ export class InstanceWizardController {
                 tagsEl.innerHTML = '<span class="no-selection-hint">Click to select devices</span>';
             } else {
                 tagsEl.innerHTML = selected.map(id => {
-                    const dev = devices.find(d => String(d.id) === String(id));
-                    const name = dev ? (dev.label || dev.name) : id;
-                    return `<span class="device-tag"><span class="device-tag-name" data-device-id="${id}" data-device-name="${utils.escapeHtml(name)}">${utils.escapeHtml(name)}</span><span class="device-tag-remove" onclick="event.stopPropagation(); wizard.removeDevice('${categoryKey}', '${id}')">&times;</span></span>`;
+                    // First try the current category's device list (fast path).
+                    let dev = devices.find(d => String(d.id) === String(id));
+                    // Fallback: any device by canonical id, regardless of
+                    // capability — handles saved selections that reference
+                    // a device the category's capability filter wouldn't
+                    // return (or that's been miscategorised by a prior bug).
+                    if (!dev && this._allDevicesById) {
+                        dev = this._allDevicesById[String(id)];
+                    }
+                    const label = dev ? (dev.label || dev.name) : null;
+                    // Show "Label · #id" so the canonical id is always
+                    // visible. If no label, render "(unknown #id)" so it's
+                    // immediately obvious the row is broken.
+                    const display = label
+                        ? `${label} · #${id}`
+                        : `(unknown #${id})`;
+                    const cls = label ? 'device-tag' : 'device-tag device-tag-orphan';
+                    return `<span class="${cls}"><span class="device-tag-name" data-device-id="${id}" data-device-name="${utils.escapeHtml(label || '')}">${utils.escapeHtml(display)}</span><span class="device-tag-remove" onclick="event.stopPropagation(); wizard.removeDevice('${categoryKey}', '${id}')">&times;</span></span>`;
                 }).join('');
             }
         }
@@ -978,10 +1043,22 @@ export class InstanceWizardController {
         };
 
         try {
+            // Backend update_instance kills + restarts the instance.
+            // Clear the beforeunload guard so it doesn't also restart.
+            this._instanceStopped = false;
+            if (this._beforeUnloadHandler) {
+                window.removeEventListener('beforeunload', this._beforeUnloadHandler);
+            }
+
             await api.put(`/instances/${this.instanceId}`, payload);
             utils.notify('Automation updated successfully!');
             window.location.href = '/';
         } catch (error) {
+            // Save failed — re-arm the guard so the instance restarts on page leave
+            this._instanceStopped = true;
+            if (this._beforeUnloadHandler) {
+                window.addEventListener('beforeunload', this._beforeUnloadHandler);
+            }
             utils.notify(`Failed to update automation: ${error.message}`, 'error');
         }
     }

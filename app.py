@@ -1726,6 +1726,31 @@ async def hubs_page(request: Request):
 # invalidate the in-process lookup caches so changes take effect within
 # a single event-loop tick.
 
+@app.get("/api/canonical-devices", tags=["devices"])
+async def list_canonical_devices():
+    """
+    List all rows in the canonical `devices` table.
+    Used by the wizard to render chips with labels for any saved selection,
+    even when the selection's device id doesn't appear in the current
+    category's capability-filtered device list.
+    """
+    import requests as _requests
+    try:
+        r = _requests.get(
+            f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/devices",
+            params={"select": "id,label,hub_ip,hubitat_id", "order": "label"},
+            timeout=5,
+        )
+        if r.status_code == 200:
+            return r.json()
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"list_canonical_devices failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/hubs", tags=["hubs"])
 async def list_hubs():
     """List all configured Hubitat hubs (rows of hub_config)."""

@@ -411,11 +411,142 @@ CREATE INDEX IF NOT EXISTS idx_device_hub_mapping_protocol
     ON device_hub_mapping(protocol);
 
 -- =============================================================================
+-- DEVICES TABLE (canonical, mesh-phobic)
+-- =============================================================================
+-- Single source of truth for physical devices across all hubs.
+--
+-- Hub Mesh exposes the same physical sensor under DIFFERENT hubitat IDs on
+-- each hub (e.g. one motion sensor → ids 112 on Main, 456 on Home1, 1461 on
+-- Home2). The legacy device_cache used hubitat_device_id as PK, so cross-hub
+-- collisions silently overwrote each other. This table fixes that:
+--   - id: our own stable PK (used by subscriptions and selections)
+--   - (hub_ip, hubitat_id): the per-hub identity, UNIQUE so we never insert
+--     the same hub-id pair twice
+--   - name: physical device identity (Hubitat 'name'), UNIQUE so a meshed
+--     mirror trying to claim the same physical device under a second hub
+--     gets ON CONFLICT (name) DO NOTHING and the original keeps its row
+--
+-- Ingestion is double-defended:
+--   1. hub_classifier._is_mesh_linked() filters mirrors at fetch time
+--      (presence of hubMeshDisabled attribute = mirror, skip)
+--   2. UNIQUE (name) + ON CONFLICT DO NOTHING enforces it at the DB level
+
+CREATE TABLE IF NOT EXISTS devices (
+    -- Our own auto-incrementing primary key
+    id BIGSERIAL PRIMARY KEY,
+
+    -- Hub the device lives on (commands route here, events expected from here)
+    hub_ip VARCHAR(50) NOT NULL,
+
+    -- Device's id on that hub (Hubitat's internal id field)
+    hubitat_id VARCHAR(50) NOT NULL,
+
+    -- Hubitat 'name' field — canonical physical-device identity.
+    -- UNIQUE so meshed duplicates collide and are rejected on insert.
+    name VARCHAR(255) NOT NULL UNIQUE,
+
+    -- Hubitat 'label' (user-friendly, can change without breaking identity)
+    label VARCHAR(255),
+
+    -- Driver type (e.g. 'Generic Z-Wave Smart Switch')
+    device_type VARCHAR(200),
+
+    -- Radio protocol (zwave, zigbee, matter, lan, virtual, cloud, unknown)
+    protocol VARCHAR(30) DEFAULT 'unknown',
+
+    -- Capability list from Maker API (for filtering in device pickers)
+    capabilities JSONB DEFAULT '[]',
+
+    -- Current attribute snapshot (motion, switch, level, etc.)
+    attributes JSONB DEFAULT '{}',
+
+    -- When this row was last refreshed from the hub
+    last_synced_at TIMESTAMPTZ DEFAULT NOW(),
+
+    -- Belt + suspenders: a (hub_ip, hubitat_id) pair must also be unique.
+    UNIQUE (hub_ip, hubitat_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_devices_hub_hubitat
+    ON devices(hub_ip, hubitat_id);
+CREATE INDEX IF NOT EXISTS idx_devices_label
+    ON devices(label);
+CREATE INDEX IF NOT EXISTS idx_devices_capabilities
+    ON devices USING GIN (capabilities);
+
+
+-- =============================================================================
+-- DEVICES UPSERT FUNCTION (mesh-phobic)
+-- =============================================================================
+-- Single entry point for ingesting devices. Atomically:
+--   - INSERT a never-before-seen name
+--   - UPDATE attributes if the same (hub_ip, hubitat_id) reappears
+--   - SKIP_MESH if a different hub tries to claim the same name (mirror)
+--
+-- Returns (device_id, action) so the caller can log INSERT / UPDATE / SKIP_MESH.
+
+CREATE OR REPLACE FUNCTION upsert_device(
+    p_hub_ip       TEXT,
+    p_hubitat_id   TEXT,
+    p_name         TEXT,
+    p_label        TEXT,
+    p_device_type  TEXT,
+    p_protocol     TEXT,
+    p_capabilities JSONB,
+    p_attributes   JSONB
+) RETURNS TABLE(device_id BIGINT, action TEXT) AS $$
+DECLARE
+    v_existing_id         BIGINT;
+    v_existing_hub_ip     TEXT;
+    v_existing_hubitat_id TEXT;
+BEGIN
+    SELECT d.id, d.hub_ip, d.hubitat_id
+      INTO v_existing_id, v_existing_hub_ip, v_existing_hubitat_id
+      FROM devices d
+     WHERE d.name = p_name
+     LIMIT 1;
+
+    IF v_existing_id IS NULL THEN
+        INSERT INTO devices
+            (hub_ip, hubitat_id, name, label, device_type, protocol,
+             capabilities, attributes, last_synced_at)
+        VALUES
+            (p_hub_ip, p_hubitat_id, p_name, p_label, p_device_type,
+             p_protocol, p_capabilities, p_attributes, NOW())
+        RETURNING id INTO v_existing_id;
+        device_id := v_existing_id;
+        action    := 'INSERT';
+        RETURN NEXT;
+
+    ELSIF v_existing_hub_ip = p_hub_ip AND v_existing_hubitat_id = p_hubitat_id THEN
+        UPDATE devices SET
+            label          = p_label,
+            device_type    = p_device_type,
+            protocol       = p_protocol,
+            capabilities   = p_capabilities,
+            attributes     = p_attributes,
+            last_synced_at = NOW()
+        WHERE id = v_existing_id;
+        device_id := v_existing_id;
+        action    := 'UPDATE';
+        RETURN NEXT;
+
+    ELSE
+        device_id := v_existing_id;
+        action    := 'SKIP_MESH';
+        RETURN NEXT;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- =============================================================================
 -- GRANT PERMISSIONS TO ANONYMOUS ROLE (for PostgREST)
 -- =============================================================================
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO smarthome_anon;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO smarthome_anon;
+GRANT EXECUTE ON FUNCTION upsert_device TO smarthome_anon;
 
 -- =============================================================================
 -- TRIGGER: Update updated_at timestamp

@@ -2111,6 +2111,43 @@ async def get_instance_metrics(
     # Sort hourly buckets chronologically
     hourly_sorted = sorted(hourly_buckets.items())
 
+    # Enrich device_stats with canonical-→hub mapping so the UI can render
+    # a hyperlink to the device's edit page on the hub that natively owns
+    # it. event_log.hubitat_device_id contains the CANONICAL devices.id PK
+    # post-Phase-5 (the column name is legacy). For each id we look up the
+    # canonical row + its hub_config join in one batch.
+    if device_stats:
+        try:
+            import requests as _req
+            postgrest_url = os.environ.get(
+                "POSTGREST_URL", "http://postgrest:3001"
+            )
+            ids_csv = ",".join(str(k) for k in device_stats.keys())
+            resp = _req.get(
+                f"{postgrest_url}/devices",
+                params={
+                    "select": "id,hubitat_id,label,hub_config(hub_name,hub_ip)",
+                    "id": f"in.({ids_csv})",
+                },
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                for row in resp.json():
+                    cid = str(row["id"])
+                    if cid in device_stats:
+                        hub = row.get("hub_config") or {}
+                        device_stats[cid]["canonical_id"]  = row["id"]
+                        device_stats[cid]["hubitat_id"]    = row.get("hubitat_id")
+                        device_stats[cid]["hub_ip"]        = hub.get("hub_ip")
+                        device_stats[cid]["hub_name"]      = hub.get("hub_name")
+                        # Prefer the canonical label when we have it — the
+                        # event_log device_name may carry the mirror's
+                        # ' on Home N' suffix.
+                        if row.get("label"):
+                            device_stats[cid]["device_name"] = row["label"]
+        except Exception as e:
+            logger.warning(f"KPI device enrichment failed: {e}")
+
     # Instance metadata
     running = manager.get_running_instance(instance_id) is not None
 

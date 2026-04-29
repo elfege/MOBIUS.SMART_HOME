@@ -1754,6 +1754,50 @@ async def hubs_page(request: Request):
 # invalidate the in-process lookup caches so changes take effect within
 # a single event-loop tick.
 
+@app.get("/api/canonical-devices/{canonical_id}/recent-events", tags=["devices"])
+async def get_recent_events_for_device(
+    canonical_id: int,
+    event_type: Optional[str] = None,
+    limit: int = 20,
+):
+    """
+    Return the most recent N events for a canonical device, optionally
+    filtered by event_type. Used by the KPI modal's per-chip popover to
+    show the last raw values that produced the breakdown count.
+
+    event_log.hubitat_device_id contains the canonical PK post-Phase-5
+    (the column name is legacy).
+    """
+    import requests as _req
+    if limit <= 0 or limit > 200:
+        limit = 20
+    params = {
+        "hubitat_device_id": f"eq.{canonical_id}",
+        "order": "received_at.desc",
+        "limit": str(limit),
+        "select": "event_type,event_value,event_unit,received_at",
+    }
+    if event_type:
+        params["event_type"] = f"eq.{event_type}"
+    try:
+        r = _req.get(
+            f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/event_log",
+            params=params,
+            timeout=5,
+        )
+        if r.status_code == 200:
+            return r.json()
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"get_recent_events_for_device({canonical_id}, {event_type}) failed: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/canonical-devices", tags=["devices"])
 async def list_canonical_devices():
     """

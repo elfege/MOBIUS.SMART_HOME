@@ -72,6 +72,10 @@ export function closeKpiModal() {
     }
     _destroyCharts();
     _detachDebugStream();
+    // Drop the buffer so a re-open of the modal (same or different instance)
+    // starts with a clean log — _detachDebugStream intentionally preserves
+    // the buffer across mid-modal refreshes.
+    _debugBuffer = [];
 
     if (!$activeBackdrop) return;
     $activeBackdrop.removeClass('show');
@@ -85,14 +89,112 @@ export function closeKpiModal() {
 
 
 /* =============================================================================
+   Chip popover — recent events for a (canonical_id, event_type) pair
+   ============================================================================= */
+
+/**
+ * Open a small popover anchored to the clicked chip showing the last 20
+ * raw events for that (canonical_id, event_type) pair. Fetched from the
+ * /api/canonical-devices/{id}/recent-events endpoint, hits event_log.
+ */
+async function _showChipPopover(chipEl, instanceId) {
+    // Always close any existing popover first — single popover at a time.
+    $('.kpi-chip-popover').remove();
+
+    const canonicalId = chipEl.dataset.canonicalId;
+    const eventType = chipEl.dataset.eventType;
+    const deviceName = chipEl.dataset.deviceName || `#${canonicalId}`;
+    if (!canonicalId || !eventType) return;
+
+    // Position the popover anchored under the chip. Using fixed positioning
+    // avoids weird interactions with the modal's scroll container.
+    const rect = chipEl.getBoundingClientRect();
+    const $pop = $(
+        `<div class="kpi-chip-popover" style="position:fixed;left:${rect.left}px;top:${rect.bottom + 4}px;">`
+        + `<div class="kpi-chip-popover-header">`
+        + `<strong>${utils.escapeHtml(deviceName)}</strong> · `
+        + `<code>${utils.escapeHtml(eventType)}</code>`
+        + `<button class="kpi-chip-popover-close" type="button">&times;</button>`
+        + `</div>`
+        + `<div class="kpi-chip-popover-body">Loading…</div>`
+        + `</div>`
+    );
+    $('body').append($pop);
+
+    $pop.find('.kpi-chip-popover-close').on('click', () => $pop.remove());
+
+    // After insertion, nudge the popover left if it would overflow the viewport.
+    const popRect = $pop[0].getBoundingClientRect();
+    const overflowRight = popRect.right - window.innerWidth + 8;
+    if (overflowRight > 0) {
+        $pop.css('left', `${rect.left - overflowRight}px`);
+    }
+
+    let rows;
+    try {
+        rows = await api.get(
+            `/canonical-devices/${canonicalId}/recent-events`
+            + `?event_type=${encodeURIComponent(eventType)}&limit=20`
+        );
+    } catch (err) {
+        $pop.find('.kpi-chip-popover-body').html(
+            `<div class="kpi-chip-popover-error">Failed to load: ${utils.escapeHtml(err.message)}</div>`
+        );
+        return;
+    }
+
+    if (!rows || rows.length === 0) {
+        $pop.find('.kpi-chip-popover-body').html(
+            `<div class="kpi-chip-popover-empty">No events found in the recent window.</div>`
+        );
+        return;
+    }
+
+    const tbody = rows.map(r => {
+        const t = r.received_at
+            ? (() => {
+                const d = new Date(r.received_at);
+                return d.toLocaleTimeString([], { hour12: false })
+                    + '.' + String(d.getMilliseconds()).padStart(3, '0');
+            })()
+            : '?';
+        const v = utils.escapeHtml(String(r.event_value ?? ''));
+        const u = r.event_unit ? `<span class="kpi-chip-popover-unit">${utils.escapeHtml(r.event_unit)}</span>` : '';
+        return `<tr><td class="kpi-chip-popover-time">${t}</td><td class="kpi-chip-popover-value">${v} ${u}</td></tr>`;
+    }).join('');
+
+    $pop.find('.kpi-chip-popover-body').html(
+        `<table class="kpi-chip-popover-table">`
+        + `<thead><tr><th>When</th><th>Value</th></tr></thead>`
+        + `<tbody>${tbody}</tbody>`
+        + `</table>`
+        + `<div class="kpi-chip-popover-footer">${rows.length} most recent event${rows.length === 1 ? '' : 's'}</div>`
+    );
+}
+
+
+/* =============================================================================
    Debug Terminal — live event stream for the open KPI modal
    ============================================================================= */
 
 let _debugStream = null;
 let _debugPaused = false;
 
+// Persistent log buffer. The KPI modal auto-refreshes every 30s, which
+// rebuilds the modal's inner HTML — including the (empty) #kpi-debug-log
+// div. Without buffering, every refresh wipes all collected lines and the
+// SSE picks up only future events. We keep the rendered HTML for each
+// line here so _attachDebugStream() can replay it after the rebuild.
+// Cleared only on Clear button or closeKpiModal — never on refresh.
+let _debugBuffer = [];
+const _DEBUG_BUFFER_CAP = 1000;
+
 function _appendDebugLine(html) {
     if (_debugPaused) return;
+
+    _debugBuffer.push(html);
+    while (_debugBuffer.length > _DEBUG_BUFFER_CAP) _debugBuffer.shift();
+
     const log = document.getElementById('kpi-debug-log');
     if (!log) return;
     const wasAtBottom = (log.scrollHeight - log.scrollTop - log.clientHeight) < 40;
@@ -100,11 +202,24 @@ function _appendDebugLine(html) {
     div.className = 'kpi-debug-line';
     div.innerHTML = html;
     log.appendChild(div);
-    // Cap at 1000 lines so a long-open modal doesn't grow unbounded.
-    while (log.children.length > 1000) {
+    // Cap the DOM the same way as the buffer.
+    while (log.children.length > _DEBUG_BUFFER_CAP) {
         log.removeChild(log.firstChild);
     }
     if (wasAtBottom) log.scrollTop = log.scrollHeight;
+}
+
+function _replayDebugBuffer(log) {
+    if (!log || !_debugBuffer.length) return;
+    const frag = document.createDocumentFragment();
+    for (const html of _debugBuffer) {
+        const div = document.createElement('div');
+        div.className = 'kpi-debug-line';
+        div.innerHTML = html;
+        frag.appendChild(div);
+    }
+    log.appendChild(frag);
+    log.scrollTop = log.scrollHeight;
 }
 
 function _formatDebugTime(d) {
@@ -123,7 +238,11 @@ function _attachDebugStream(instanceId, metrics) {
         devById[String(cid)] = stats;
     }
 
-    const $log = $('#kpi-debug-log').empty();
+    // Do NOT empty the log — the surrounding HTML was just rebuilt by
+    // _loadAndRender, so the DOM div is already empty. Instead, replay the
+    // persistent buffer so lines collected before this refresh stay visible.
+    const $log = $('#kpi-debug-log');
+    _replayDebugBuffer($log[0]);
     const $status = $('#kpi-debug-status').text('Connecting…');
 
     // Reuse the existing per-instance SSE stream that the e2e modal also
@@ -181,6 +300,7 @@ function _attachDebugStream(instanceId, metrics) {
         $b.attr('data-paused', _debugPaused).text(_debugPaused ? 'Resume' : 'Pause');
     });
     $(document).off('click.kpi-debug-clear').on('click.kpi-debug-clear', '.kpi-debug-clear', function () {
+        _debugBuffer = [];
         const log = document.getElementById('kpi-debug-log');
         if (log) log.innerHTML = '';
     });
@@ -292,6 +412,21 @@ async function _loadAndRender($modal, instanceId, instanceLabel, isRefresh = fal
             : $modal.html('<button class="kpi-close">&times;</button>' + html);
 
         $modal.find('.kpi-close').off('click').on('click', closeKpiModal);
+
+        // Wire chip-click → recent-events popover. Delegated so it
+        // survives the 30s auto-refresh that rebuilds the modal HTML.
+        $modal.off('click.kpi-chip')
+              .on('click.kpi-chip', '.kpi-type-chip-clickable', function (e) {
+            e.stopPropagation();
+            _showChipPopover(this, instanceId);
+        });
+        // Click anywhere else closes the popover.
+        $modal.off('click.kpi-chip-close')
+              .on('click.kpi-chip-close', function (e) {
+            if (!$(e.target).closest('.kpi-chip-popover, .kpi-type-chip-clickable').length) {
+                $('.kpi-chip-popover').remove();
+            }
+        });
 
         // Render charts after DOM is ready
         requestAnimationFrame(() => {
@@ -554,8 +689,32 @@ function _renderDeviceTable(metrics) {
     devices.sort((a, b) => b[1].event_count - a[1].event_count);
 
     const rows = devices.map(([devId, stats]) => {
+        // Each chip is "<event_type>: <count>". Hover tooltip shows the
+        // last_value + a relative time so users can spot anomalies (e.g.
+        // a sensor reporting impossible values, or one that hasn't fired
+        // in days). Click expands a popover with the last 20 raw events
+        // for that (canonical_id, event_type) pair, fetched on demand.
+        const canonId = stats.canonical_id != null
+            ? String(stats.canonical_id)
+            : String(devId);
         const typeBreakdown = Object.entries(stats.type_breakdown || {})
-            .map(([t, d]) => `<span class="kpi-type-chip">${utils.escapeHtml(t)}: ${d.count}</span>`)
+            .map(([t, d]) => {
+                const lastVal = d.last_value != null ? String(d.last_value) : '?';
+                const lastAt = d.last_at
+                    ? new Date(d.last_at).toLocaleString([], { hour12: false })
+                    : '?';
+                const tip =
+                    `${d.count} event${d.count === 1 ? '' : 's'}`
+                    + ` · last value = ${lastVal}`
+                    + ` · ${lastAt}`
+                    + `\nClick to see recent events`;
+                return `<span class="kpi-type-chip kpi-type-chip-clickable"`
+                    + ` title="${utils.escapeHtml(tip)}"`
+                    + ` data-canonical-id="${utils.escapeHtml(canonId)}"`
+                    + ` data-event-type="${utils.escapeHtml(t)}"`
+                    + ` data-device-name="${utils.escapeHtml(stats.device_name || '')}">`
+                    + `${utils.escapeHtml(t)}: ${d.count}</span>`;
+            })
             .join(' ');
 
         const lastTime = stats.last_event_at

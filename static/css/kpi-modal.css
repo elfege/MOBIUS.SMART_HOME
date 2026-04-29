@@ -407,6 +407,109 @@
     margin: 0.1rem 0.15rem;
     white-space: nowrap;
 }
+.kpi-type-chip-clickable {
+    cursor: pointer;
+    user-select: none;
+}
+.kpi-type-chip-clickable:hover {
+    background: var(--color-primary-alpha-25, rgba(120, 170, 230, 0.25));
+    color: var(--color-text, #fff);
+}
+
+/* =============================================================================
+   Chip popover — recent events for a (canonical_id, event_type) pair
+   ============================================================================= */
+
+.kpi-chip-popover {
+    z-index: 10010;        /* above the KPI modal (10000) */
+    background: #181818;
+    color: #ddd;
+    border: 1px solid var(--border-color, #333);
+    border-radius: 6px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+    min-width: 320px;
+    max-width: 460px;
+    max-height: 60vh;
+    display: flex;
+    flex-direction: column;
+    font-size: 0.78rem;
+}
+.kpi-chip-popover-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--border-color, #333);
+    font-size: 0.85rem;
+}
+.kpi-chip-popover-header code {
+    font-family: var(--font-mono);
+    background: #2a2a2a;
+    padding: 0 0.35em;
+    border-radius: 2px;
+    color: #9ad;
+}
+.kpi-chip-popover-close {
+    margin-left: auto;
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted, #888);
+    font-size: 1.2rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 0.2em;
+}
+.kpi-chip-popover-close:hover {
+    color: var(--color-text, #fff);
+}
+.kpi-chip-popover-body {
+    overflow-y: auto;
+    padding: 0.4rem 0.6rem;
+}
+.kpi-chip-popover-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+}
+.kpi-chip-popover-table th {
+    text-align: left;
+    color: var(--color-text-muted, #888);
+    font-weight: 500;
+    padding: 0.2em 0.4em;
+    border-bottom: 1px solid #2a2a2a;
+}
+.kpi-chip-popover-table td {
+    padding: 0.18em 0.4em;
+    border-bottom: 1px solid #1a1a1a;
+}
+.kpi-chip-popover-time {
+    color: #6a6a6a;
+    white-space: nowrap;
+}
+.kpi-chip-popover-value {
+    font-weight: 500;
+    color: #ddd;
+}
+.kpi-chip-popover-unit {
+    color: var(--color-text-muted, #888);
+    margin-left: 0.25em;
+}
+.kpi-chip-popover-empty,
+.kpi-chip-popover-error {
+    padding: 0.5rem 0;
+    color: var(--color-text-muted, #888);
+    font-style: italic;
+}
+.kpi-chip-popover-error {
+    color: #e57373;
+}
+.kpi-chip-popover-footer {
+    padding: 0.3rem 0.6rem;
+    border-top: 1px solid var(--border-color, #333);
+    color: var(--color-text-muted, #888);
+    font-size: 0.7rem;
+}
 
 /* === Configuration Summary === */
 

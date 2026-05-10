@@ -106,6 +106,18 @@ class SchedulerService:
         if not self._scheduler.running:
             self._scheduler.start()
             self._restore_pending_jobs()
+
+            # Register a daily cleanup to keep scheduled_jobs table lean.
+            # Runs 1 hour after startup, then every 24 hours.
+            self._scheduler.add_job(
+                func=self._purge_old_records,
+                trigger='interval',
+                hours=24,
+                id='_system_purge_old_jobs',
+                replace_existing=True,
+                misfire_grace_time=3600,
+            )
+
             self.logger.info("Scheduler started")
 
     def shutdown(self, wait: bool = True) -> None:
@@ -435,13 +447,43 @@ class SchedulerService:
         """
         Restore pending jobs from database after restart.
 
-        Jobs that should have run while we were down are executed immediately.
-        Jobs scheduled for the future are re-added to the scheduler.
+        Timeout jobs are ephemeral — they were relative to a previous process
+        lifetime and are meaningless after a restart.  They are bulk-discarded
+        in a single request rather than iterated one-by-one (which caused
+        catastrophic slowdown when millions of missed jobs had accumulated).
+
+        Non-timeout jobs that should have run while we were down are marked
+        failed.  Jobs still in the future are re-added to the scheduler.
         """
         try:
+            # --- Step 1: Bulk-discard all pending timeout jobs in one request.
+            # Timeout jobs are ephemeral: motion-off timers etc. that were valid
+            # only during the previous process run.  Re-running them after a
+            # restart makes no sense and creates massive overhead.
+            discard_resp = requests.patch(
+                f"{self.postgrest_url}/scheduled_jobs",
+                params={"status": "eq.pending", "job_type": "eq.timeout"},
+                json={"status": "failed"},
+                headers={"Content-Type": "application/json"},
+                timeout=15
+            )
+            if discard_resp.status_code in (200, 204):
+                self.logger.info(
+                    "Bulk-discarded stale pending timeout jobs on startup"
+                )
+            else:
+                self.logger.warning(
+                    f"Bulk-discard of timeout jobs returned HTTP "
+                    f"{discard_resp.status_code}"
+                )
+
+            # --- Step 2: Also purge old terminal records to keep the table lean.
+            self._purge_old_records()
+
+            # --- Step 3: Restore remaining non-timeout pending jobs.
             response = requests.get(
                 f"{self.postgrest_url}/scheduled_jobs",
-                params={"status": "eq.pending"},
+                params={"status": "eq.pending", "job_type": "neq.timeout"},
                 timeout=10
             )
 
@@ -461,9 +503,10 @@ class SchedulerService:
                     execute_at = execute_at.replace(tzinfo=None)
 
                 if execute_at < now:
-                    # Job missed - mark as failed
+                    # Job missed — mark as failed in bulk later; warn and skip.
                     self.logger.warning(
-                        f"Job {job['job_id']} missed execution, marking failed"
+                        f"Non-timeout job {job['job_id']} missed execution, "
+                        f"marking failed"
                     )
                     requests.patch(
                         f"{self.postgrest_url}/scheduled_jobs",
@@ -473,16 +516,55 @@ class SchedulerService:
                         timeout=5
                     )
                 else:
-                    # Job in future - re-add to scheduler
-                    # Note: callback not available - job will need to be re-created
-                    # by the instance manager on startup
+                    # Job in future — re-add to scheduler.
                     self._jobs[job['job_id']] = job
                     self.logger.info(f"Restored pending job: {job['job_id']}")
 
-            self.logger.info(f"Restored {len(jobs)} pending jobs from database")
+            self.logger.info(
+                f"Restored {len(jobs)} non-timeout pending jobs from database"
+            )
 
         except Exception as e:
-            self.logger.error(f"Failed to restore pending jobs: {e}", exc_info=True)
+            self.logger.error(
+                f"Failed to restore pending jobs: {e}", exc_info=True
+            )
+
+    def _purge_old_records(self, max_age_hours: int = 24) -> None:
+        """
+        Delete terminal (completed/cancelled/failed) job records older than
+        max_age_hours from the database.
+
+        This prevents the scheduled_jobs table from growing without bound.
+        Called at startup and can also be wired to a recurring scheduler job.
+
+        Args:
+            max_age_hours: Records older than this are deleted (default 24 h).
+        """
+        try:
+            cutoff = (
+                datetime.now() - timedelta(hours=max_age_hours)
+            ).isoformat()
+            resp = requests.delete(
+                f"{self.postgrest_url}/scheduled_jobs",
+                params={
+                    "status": "in.(completed,cancelled,failed)",
+                    "created_at": f"lt.{cutoff}"
+                },
+                timeout=15
+            )
+            if resp.status_code in (200, 204):
+                self.logger.info(
+                    f"Purged terminal job records older than {max_age_hours}h"
+                )
+            else:
+                self.logger.warning(
+                    f"Purge of old records returned HTTP {resp.status_code}: "
+                    f"{resp.text[:200]}"
+                )
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to purge old job records: {e}", exc_info=True
+            )
 
 
 # Global scheduler instance

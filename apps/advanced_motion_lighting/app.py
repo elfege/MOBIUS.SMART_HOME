@@ -7,7 +7,7 @@ Assembles all mixins into the final AdvancedMotionLightingApp class.
 Each mixin lives in its own focused module (~100 lines each).
 
 Mixin map:
-  AMLMemoizationMixin          memoization.py         — key seeding, reset override, resume
+  AMLMemoizationMixin          memoization.py          — key seeding, reset override, resume
   AMLLifecycleMixin            lifecycle.py            — initialize()
   EventDispatchMixin           event_handlers/dispatch — on_event(), illuminance, contact
   MotionEventMixin             event_handlers/motion   — _handle_motion()

@@ -24,13 +24,21 @@ services:
       PYTHONUNBUFFERED: "1"
       WEBHOOK_PORT: "5050"
       WEBHOOK_TARGETS: ${WEBHOOK_TARGETS:-http://smarthome-app:${APP_INTERNAL_PORT:-5000}/api/webhook/event,http://tiles-app:80/api/webhook/event}
+    # Bind the dispatcher source from the host so edits persist across
+    # container recreates. Without this, the only copy of the script is
+    # the one COPYed into the image at build time, and changes (such as
+    # the _hub_ip injection that drives the router's mesh-mirror filter)
+    # silently revert every restart cycle. Image rebuild only required
+    # when dependencies change.
+    volumes:
+      - ./services/webhook_dispatcher.py:/app/webhook_dispatcher.py:ro
     restart: unless-stopped
     networks:
       - smarthome-net
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5050/health"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5050/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -91,6 +99,14 @@ services:
 
       # Device cache refresh (background verification against live state)
       DEVICE_CACHE_REFRESH_INTERVAL: "${DEVICE_CACHE_REFRESH_INTERVAL:-120}"
+
+      # Samsung TV client configuration
+      SAMSUNG_TV_IP: "${SAMSUNG_TV_IP:-<LAN_IP>}"
+      SAMSUNG_TV_MAC: "${SAMSUNG_TV_MAC:-D0C24EE93390}"
+      SAMSUNG_TV_TOKEN: "${SAMSUNG_TV_TOKEN:-}"
+      SAMSUNG_TV_SSL: "${SAMSUNG_TV_SSL:-true}"
+      SAMSUNG_TV_NAME: "${SAMSUNG_TV_NAME:-living_room_tv}"
+      SAMSUNG_TV_APP_NAME: "${SAMSUNG_TV_APP_NAME:-Smart Home Controller}"
     volumes:
       # Mount source for development (hot reload via uvicorn --reload)
       - ./app.py:/app/app.py
@@ -101,6 +117,7 @@ services:
       - ./templates:/app/templates
       - ./static:/app/static
       - app_logs:/app/logs
+      - ./state:/app/state
     depends_on:
       postgres:
         condition: service_healthy
@@ -110,7 +127,7 @@ services:
     networks:
       - smarthome-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${APP_INTERNAL_PORT:-5000}/api/health"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')"]
       interval: 30s
       timeout: 10s
       retries: 3

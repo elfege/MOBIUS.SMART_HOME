@@ -328,6 +328,62 @@ class DeviceCommander:
     # Core Execution (runs in thread)
     # =========================================================================
 
+    def _resolve_native_hub(
+        self,
+        device_id: str,
+        device_name: str,
+    ) -> tuple:
+        """
+        Resolve a CANONICAL devices.id to (client, hubitat_id, hub_name).
+
+        Post-Phase-5: app code passes canonical PKs. We look up the row in
+        the canonical `devices` table (joined against editable `hub_config`
+        for IP/name) and translate to the per-hub Hubitat id we need to
+        talk to that hub's Maker API. As a safety net for any caller that
+        still passes a Hubitat id, we also try get_hub_for_device(hubitat_id).
+
+        Args:
+            device_id: Canonical devices.id PK (preferred) or, transitionally,
+                       a Hubitat per-hub id.
+            device_name: Human-readable label for log context
+
+        Returns:
+            (HubitatClient, hubitat_id_to_send, hub_name)
+            Falls back to (default_client, device_id, 'default') if unresolvable.
+        """
+        try:
+            from services.hub_classifier import (
+                get_device_by_canonical_id, get_hub_for_device,
+            )
+            from services.hubitat_client import get_hub_client_by_ip
+
+            # Preferred path: canonical id lookup
+            row = get_device_by_canonical_id(device_id)
+            if not row or not row.get("hub_ip"):
+                # Transitional fallback: maybe caller still hands a hubitat id
+                row = get_hub_for_device(device_id)
+
+            if row and row.get("hub_ip"):
+                hub_ip = row["hub_ip"]
+                client = get_hub_client_by_ip(hub_ip)
+                if client:
+                    hubitat_id = str(row.get("hubitat_id") or device_id)
+                    if client is not self._client:
+                        logger.info(
+                            f"[Route] {_C}{device_name}{_R} → "
+                            f"hub {row.get('hub_name') or hub_ip} "
+                            f"({hub_ip}) canon={row.get('id')} "
+                            f"hubitat_id={hubitat_id} "
+                            f"label={row.get('label')!r}"
+                        )
+                    return (client, hubitat_id, row.get("hub_name") or hub_ip)
+        except Exception as e:
+            logger.debug(f"DB-backed hub lookup failed for {device_id}: {e}")
+
+        # Fallback: default client with original id (Hubitat will 404 loudly
+        # if it doesn't recognize the id — that's the correct failure mode).
+        return (self._client, device_id, "default")
+
     def _execute_command_sync(
         self,
         device_id: str,
@@ -337,10 +393,16 @@ class DeviceCommander:
         device_name: str,
     ) -> CommandResult:
         """
-        Synchronous command execution with nested retries.
+        Synchronous command execution with nested retries and native-hub routing.
 
         Runs in a ThreadPoolExecutor thread. This is the heart of the
         command execution pipeline:
+
+        NATIVE HUB ROUTING:
+            Before sending, resolves which hub physically owns the device
+            via device_hub_mapping. Sends command to the native hub's
+            Maker API directly (bypasses Hub Mesh relay for lower latency).
+            Falls back to MAIN hub if no mapping exists.
 
         OUTER LOOP (operation retries):
             Send command to hub (INNER retries in _make_request)
@@ -351,7 +413,7 @@ class DeviceCommander:
             Sleep operation_delay, re-send
 
         Args:
-            device_id: Hubitat device ID
+            device_id: Hubitat device ID (as known on MAIN hub)
             command: Command name
             args: Optional arguments
             verify: Whether to verify state after command
@@ -360,6 +422,11 @@ class DeviceCommander:
         Returns:
             CommandResult with full execution details
         """
+        # Resolve native hub — may remap device_id and client
+        effective_client, effective_device_id, hub_name = (
+            self._resolve_native_hub(device_id, device_name)
+        )
+
         result = CommandResult(
             device_id=device_id,
             device_name=device_name or device_id,
@@ -374,10 +441,11 @@ class DeviceCommander:
         # Set device status to UPDATING
         self._set_device_status(device_id, CommandStatus.UPDATING)
 
+        hub_tag = f" @{hub_name}" if hub_name and hub_name != "default" else ""
         log_prefix = (
             f"[Cmd] {_C}{device_name or device_id}{_R} "
-            f"({device_id}/{command}"
-            f"{'/' + str(args) if args else ''})"
+            f"({effective_device_id}/{command}"
+            f"{'/' + str(args) if args else ''}{hub_tag})"
         )
 
         try:
@@ -386,8 +454,11 @@ class DeviceCommander:
 
                 # ----- SEND COMMAND -----
                 # Inner retries (network) handled by hubitat_client._make_request()
+                # Uses effective_client (native hub) and effective_device_id
                 try:
-                    send_ok = self._client.send_command(device_id, command, args)
+                    send_ok = effective_client.send_command(
+                        effective_device_id, command, args
+                    )
                 except Exception as e:
                     logger.error(
                         f"{log_prefix} send_command exception on attempt "
@@ -449,7 +520,10 @@ class DeviceCommander:
 
                     try:
                         # LIVE API call — bypasses cache
-                        device_data = self._client.get_device(device_id)
+                        # Use effective_client + effective_device_id for native hub
+                        device_data = effective_client.get_device(
+                            effective_device_id
+                        )
                         if device_data:
                             actual = extract_attribute(
                                 device_data, expected['attribute']

@@ -41,6 +41,27 @@ export class InstanceWizardController {
         try {
             this.existingInstance = await api.get(`/instances/${this.instanceId}`);
 
+            // Kill the running instance immediately on edit entry.
+            // It will be restarted on save (with new data) or on
+            // cancel/navigation away (with current DB data).
+            await api.post(`/instances/${this.instanceId}/stop`);
+            this._instanceStopped = true;
+
+            // Guard: if the user leaves the page without saving, restart
+            // the instance from its current DB state.
+            this._beforeUnloadHandler = () => {
+                if (this._instanceStopped) {
+                    // Fire-and-forget with keepalive so the request survives
+                    // page unload (sendBeacon can't set Content-Type: json)
+                    fetch(`/api/instances/${this.instanceId}/start`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        keepalive: true
+                    });
+                }
+            };
+            window.addEventListener('beforeunload', this._beforeUnloadHandler);
+
             // Resolve app type name from ID
             const types = await api.get('/app-types');
             const matchedType = types.find(t => t.id === this.existingInstance.app_type_id);
@@ -73,6 +94,23 @@ export class InstanceWizardController {
         } catch (error) {
             console.error('Failed to load instance:', error);
             utils.notify(`Failed to load instance: ${error.message}`, 'error');
+        }
+    }
+
+    /**
+     * Restart the instance from DB and clean up the beforeunload guard.
+     * Called when the user cancels editing without saving.
+     */
+    async _restartInstance() {
+        if (!this._instanceStopped) return;
+        try {
+            await api.post(`/instances/${this.instanceId}/start`);
+        } catch (e) {
+            console.error('Failed to restart instance:', e);
+        }
+        this._instanceStopped = false;
+        if (this._beforeUnloadHandler) {
+            window.removeEventListener('beforeunload', this._beforeUnloadHandler);
         }
     }
 
@@ -205,6 +243,18 @@ export class InstanceWizardController {
 
         // Cache loaded devices per category for tag rendering
         this._devicesByCategory = {};
+
+        // Cross-category fallback: every device in the canonical `devices`
+        // table by id. Used when a saved selection references a device the
+        // current category's capability filter wouldn't return (so the
+        // chip can still render the label, never a bare numeric id).
+        this._allDevicesById = {};
+        try {
+            const all = await api.get('/canonical-devices');
+            for (const d of (all || [])) {
+                this._allDevicesById[String(d.id)] = d;
+            }
+        } catch (_) { /* fallback not critical, chips degrade gracefully */ }
 
         // Render each category
         let html = '';
@@ -354,9 +404,47 @@ export class InstanceWizardController {
                 tagsEl.innerHTML = '<span class="no-selection-hint">Click to select devices</span>';
             } else {
                 tagsEl.innerHTML = selected.map(id => {
-                    const dev = devices.find(d => String(d.id) === String(id));
-                    const name = dev ? (dev.label || dev.name) : id;
-                    return `<span class="device-tag"><span class="device-tag-name" data-device-id="${id}" data-device-name="${utils.escapeHtml(name)}">${utils.escapeHtml(name)}</span><span class="device-tag-remove" onclick="event.stopPropagation(); wizard.removeDevice('${categoryKey}', '${id}')">&times;</span></span>`;
+                    // First try the current category's device list (fast path).
+                    let dev = devices.find(d => String(d.id) === String(id));
+                    // Fallback: any device by canonical id, regardless of
+                    // capability — handles saved selections that reference
+                    // a device the category's capability filter wouldn't
+                    // return (or that's been miscategorised by a prior bug).
+                    if (!dev && this._allDevicesById) {
+                        dev = this._allDevicesById[String(id)];
+                    }
+                    const label = dev ? (dev.label || dev.name) : null;
+                    // Show "Label · #id" so the canonical id is always
+                    // visible. If no label, render "(unknown #id)" so it's
+                    // immediately obvious the row is broken.
+                    const display = label
+                        ? `${label} · #${id}`
+                        : `(unknown #${id})`;
+                    const cls = label ? 'device-tag' : 'device-tag device-tag-orphan';
+
+                    // The chip's label part is a link to the device's edit
+                    // page on its OWN hub — multi-hub aware. Hub IP comes
+                    // from the canonical devices row (joined with hub_config
+                    // server-side), hubitat_id is the per-hub Hubitat id.
+                    // Falls back to a plain span when we don't know the hub.
+                    let nameNode;
+                    if (dev && dev.hub_ip && dev.hubitat_id != null) {
+                        const href = `http://${dev.hub_ip}/device/edit/${dev.hubitat_id}`;
+                        nameNode =
+                            `<a class="device-tag-name" `
+                            + `href="${href}" target="_blank" rel="noopener" `
+                            + `data-device-id="${id}" data-device-name="${utils.escapeHtml(label || '')}" `
+                            + `title="Open ${utils.escapeHtml(label || '')} on hub ${dev.hub_ip}" `
+                            + `onclick="event.stopPropagation()">`
+                            + `${utils.escapeHtml(display)}</a>`;
+                    } else {
+                        nameNode =
+                            `<span class="device-tag-name" `
+                            + `data-device-id="${id}" `
+                            + `data-device-name="${utils.escapeHtml(label || '')}">`
+                            + `${utils.escapeHtml(display)}</span>`;
+                    }
+                    return `<span class="${cls}">${nameNode}<span class="device-tag-remove" onclick="event.stopPropagation(); wizard.removeDevice('${categoryKey}', '${id}')">&times;</span></span>`;
                 }).join('');
             }
         }
@@ -509,7 +597,7 @@ export class InstanceWizardController {
             id: 'timing',
             title: 'Timing',
             description: 'Motion timeout configuration',
-            keys: ['noMotionTime', 'timeUnit']
+            keys: ['noMotionTime', 'timeUnit', 'timeWithMode', 'modeTimeouts']
         },
         {
             id: 'dimming',
@@ -534,6 +622,12 @@ export class InstanceWizardController {
             title: 'Always Off / Always On',
             description: 'Mode restrictions for keep-off and keep-on enforcement',
             keys: ['keepOffModes', 'keepOnModes']
+        },
+        {
+            id: 'restrictions',
+            title: 'Restrictions',
+            description: 'Mode-based exclusion (app pauses in selected modes)',
+            keys: ['exclusionModes']
         },
         {
             id: 'advanced',
@@ -628,6 +722,9 @@ export class InstanceWizardController {
 
         // Populate mode checkboxes for array-type settings
         this._populateModeCheckboxes(container);
+
+        // Bind timeWithMode toggle to show/hide per-mode timeouts
+        this._bindModeTimeoutToggle(container);
     }
 
     /**
@@ -673,10 +770,11 @@ export class InstanceWizardController {
             menu.innerHTML = checkboxes;
 
             // Update label text showing selection count
+            const emptyLabel = dd.dataset.emptyLabel || 'All modes';
             const updateLabel = () => {
                 const checked = Array.from(menu.querySelectorAll('input:checked'));
                 if (checked.length === 0) {
-                    labelSpan.textContent = 'All modes';
+                    labelSpan.textContent = emptyLabel;
                 } else {
                     labelSpan.textContent = checked.map(c => c.value).join(', ');
                 }
@@ -708,6 +806,92 @@ export class InstanceWizardController {
                     m.style.display = 'none';
                 });
             }
+        });
+    }
+
+    /**
+     * Bind the timeWithMode checkbox to show/hide per-mode timeout inputs.
+     * @param {HTMLElement} container - Settings form container
+     */
+    _bindModeTimeoutToggle(container) {
+        const twmCheckbox = container.querySelector('[name="timeWithMode"]');
+        const mtContainer = container.querySelector('#mode-timeouts-container');
+        if (!twmCheckbox || !mtContainer) return;
+
+        // Show/hide based on current value
+        const show = !!this.settings.timeWithMode;
+        mtContainer.style.display = show ? '' : 'none';
+        if (show) {
+            this._populateModeTimeouts(mtContainer);
+        }
+
+        // Toggle handler
+        twmCheckbox.addEventListener('change', () => {
+            const enabled = twmCheckbox.checked;
+            mtContainer.style.display = enabled ? '' : 'none';
+            if (enabled) {
+                this._populateModeTimeouts(mtContainer);
+            }
+        });
+    }
+
+    /**
+     * Fetch modes and render per-mode timeout inputs.
+     * Shows ALL modes with a number input next to each.
+     * Empty input = use default timeout.
+     * @param {HTMLElement} container - The #mode-timeouts-container element
+     */
+    async _populateModeTimeouts(container) {
+        const listEl = container.querySelector('#mode-timeouts-list');
+        if (!listEl) return;
+
+        let modes = [];
+        try {
+            modes = await $.get('/api/modes');
+        } catch (e) {
+            console.error('Failed to fetch modes for timeouts:', e);
+            listEl.innerHTML = '<span class="error-text">Failed to load modes</span>';
+            return;
+        }
+
+        const modeTimeouts = this.settings.modeTimeouts || {};
+        const defaultTimeout = this.settings.noMotionTime || 5;
+
+        listEl.innerHTML = modes.map(mode => {
+            const name = mode.name || mode;
+            const value = modeTimeouts[name] !== undefined ? modeTimeouts[name] : '';
+            const badge = mode.active
+                ? ' <span class="mode-active-badge">(current)</span>'
+                : '';
+            return `
+                <div class="mode-timeout-row">
+                    <span class="mode-timeout-label">
+                        ${utils.escapeHtml(name)}${badge}
+                    </span>
+                    <input type="number"
+                           class="mode-timeout-input"
+                           data-mode="${utils.escapeHtml(name)}"
+                           value="${value}"
+                           placeholder="${defaultTimeout}"
+                           min="1">
+                </div>
+            `;
+        }).join('');
+
+        // Bind change handlers
+        listEl.querySelectorAll('.mode-timeout-input').forEach(input => {
+            input.addEventListener('change', () => {
+                if (!this.settings.modeTimeouts) {
+                    this.settings.modeTimeouts = {};
+                }
+                const modeName = input.dataset.mode;
+                const val = parseInt(input.value, 10);
+                if (isNaN(val) || input.value.trim() === '') {
+                    delete this.settings.modeTimeouts[modeName];
+                } else {
+                    this.settings.modeTimeouts[modeName] = val;
+                }
+            });
         });
     }
 
@@ -747,13 +931,29 @@ export class InstanceWizardController {
                        ${prop.minimum !== undefined ? `min="${prop.minimum}"` : ''}
                        ${prop.maximum !== undefined ? `max="${prop.maximum}"` : ''}>
             `;
+        } else if (prop.type === 'object' && key === 'modeTimeouts') {
+            // Per-mode timeout widget (shown/hidden by timeWithMode toggle)
+            input = `
+                <div id="mode-timeouts-container" style="display:none;">
+                    <label>${utils.escapeHtml(title)}</label>
+                    <p class="help-text">${utils.escapeHtml(description)}</p>
+                    <div id="mode-timeouts-list">
+                        <span class="help-text">Loading modes...</span>
+                    </div>
+                </div>
+            `;
+            // Skip the outer form-group description since we embed it
+            return `<div class="form-group">${input}</div>`;
         } else if (prop.type === 'array' && prop.items && prop.items.type === 'string') {
             // Dropdown with checkboxes for multi-select
+            // For exclusionModes, empty = "None" (no exclusion).
+            // For keepOff/keepOn modes, empty = "All modes".
+            const emptyLabel = key === 'exclusionModes' ? 'None' : 'All modes';
             input = `
                 <label>${utils.escapeHtml(title)}</label>
-                <div class="mode-dropdown" data-mode-key="${key}">
+                <div class="mode-dropdown" data-mode-key="${key}" data-empty-label="${emptyLabel}">
                     <button type="button" class="mode-dropdown-toggle">
-                        <span class="mode-dropdown-label">All modes</span>
+                        <span class="mode-dropdown-label">${emptyLabel}</span>
                         <span class="mode-dropdown-arrow">&#9662;</span>
                     </button>
                     <div class="mode-dropdown-menu" style="display:none;">
@@ -866,10 +1066,22 @@ export class InstanceWizardController {
         };
 
         try {
+            // Backend update_instance kills + restarts the instance.
+            // Clear the beforeunload guard so it doesn't also restart.
+            this._instanceStopped = false;
+            if (this._beforeUnloadHandler) {
+                window.removeEventListener('beforeunload', this._beforeUnloadHandler);
+            }
+
             await api.put(`/instances/${this.instanceId}`, payload);
             utils.notify('Automation updated successfully!');
             window.location.href = '/';
         } catch (error) {
+            // Save failed — re-arm the guard so the instance restarts on page leave
+            this._instanceStopped = true;
+            if (this._beforeUnloadHandler) {
+                window.addEventListener('beforeunload', this._beforeUnloadHandler);
+            }
             utils.notify(`Failed to update automation: ${error.message}`, 'error');
         }
     }

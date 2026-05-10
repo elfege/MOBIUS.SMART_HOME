@@ -6,7 +6,8 @@
  * creates a new E2ETestModal instance.
  *
  * Architecture:
- *   - Direct WebSocket to Hub4 (ws://<LAN_IP>/eventsocket)
+ *   - Per-hub EventSocket WebSockets (one per distinct hub the
+ *     instance's selected devices live on, ws://<hub_ip>/eventsocket)
  *     for live device state updates. No auth token needed (LAN-only).
  *   - SSE from backend (/api/e2e/events/stream) for test execution
  *     progress (step start/complete, scenario summaries).
@@ -20,17 +21,29 @@
 
 import { api, utils } from '../main.js';
 
-/** Hub4 EventSocket URL (unauthenticated on LAN) */
-const HUB4_WS_URL = 'ws://<LAN_IP>/eventsocket';
+// Per-hub EventSocket — one WebSocket per distinct hub the instance's
+// devices live on. The previous hardcoded HUB4_WS_URL only ever saw
+// events for devices natively paired with hub4 (<LAN_IP>); after
+// the multi-hub canonical-PK refactor, instances commonly span Home 1/2/3
+// and never hit Hub 4 at all, leaving the e2e modal blind to live state.
+//
+// EventSocket is unauthenticated on LAN, so the URL only needs the hub IP.
 
-/** Hub4 base URL for device edit pages */
-const HUB4_DEVICE_URL = 'http://<LAN_IP>/device/edit';
-
-/** Max WebSocket reconnect attempts before giving up */
+/** Max WebSocket reconnect attempts before giving up — applied per hub. */
 const MAX_WS_RECONNECT = 10;
 
-/** Base delay for WebSocket reconnect (multiplied by attempt #) */
+/** Base delay for WebSocket reconnect (multiplied by attempt #), per hub. */
 const WS_RECONNECT_BASE_MS = 2000;
+
+/** Build the hub-specific EventSocket URL. */
+function _hubWsUrl(hubIp) {
+    return `ws://${hubIp}/eventsocket`;
+}
+
+/** Build the hub-specific device-edit URL for a Hubitat per-hub id. */
+function _hubDeviceEditUrl(hubIp, hubitatId) {
+    return `http://${hubIp}/device/edit/${hubitatId}`;
+}
 
 
 /**
@@ -49,8 +62,28 @@ export class E2ETestModal {
         this.instanceId = instanceId;
         this.instanceLabel = instanceLabel;
 
-        /** @type {WebSocket|null} Hub4 EventSocket connection */
-        this.hubSocket = null;
+        /**
+         * Per-hub EventSocket connections, keyed by hub_ip.
+         * One WebSocket per distinct hub that owns any of this instance's
+         * devices. Populated in _connectHubWebSockets() after _loadDevices.
+         * @type {Object<string, WebSocket>}
+         */
+        this.hubSockets = {};
+
+        /**
+         * Per-hub reconnect counters, keyed by hub_ip.
+         * @type {Object<string, number>}
+         */
+        this._hubReconnectAttempts = {};
+
+        /**
+         * Reverse-lookup maps used by the WebSocket message handler:
+         *   _hubitatToCanon[hub_ip][hubitat_id] = { canonical_id, label }
+         * Built once at modal open via /api/canonical-devices, scoped to
+         * just this instance's selections.
+         * @type {Object<string, Object<string, {canonical_id: string, label: string}>>}
+         */
+        this._hubitatToCanon = {};
 
         /** @type {EventSource|null} Backend SSE connection */
         this.eventSource = null;
@@ -70,11 +103,12 @@ export class E2ETestModal {
         /** @type {Set<string>} All device IDs for this instance (for WS filtering) */
         this._instanceDeviceIds = new Set();
 
-        /** @type {number} WebSocket reconnect attempt counter */
-        this._wsReconnectAttempts = 0;
-
-        /** @type {number|null} WebSocket reconnect timer */
-        this._wsReconnectTimer = null;
+        /**
+         * Per-hub reconnect timers, keyed by hub_ip. Used so close() can
+         * clear them all when the modal goes away.
+         * @type {Object<string, number>}
+         */
+        this._hubReconnectTimers = {};
 
         // Ensure persisted state bucket exists for this instance
         if (!_persistedState[this.instanceId]) {
@@ -98,8 +132,10 @@ export class E2ETestModal {
         // Restore any persisted log lines and scenario results from prior session
         this._restorePersistedState();
 
-        // Connect real-time channels after device IDs are known
-        this._connectHubWebSocket();
+        // Connect real-time channels after device IDs are known.
+        // _connectHubWebSockets resolves canonical PKs → per-hub
+        // (hub_ip, hubitat_id) tuples and opens one EventSocket per hub.
+        this._connectHubWebSockets();
         this._connectSSE();
     }
 
@@ -166,15 +202,15 @@ export class E2ETestModal {
      * Close the modal: disconnect everything, remove DOM, clean up.
      */
     close() {
-        // Disconnect WebSocket
-        if (this.hubSocket) {
-            this.hubSocket.close();
-            this.hubSocket = null;
+        // Disconnect every per-hub WebSocket and clear all reconnect timers.
+        for (const ws of Object.values(this.hubSockets || {})) {
+            try { ws.close(); } catch (_) { /* already closed */ }
         }
-        if (this._wsReconnectTimer) {
-            clearTimeout(this._wsReconnectTimer);
-            this._wsReconnectTimer = null;
+        this.hubSockets = {};
+        for (const t of Object.values(this._hubReconnectTimers || {})) {
+            clearTimeout(t);
         }
+        this._hubReconnectTimers = {};
 
         // Disconnect SSE
         if (this.eventSource) {
@@ -214,9 +250,12 @@ export class E2ETestModal {
                         <div class="e2e-modal-actions">
                             <span class="e2e-ws-status">
                                 <span class="e2e-ws-dot" id="e2e-ws-dot-${this.instanceId}"></span>
-                                <span id="e2e-ws-label-${this.instanceId}">Hub4 WS</span>
+                                <span id="e2e-ws-label-${this.instanceId}">Hubs …</span>
                             </span>
                             <button class="btn btn-primary btn-small e2e-run-all">Run All Tests</button>
+                            <button class="btn btn-danger btn-small e2e-stop" disabled title="Stop the currently-running scenario">Stop</button>
+                            <button class="btn btn-secondary btn-small e2e-reset" title="Clear scenario pass/fail markers">Reset Results</button>
+                            <button class="btn btn-secondary btn-small e2e-clear-log" title="Clear the terminal log pane">Clear Log</button>
                             <button class="btn btn-secondary btn-small e2e-close">Close</button>
                         </div>
                     </div>
@@ -264,6 +303,15 @@ export class E2ETestModal {
 
         // Run All button
         $modal.find('.e2e-run-all').on('click', () => this._runAllScenarios());
+
+        // Stop button — cancel any in-flight scenario run
+        $modal.find('.e2e-stop').on('click', () => this._stopRun());
+
+        // Reset Results — clear pass/fail markers from scenario rows in the UI
+        $modal.find('.e2e-reset').on('click', () => this._resetScenarioResults());
+
+        // Clear Log — wipe the terminal pane (does NOT cancel a run)
+        $modal.find('.e2e-clear-log').on('click', () => this._clearLog());
 
         // Backdrop click intentionally disabled — prevents accidental
         // loss of test results. Use the Close button or Escape key instead.
@@ -417,6 +465,24 @@ export class E2ETestModal {
                 }
             }
 
+            // Resolve hub metadata from the canonical devices table so the
+            // device tiles can link to the correct per-device hub edit page
+            // (multi-hub aware) AND so _connectHubWebSockets reuses the same
+            // map without a second fetch. Keyed by canonical PK because
+            // device_selections store canonical PKs post-Phase-5.
+            this._canonicalById = {};
+            try {
+                const all = await api.get('/canonical-devices') || [];
+                for (const d of all) {
+                    this._canonicalById[String(d.id)] = d;
+                }
+            } catch (err) {
+                this._appendLog(
+                    `Could not load canonical devices map: ${err.message}`,
+                    'warning'
+                );
+            }
+
             this._renderDevices();
             this._appendLog(`Loaded ${this._instanceDeviceIds.size} devices`, 'info');
         } catch (err) {
@@ -444,122 +510,225 @@ export class E2ETestModal {
     }
 
     // =========================================================================
-    // Hub4 WebSocket (direct to Hubitat EventSocket)
+    // Per-hub EventSockets (multi-hub aware)
     // =========================================================================
 
     /**
-     * Connect to Hub4's EventSocket for live device state.
-     * No auth needed — unauthenticated on LAN.
-     * Events are filtered to only process this instance's devices.
+     * Build the hubitat-id → canonical-id reverse-lookup map for this
+     * instance's devices, keyed by hub_ip. Then open one EventSocket per
+     * distinct hub. Called after _loadDevices() so we know which canonical
+     * ids the instance subscribes to.
      */
-    _connectHubWebSocket() {
-        if (this.hubSocket) {
-            this.hubSocket.close();
+    async _connectHubWebSockets() {
+        // Tear down any stragglers from a previous open.
+        for (const ws of Object.values(this.hubSockets || {})) {
+            try { ws.close(); } catch (_) {}
+        }
+        this.hubSockets = {};
+        this._hubReconnectAttempts = {};
+        this._hubReconnectTimers = this._hubReconnectTimers || {};
+        for (const t of Object.values(this._hubReconnectTimers)) clearTimeout(t);
+        this._hubReconnectTimers = {};
+
+        // Resolve canonical PKs (from _instanceDeviceIds) → hub_ip + hubitat_id
+        // by hitting /api/canonical-devices. Single roundtrip.
+        const ids = Array.from(this._instanceDeviceIds);
+        if (ids.length === 0) {
+            this._setWsStatus(false, 0, 0);
+            return;
         }
 
-        this._appendLog(`Connecting to Hub4 EventSocket...`, 'ws');
-
+        let allDevices = [];
         try {
-            this.hubSocket = new WebSocket(HUB4_WS_URL);
-
-            this.hubSocket.onopen = () => {
-                this._wsReconnectAttempts = 0;
-                this._setWsStatus(true);
-                this._appendLog('Hub4 WebSocket connected', 'ws');
-            };
-
-            this.hubSocket.onmessage = (event) => {
-                try {
-                    const evt = JSON.parse(event.data);
-                    this._handleHubEvent(evt);
-                } catch (e) {
-                    // Ignore malformed messages
-                }
-            };
-
-            this.hubSocket.onerror = () => {
-                this._setWsStatus(false);
-            };
-
-            this.hubSocket.onclose = () => {
-                this._setWsStatus(false);
-                this._scheduleWsReconnect();
-            };
-        } catch (e) {
-            this._appendLog(`WebSocket connection error: ${e.message}`, 'fail');
-            this._setWsStatus(false);
+            allDevices = await api.get('/canonical-devices') || [];
+        } catch (err) {
+            this._appendLog(`Failed to resolve hubs: ${err.message}`, 'fail');
+            this._setWsStatus(false, 0, 0);
+            return;
         }
+
+        // Build hub_ip → { hubitat_id → {canonical_id, label} } and the
+        // distinct list of hubs to connect to.
+        this._hubitatToCanon = {};
+        const hubIps = new Set();
+        const idsAsString = new Set(ids.map(String));
+        for (const d of allDevices) {
+            if (!idsAsString.has(String(d.id))) continue;
+            if (!d.hub_ip || d.hubitat_id == null) continue;
+            hubIps.add(d.hub_ip);
+            if (!this._hubitatToCanon[d.hub_ip]) this._hubitatToCanon[d.hub_ip] = {};
+            this._hubitatToCanon[d.hub_ip][String(d.hubitat_id)] = {
+                canonical_id: String(d.id),
+                label: d.label,
+            };
+        }
+
+        if (hubIps.size === 0) {
+            this._appendLog(
+                `No hub mappings found for instance devices — live state disabled`,
+                'warning'
+            );
+            this._setWsStatus(false, 0, 0);
+            return;
+        }
+
+        for (const hubIp of hubIps) {
+            this._connectOneHub(hubIp);
+        }
+        // Status text reflects N/M hubs connected (updates per onopen/onclose).
+        this._setWsStatus(false, 0, hubIps.size);
     }
 
     /**
-     * Handle a raw event from Hub4 EventSocket.
-     * Only processes events for devices in this instance.
+     * Open the EventSocket for one specific hub_ip and wire its handlers.
+     * Stored in this.hubSockets so close() can iterate them all.
+     */
+    _connectOneHub(hubIp) {
+        if (this.hubSockets[hubIp]) {
+            try { this.hubSockets[hubIp].close(); } catch (_) {}
+        }
+
+        this._appendLog(`Connecting to ${hubIp} EventSocket…`, 'ws');
+
+        let ws;
+        try {
+            ws = new WebSocket(_hubWsUrl(hubIp));
+        } catch (e) {
+            this._appendLog(`WebSocket error for ${hubIp}: ${e.message}`, 'fail');
+            this._refreshWsStatus();
+            return;
+        }
+        this.hubSockets[hubIp] = ws;
+
+        ws.onopen = () => {
+            this._hubReconnectAttempts[hubIp] = 0;
+            this._appendLog(`${hubIp} EventSocket connected`, 'ws');
+            this._refreshWsStatus();
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const evt = JSON.parse(event.data);
+                this._handleHubEvent(evt, hubIp);
+            } catch (_) { /* ignore malformed */ }
+        };
+
+        ws.onerror = () => {
+            this._refreshWsStatus();
+        };
+
+        ws.onclose = () => {
+            // Drop from active map BEFORE scheduling reconnect so the
+            // status indicator reflects reality during the gap.
+            if (this.hubSockets[hubIp] === ws) {
+                delete this.hubSockets[hubIp];
+            }
+            this._refreshWsStatus();
+            this._scheduleHubReconnect(hubIp);
+        };
+    }
+
+    /**
+     * Handle one raw EventSocket message, scoped to the hub it came from.
+     * Filters to events for this instance's devices on THAT hub specifically:
+     * mesh-mirror events arriving on a hub other than the device's native
+     * hub are ignored here, matching the backend's mesh-mirror-drop policy.
      *
      * Event format from Hubitat:
      *   { deviceId, name, value, displayName, descriptionText, ... }
      */
-    _handleHubEvent(evt) {
-        const deviceId = String(evt.deviceId || '');
-        if (!deviceId || !this._instanceDeviceIds.has(deviceId)) {
-            return; // Not our device
-        }
+    _handleHubEvent(evt, hubIp) {
+        const hubitatId = String(evt.deviceId || '');
+        if (!hubitatId) return;
+
+        const hubMap = this._hubitatToCanon[hubIp];
+        const meta = hubMap ? hubMap[hubitatId] : null;
+        if (!meta) return; // Not one of our devices on this hub
 
         const attrName = evt.name;
         const attrValue = evt.value;
+        const canonId = meta.canonical_id;
 
-        // Update cached state
-        if (!this._deviceStateMap[deviceId]) {
-            this._deviceStateMap[deviceId] = {};
-        }
-        this._deviceStateMap[deviceId][attrName] = attrValue;
+        // Update cached state — keyed by the same id the device tile uses
+        // (which is the Maker API per-hub id from _loadDevices).
+        if (!this._deviceStateMap[hubitatId]) this._deviceStateMap[hubitatId] = {};
+        this._deviceStateMap[hubitatId][attrName] = attrValue;
 
-        // Update DOM
-        this._updateDeviceTile(deviceId, attrName, attrValue);
+        // Update DOM (tile keyed on Maker API per-hub id).
+        this._updateDeviceTile(hubitatId, attrName, attrValue);
 
-        // Log to terminal
-        const displayName = evt.displayName || `Device ${deviceId}`;
+        const displayName = evt.displayName || meta.label || `Device #${canonId}`;
         this._appendLog(
-            `${displayName}: ${attrName} = ${attrValue}`,
+            `${displayName} [canon #${canonId} · ${hubIp} #${hubitatId}]: ${attrName} = ${attrValue}`,
             'device'
         );
     }
 
     /**
-     * Update WebSocket status indicator in modal header.
-     * @param {boolean} connected
+     * Update the WebSocket status indicator in the modal header to reflect
+     * the count of currently-connected hubs vs total expected.
+     * @param {boolean} _legacyConnected (ignored, retained for callers)
+     * @param {number=} connected explicit connected count (optional)
+     * @param {number=} total explicit total count (optional)
      */
-    _setWsStatus(connected) {
+    _setWsStatus(_legacyConnected, connected, total) {
         const $dot = $(`#e2e-ws-dot-${this.instanceId}`);
         const $label = $(`#e2e-ws-label-${this.instanceId}`);
-        if (connected) {
+        if (connected == null) {
+            connected = Object.values(this.hubSockets).filter(
+                ws => ws && ws.readyState === WebSocket.OPEN
+            ).length;
+        }
+        if (total == null) {
+            total = Math.max(
+                Object.keys(this.hubSockets).length,
+                Object.keys(this._hubitatToCanon || {}).length
+            );
+        }
+        if (connected > 0 && connected === total) {
             $dot.removeClass('disconnected').addClass('connected');
-            $label.text('Hub4 WS');
+            $label.text(`Hubs ${connected}/${total}`);
+        } else if (connected > 0) {
+            $dot.removeClass('disconnected').addClass('connected');
+            $label.text(`Hubs ${connected}/${total} (partial)`);
         } else {
             $dot.removeClass('connected').addClass('disconnected');
-            $label.text('Hub4 WS (disconnected)');
+            $label.text(total > 0 ? `Hubs 0/${total} (disconnected)` : 'No hubs');
         }
     }
 
+    /** Recompute the status badge from current socket states. */
+    _refreshWsStatus() {
+        this._setWsStatus(false);
+    }
+
     /**
-     * Schedule WebSocket reconnect with exponential backoff.
+     * Schedule a per-hub reconnect with exponential backoff.
      */
-    _scheduleWsReconnect() {
-        if (this._wsReconnectAttempts >= MAX_WS_RECONNECT) {
-            this._appendLog('Hub4 WebSocket: max reconnect attempts reached', 'fail');
+    _scheduleHubReconnect(hubIp) {
+        const attempts = (this._hubReconnectAttempts[hubIp] || 0) + 1;
+        if (attempts > MAX_WS_RECONNECT) {
+            this._appendLog(
+                `${hubIp} EventSocket: max reconnect attempts reached`, 'fail'
+            );
             return;
         }
         if (!this.modalEl) return; // Modal closed
 
-        this._wsReconnectAttempts++;
-        const delay = WS_RECONNECT_BASE_MS * this._wsReconnectAttempts;
+        this._hubReconnectAttempts[hubIp] = attempts;
+        const delay = WS_RECONNECT_BASE_MS * attempts;
         this._appendLog(
-            `Hub4 WebSocket reconnecting in ${delay / 1000}s (attempt ${this._wsReconnectAttempts})`,
+            `${hubIp} EventSocket reconnecting in ${delay / 1000}s (attempt ${attempts})`,
             'warning'
         );
 
-        this._wsReconnectTimer = setTimeout(() => {
+        this._hubReconnectTimers = this._hubReconnectTimers || {};
+        if (this._hubReconnectTimers[hubIp]) {
+            clearTimeout(this._hubReconnectTimers[hubIp]);
+        }
+        this._hubReconnectTimers[hubIp] = setTimeout(() => {
             if (this.modalEl) {
-                this._connectHubWebSocket();
+                this._connectOneHub(hubIp);
             }
         }, delay);
     }
@@ -628,6 +797,8 @@ export class E2ETestModal {
             );
         } else if (type === 'scenario_start') {
             this._appendLog(`--- Starting: ${data.scenario_name} ---`, 'info');
+            // Stop is enabled while any scenario is in flight.
+            this._setRunning(true);
         } else if (type === 'scenario_complete') {
             this._updateScenarioSummary(data);
             const status = data.failed > 0 ? 'fail' : 'pass';
@@ -636,6 +807,10 @@ export class E2ETestModal {
                 + `${data.failed} failed, ${data.skipped} skipped ---`,
                 status
             );
+            // Run-all chains scenario_complete events; the next scenario
+            // will re-enable Stop via scenario_start. End-of-run leaves
+            // Stop disabled, which is the correct idle state.
+            this._setRunning(false);
         } else if (type === 'wait_tick') {
             // Could show countdown in UI; for now just ignore
         }
@@ -672,14 +847,28 @@ export class E2ETestModal {
                 const label = device.label || device.name || `Device ${did}`;
                 const attrs = this._extractAttributes(device);
 
+                // Per-device hub metadata threaded through by the backend
+                // (services/hub_classifier.get_device_by_canonical_id) so
+                // the tile can link to the correct hub. Falls back to the
+                // Maker API per-hub id if hub info is missing.
+                const hubIp = device._hub_ip || '';
+                const hubName = device._hub_name || '';
+                const hubitatId = String(device._hubitat_id ?? did);
+                const canonicalId = device._canonical_id != null ? String(device._canonical_id) : did;
+                const linkUrl = hubIp
+                    ? _hubDeviceEditUrl(hubIp, hubitatId)
+                    : null;
+
                 // Cache initial state
                 this._deviceStateMap[did] = attrs;
 
                 html += `<div class="e2e-device-tile" data-device-id="${did}">`;
-                html += `  <a class="e2e-hub-link" href="${HUB4_DEVICE_URL}/${did}" target="_blank" rel="noopener" title="Open in Hubitat"></a>`;
+                if (linkUrl) {
+                    html += `  <a class="e2e-hub-link" href="${linkUrl}" target="_blank" rel="noopener" title="Open ${utils.escapeHtml(label)} on ${utils.escapeHtml(hubName || hubIp)}"></a>`;
+                }
                 html += `  <div class="e2e-device-header">`;
                 html += `    <span class="e2e-device-name" title="${utils.escapeHtml(label)}">${utils.escapeHtml(label)}</span>`;
-                html += `    <span class="e2e-device-id">#${did}</span>`;
+                html += `    <span class="e2e-device-id" title="canon #${canonicalId} · ${hubName || hubIp || 'hub'} #${hubitatId}">#${canonicalId}</span>`;
                 html += `  </div>`;
                 html += `  <div class="e2e-device-attrs" id="e2e-attrs-${did}">`;
                 html += this._renderAttributes(attrs, category);
@@ -804,7 +993,7 @@ export class E2ETestModal {
 
     /**
      * Update a single device tile's attribute display.
-     * Called when a real-time event arrives from Hub4 WebSocket.
+     * Called when a real-time event arrives from any per-hub EventSocket.
      *
      * @param {string} deviceId
      * @param {string} attrName
@@ -1001,10 +1190,12 @@ export class E2ETestModal {
         $(`#e2e-steps-${scenarioId} .e2e-step-message`).text('');
         $(`#e2e-summary-${scenarioId}`).text('');
 
+        this._setRunning(true);
         try {
             await api.post(`/e2e/test/${this.instanceId}/run/${scenarioId}`);
         } catch (err) {
             this._appendLog(`Failed to start scenario: ${err.message}`, 'fail');
+            this._setRunning(false);
         }
     }
 
@@ -1020,11 +1211,72 @@ export class E2ETestModal {
         $(this.modalEl).find('.e2e-step-message').text('');
         $(this.modalEl).find('.e2e-scenario-summary').text('');
 
+        this._setRunning(true);
         try {
             await api.post(`/e2e/test/${this.instanceId}/run-all`);
         } catch (err) {
             this._appendLog(`Failed to start tests: ${err.message}`, 'fail');
+            this._setRunning(false);
         }
+    }
+
+    /**
+     * Toggle Run-All disabled / Stop enabled while a run is in flight.
+     * The SSE 'scenario_complete' / 'all_complete' / 'cancelled' handlers
+     * call this with false to flip back when the run unwinds.
+     */
+    _setRunning(isRunning) {
+        const $modal = $(this.modalEl);
+        $modal.find('.e2e-run-all').prop('disabled', isRunning);
+        $modal.find('.e2e-stop').prop('disabled', !isRunning);
+    }
+
+    /**
+     * Cancel any currently-running scenario via the backend stop endpoint.
+     * Backend sets the runner's cancel flag; the next step boundary will
+     * mark remaining steps as SKIP and emit scenario_complete.
+     */
+    async _stopRun() {
+        try {
+            const res = await api.post(`/e2e/test/${this.instanceId}/stop`);
+            if (res?.stopped) {
+                this._appendLog('Stop requested — current step will finish, then cancel', 'warning');
+            } else {
+                this._appendLog('No active run to stop', 'info');
+                this._setRunning(false);
+            }
+        } catch (err) {
+            this._appendLog(`Stop failed: ${err.message}`, 'fail');
+        }
+    }
+
+    /**
+     * Reset all scenario pass/fail markers in the UI without touching
+     * the backend or the log pane. Use to clear visual noise before a
+     * fresh run.
+     */
+    _resetScenarioResults() {
+        const $modal = $(this.modalEl);
+        $modal.find('.e2e-step-indicator')
+            .removeClass('e2e-pass e2e-fail e2e-skip e2e-running')
+            .addClass('e2e-pending');
+        $modal.find('.e2e-step-message').text('');
+        $modal.find('.e2e-scenario-summary').text('');
+        // Wipe the persisted scenarioResults too so the markers don't
+        // come back when the modal is closed/reopened.
+        const state = _persistedState[this.instanceId];
+        if (state) state.scenarioResults = {};
+        this._appendLog('Scenario results reset', 'info');
+    }
+
+    /**
+     * Wipe the terminal log pane and the persisted log buffer.
+     */
+    _clearLog() {
+        const logEl = document.getElementById(`e2e-log-${this.instanceId}`);
+        if (logEl) logEl.innerHTML = '';
+        const state = _persistedState[this.instanceId];
+        if (state) state.logLines = [];
     }
 
     // =========================================================================
@@ -1039,7 +1291,13 @@ export class E2ETestModal {
      *                        'warning', 'device', 'command', 'ws'
      */
     _appendLog(message, type) {
-        const time = new Date().toLocaleTimeString();
+        // HH:MM:SS.mmm — milliseconds matter for ordering closely-spaced
+        // events (e.g. mesh-mirror duplicates that arrive within the same
+        // second).
+        const _now = new Date();
+        const time =
+            _now.toLocaleTimeString([], { hour12: false })
+            + '.' + String(_now.getMilliseconds()).padStart(3, '0');
         const cssClass = `e2e-log-${type}`;
         const lineHtml =
             `<div class="e2e-log-line ${cssClass}">`

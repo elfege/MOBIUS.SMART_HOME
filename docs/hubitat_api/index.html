@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hubitat API Documentation - 0_MOBIUS.SMART_HOME</title>
+    <link rel="stylesheet" href="hubitat_docs.css">
+</head>
+<body>
+<div class="container">
+    <nav class="breadcrumb"><a href="../index.html">Project Docs</a> &raquo; Hubitat API</nav>
+
+    <h1>Hubitat API Documentation</h1>
+    <p class="last-updated">Reference documentation for the Hubitat Maker API and device ecosystem.<br>Compiled February 2026.</p>
+
+    <div class="card-grid">
+        <div class="card">
+            <h3><a href="maker_api_reference.html">Maker API Reference</a></h3>
+            <p>
+                Complete endpoint reference: device discovery, command execution, attributes,
+                events, modes, HSM, hub variables, webhook configuration, and event payload format.
+            </p>
+            <span class="tag">Endpoints</span>
+            <span class="tag">Webhooks</span>
+            <span class="tag">Authentication</span>
+        </div>
+
+        <div class="card">
+            <h3><a href="device_capabilities.html">Device Capabilities</a></h3>
+            <p>
+                All standard Hubitat capabilities: sensors, actuators, buttons, audio, thermostats,
+                locks, alarms. Each with required attributes (types + values) and commands (parameters).
+            </p>
+            <span class="tag">Capabilities</span>
+            <span class="tag">Attributes</span>
+            <span class="tag">Commands</span>
+        </div>
+
+        <div class="card">
+            <h3><a href="device_response_examples.html">Device Response Examples</a></h3>
+            <p>
+                Real JSON responses from <code>/devices/{id}</code> for 30+ device types:
+                switches, dimmers, bulbs, motion sensors, contact sensors, locks, sirens,
+                power monitors, keypads, and more.
+            </p>
+            <span class="tag">JSON</span>
+            <span class="tag">Examples</span>
+            <span class="tag">Parsing</span>
+        </div>
+
+        <div class="card">
+            <h3><a href="webhook_dispatcher.html">Webhook Dispatcher</a></h3>
+            <p>
+                Architecture of our webhook fan-out service: how Hubitat events flow from
+                the Maker API through the dispatcher to multiple apps (SMART_HOME, TILES).
+            </p>
+            <span class="tag">Architecture</span>
+            <span class="tag">Events</span>
+            <span class="tag">Docker</span>
+        </div>
+    </div>
+
+    <h2>Quick Reference</h2>
+
+    <h3>Base URL Format</h3>
+    <div class="code-block">
+<pre>http://[HUB_IP]/apps/api/[APP_ID]/[ENDPOINT]?access_token=[TOKEN]</pre>
+    </div>
+
+    <h3>Our Hub Configuration</h3>
+    <table>
+        <thead>
+            <tr><th>Hub</th><th>IP</th><th>Maker API App#</th><th>Env Var Suffix</th></tr>
+        </thead>
+        <tbody>
+            <tr><td>Main Hub</td><td><LAN_IP></td><td>268</td><td><code>_MAIN</code></td></tr>
+            <tr><td>Other Hub 1</td><td><LAN_IP></td><td>1717</td><td><code>_OTHER_HUB_1</code></td></tr>
+            <tr><td>Other Hub 2</td><td><LAN_IP></td><td>2151</td><td><code>_OTHER_HUB_2</code></td></tr>
+            <tr><td>Other Hub 3</td><td><LAN_IP></td><td>1269</td><td><code>_OTHER_HUB_3</code></td></tr>
+        </tbody>
+    </table>
+
+    <h3>Common Endpoints</h3>
+    <table>
+        <thead>
+            <tr><th>Endpoint</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+            <tr><td><code>/devices</code></td><td>List authorized devices (id, name, label)</td></tr>
+            <tr><td><code>/devices/all</code></td><td>Full device details (capabilities, attributes, commands)</td></tr>
+            <tr><td><code>/devices/{id}</code></td><td>Single device details</td></tr>
+            <tr><td><code>/devices/{id}/{command}</code></td><td>Execute device command</td></tr>
+            <tr><td><code>/devices/{id}/{command}/{value}</code></td><td>Command with parameter(s)</td></tr>
+            <tr><td><code>/devices/{id}/events</code></td><td>Recent device events</td></tr>
+            <tr><td><code>/devices/{id}/attribute/{name}</code></td><td>Single attribute value</td></tr>
+            <tr><td><code>/modes</code></td><td>List/get active mode</td></tr>
+            <tr><td><code>/modes/{id}</code></td><td>Set mode</td></tr>
+            <tr><td><code>/hsm</code></td><td>Get HSM status</td></tr>
+            <tr><td><code>/hsm/{command}</code></td><td>Arm/disarm HSM</td></tr>
+            <tr><td><code>/hubvariables</code></td><td>List hub variables</td></tr>
+            <tr><td><code>/postURL/{url}</code></td><td>Set webhook URL</td></tr>
+        </tbody>
+    </table>
+
+    <h3>Webhook Event Payload</h3>
+    <div class="response-example">
+<pre>{
+  "content": {
+    "name": "motion",
+    "value": "active",
+    "displayName": "Office Motion",
+    "deviceId": "23",
+    "descriptionText": "Office Motion motion is active",
+    "unit": null,
+    "type": null,
+    "data": null
+  }
+}</pre>
+    </div>
+
+    <footer>
+        <p>
+            Official docs: <a href="https://docs2.hubitat.com/en/apps/maker-api">docs2.hubitat.com/en/apps/maker-api</a>
+            &nbsp;|&nbsp;
+            Community: <a href="https://community.hubitat.com/">community.hubitat.com</a>
+        </p>
+    </footer>
+</div>
+</body>
+</html>

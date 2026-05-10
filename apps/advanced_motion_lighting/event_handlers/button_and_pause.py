@@ -5,13 +5,37 @@ Button events always reach this handler even when the instance is paused
 (they are the unpause mechanism). Only the configured buttonEventType is
 acted on — other event types (pushed vs held vs doubleTapped) are ignored
 to prevent double-toggle when Hubitat sends multiple event types for one press.
+
+Per-device debounce against driver retransmits
+----------------------------------------------
+The Hubitat button driver (Lutron Pico / Zigbee scene controllers) emits
+multiple `held=1` events per physical long-press — typically a hold-while-
+held retransmit at roughly 2-second cadence. The investigation report at
+`docs/README_investigation_lighting_reliability_1746851000.md` (2026-05-10)
+verified this is NOT a mesh-mirror leak — all duplicates arrive from the
+same native hub with the same canonical id, so the router's mesh-drop has
+nothing to filter. The fix is a per-(instance, device) cooldown window
+that suppresses duplicates within ~2.5s.
 """
 
+import time
+
 from apps.advanced_motion_lighting.constants import _C, _R
+
+# Cooldown window in seconds. Tuned just above the observed ~2s driver
+# retransmit cadence. Legitimate repeated user presses inside this window
+# are rare (a button hold is one logical action regardless of how many
+# retransmit pulses the driver emits).
+_BUTTON_DEBOUNCE_SECS = 2.5
 
 
 class ButtonAndPauseMixin:
     """Mixin: button-triggered pause/resume and pause-switch actuation."""
+
+    # Per-device cooldown tracker: device_id -> monotonic timestamp of last
+    # accepted press. Lazily created in _handle_button so existing instances
+    # don't need an __init__ change.
+    _button_last_accepted: dict
 
     def _handle_button(self, event) -> None:
         """
@@ -30,6 +54,22 @@ class ButtonAndPauseMixin:
                 f" — ignoring (configured for '{expected_type}')"
             )
             return
+
+        # Suppress driver retransmits within the cooldown window.
+        if not hasattr(self, '_button_last_accepted'):
+            self._button_last_accepted = {}
+        now = time.monotonic()
+        last = self._button_last_accepted.get(event.device_id, 0.0)
+        elapsed = now - last
+        if elapsed < _BUTTON_DEBOUNCE_SECS:
+            self.logger.info(
+                f"Button {event.event_type}: {_C}{event.device_name}{_R}"
+                f" — driver retransmit suppressed "
+                f"({elapsed:.2f}s since last accepted press, "
+                f"cooldown {_BUTTON_DEBOUNCE_SECS}s)"
+            )
+            return
+        self._button_last_accepted[event.device_id] = now
 
         self.logger.info(f"Button {event.event_type}: {_C}{event.device_name}{_R}")
 

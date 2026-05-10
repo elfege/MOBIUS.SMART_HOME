@@ -196,27 +196,25 @@ class HubitatClient:
         This returns more detail than get_all_devices(), including current
         state of all attributes (e.g., switch: 'on', level: 75).
 
+        NOTE: post-Phase-5 the device cache is keyed by canonical devices.id
+        PKs, not by per-hub Hubitat ids. HubitatClient operates per-hub with
+        Hubitat ids and has no canonical context, so we no longer touch the
+        cache from inside this method. Callers that want the cached state
+        should hit DeviceCache directly with a canonical id (or use
+        HubitatMixin.get_device_state).
+
         Args:
-            device_id: Hubitat device ID
-            use_cache: Whether to use cached data
+            device_id: Hubitat per-hub device ID
+            use_cache: Ignored (kept for signature compatibility)
 
         Returns:
             Device dictionary with full details or None if not found
         """
-        if use_cache and self.cache:
-            cached = self.cache.get_device(device_id)
-            if cached:
-                return cached
-
         device = self._make_request(f"/devices/{device_id}")
 
         if device is None:
             self.logger.warning(f"Device not found: {device_id}")
             return None
-
-        # Update cache with this device's data
-        if self.cache:
-            self.cache.update_device(device_id, device)
 
         return device
 
@@ -497,3 +495,115 @@ def get_default_client() -> HubitatClient:
     )
 
     return HubitatClient(config)
+
+
+# =========================================================================
+# Multi-Hub Client Registry
+# =========================================================================
+# Maintains a pool of HubitatClient instances, one per configured hub.
+# Used by DeviceCommander for native-hub command routing.
+
+import threading
+
+_hub_clients: Dict[str, HubitatClient] = {}
+_hub_clients_lock = threading.Lock()
+
+# Map hub names to env var suffixes
+_HUB_ENV_MAP = {
+    "MAIN": "MAIN",
+    "Home 1": "OTHER_HUB_1",
+    "Home 2": "OTHER_HUB_2",
+    "Home 3": "OTHER_HUB_3",
+}
+
+
+def get_hub_client(hub_name: str) -> Optional[HubitatClient]:
+    """
+    Get or create a HubitatClient for a specific hub.
+
+    Thread-safe: uses a lock for lazy initialization.
+    Clients are cached and reused (connection pooling via requests.Session).
+
+    Args:
+        hub_name: Hub name as used in device_hub_mapping
+                  (e.g., 'MAIN', 'Home 1', 'Home 2', 'Home 3')
+
+    Returns:
+        HubitatClient for the specified hub, or None if not configured
+    """
+    # Fast path: already initialized
+    client = _hub_clients.get(hub_name)
+    if client is not None:
+        return client
+
+    with _hub_clients_lock:
+        # Double-check after acquiring lock
+        client = _hub_clients.get(hub_name)
+        if client is not None:
+            return client
+
+        suffix = _HUB_ENV_MAP.get(hub_name)
+        if not suffix:
+            logging.getLogger(__name__).warning(
+                f"Unknown hub name: {hub_name}"
+            )
+            return None
+
+        ip = os.environ.get(f"HUBITAT_HUB_IP_{suffix}")
+        app_num = os.environ.get(f"HUBITAT_API_NUMBER_{suffix}")
+        token = os.environ.get(f"HUBITAT_API_TOKEN_{suffix}")
+
+        if not all([ip, app_num, token]):
+            logging.getLogger(__name__).warning(
+                f"Missing env vars for hub {hub_name} "
+                f"(HUBITAT_*_{suffix})"
+            )
+            return None
+
+        config = HubitatConfig(
+            hub_ip=ip,
+            app_number=app_num,
+            token=token,
+            name=hub_name,
+        )
+        new_client = HubitatClient(config)
+        _hub_clients[hub_name] = new_client
+        logging.getLogger(__name__).info(
+            f"Created HubitatClient for hub {hub_name} ({ip})"
+        )
+        return new_client
+
+
+def get_hub_client_by_ip(hub_ip: str) -> Optional[HubitatClient]:
+    """
+    Get a HubitatClient by hub IP address.
+
+    Looks up the hub name from the env var map, then delegates to
+    get_hub_client().
+
+    Args:
+        hub_ip: Hub IP address (e.g., '<LAN_IP>')
+
+    Returns:
+        HubitatClient for that hub, or None
+    """
+    for hub_name, suffix in _HUB_ENV_MAP.items():
+        env_ip = os.environ.get(f"HUBITAT_HUB_IP_{suffix}")
+        if env_ip == hub_ip:
+            return get_hub_client(hub_name)
+    return None
+
+
+def get_all_hub_clients() -> Dict[str, HubitatClient]:
+    """
+    Get clients for all configured hubs.
+
+    Returns:
+        Dict mapping hub_name → HubitatClient (only hubs with valid config)
+    """
+    clients = {}
+    for hub_name in _HUB_ENV_MAP:
+        client = get_hub_client(hub_name)
+        if client is not None:
+            clients[hub_name] = client
+    return clients

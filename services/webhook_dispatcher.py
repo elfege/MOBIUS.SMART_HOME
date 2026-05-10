@@ -85,6 +85,14 @@ def handle_event():
     if 'content' in data:
         data = data['content']
 
+    # Tag the payload with the hub IP so downstream targets can disambiguate
+    # which physical hub a given deviceId belongs to. Hub Mesh exposes the
+    # same device under different ids per hub, and Hubitat itself doesn't
+    # include any hub identifier in the webhook body — only the source IP
+    # at the transport layer tells us which hub originated the event.
+    # Backwards-compatible: existing consumers ignore unknown fields.
+    data['_hub_ip'] = source_ip
+
     device_id = data.get('deviceId', 'unknown')
     event_name = data.get('name', 'unknown')
     event_value = data.get('value', '')
@@ -127,6 +135,9 @@ def handle_mode():
     """
     data = request.get_json(silent=True) or {}
     source_ip = request.remote_addr
+
+    # Tag with hub IP (see handle_event for rationale)
+    data['_hub_ip'] = source_ip
 
     mode_name = data.get('value', 'unknown')
     logger.info(f"Mode change from {source_ip}: {mode_name}")

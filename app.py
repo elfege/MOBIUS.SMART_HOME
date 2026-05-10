@@ -7,12 +7,13 @@ Serves Jinja2 templates for the web UI.
 """
 
 import os
+import asyncio
 import logging
 import traceback
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, Request, Query, HTTPException
+from fastapi import FastAPI, Request, Query, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -115,6 +116,46 @@ def run_db_migrations():
         "ADD COLUMN IF NOT EXISTS last_commission_attempt TIMESTAMPTZ",
         "ALTER TABLE hubitat_matter_devices "
         "ADD COLUMN IF NOT EXISTS last_commission_error TEXT",
+
+        # Device hub mapping table for native-hub command routing (added 2026-02-28)
+        """CREATE TABLE IF NOT EXISTS device_hub_mapping (
+            device_label VARCHAR(200) NOT NULL,
+            native_hub_name VARCHAR(100) NOT NULL,
+            native_hub_ip VARCHAR(50) NOT NULL,
+            native_device_id VARCHAR(50) NOT NULL,
+            protocol VARCHAR(30) NOT NULL DEFAULT 'unknown',
+            device_type VARCHAR(200),
+            mirrors JSONB DEFAULT '{}',
+            is_mesh_linked BOOLEAN DEFAULT false,
+            last_classified_at TIMESTAMPTZ DEFAULT NOW(),
+            PRIMARY KEY (device_label, native_hub_name)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_device_hub_mapping_label "
+        "ON device_hub_mapping(device_label)",
+        "CREATE INDEX IF NOT EXISTS idx_device_hub_mapping_hub "
+        "ON device_hub_mapping(native_hub_name)",
+        "CREATE INDEX IF NOT EXISTS idx_device_hub_mapping_protocol "
+        "ON device_hub_mapping(protocol)",
+
+        # Seed all hub configs
+        "INSERT INTO hub_config (hub_name, hub_ip, maker_api_app_number, "
+        "maker_api_token_env, is_primary) "
+        "VALUES ('home_1', '<LAN_IP>', '1717', "
+        "'HUBITAT_API_TOKEN_OTHER_HUB_1', false) "
+        "ON CONFLICT (hub_name) DO NOTHING",
+        "INSERT INTO hub_config (hub_name, hub_ip, maker_api_app_number, "
+        "maker_api_token_env, is_primary) "
+        "VALUES ('home_2', '<LAN_IP>', '2151', "
+        "'HUBITAT_API_TOKEN_OTHER_HUB_2', false) "
+        "ON CONFLICT (hub_name) DO NOTHING",
+        "INSERT INTO hub_config (hub_name, hub_ip, maker_api_app_number, "
+        "maker_api_token_env, is_primary) "
+        "VALUES ('home_3', '<LAN_IP>', '1269', "
+        "'HUBITAT_API_TOKEN_OTHER_HUB_3', false) "
+        "ON CONFLICT (hub_name) DO NOTHING",
+
+        # Grant PostgREST access to new table
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON device_hub_mapping TO smarthome_anon",
     ]
 
     try:
@@ -151,10 +192,64 @@ async def lifespan(app: FastAPI):
     refresh_interval = int(os.environ.get('DEVICE_CACHE_REFRESH_INTERVAL', '120'))
     start_cache_refresh(refresh_interval=refresh_interval)
 
+    # Run hub classification on startup (populates device_hub_mapping table).
+    # Runs in background thread so it doesn't block app readiness.
+    # TILES and DeviceCommander depend on this data for native-hub routing.
+    import threading
+    def _startup_classification():
+        try:
+            from services.hub_classifier import run_classification, invalidate_cache
+            logger.info("Running startup hub classification...")
+            result = run_classification()
+            invalidate_cache()
+            total = result.get("total_native", 0) if isinstance(result, dict) else 0
+            logger.info(f"Startup hub classification complete: {total} native devices mapped")
+        except Exception as e:
+            logger.warning(f"Startup hub classification failed (will retry on next POST /api/hub/classify): {e}")
+
+    threading.Thread(target=_startup_classification, name="startup-hub-classify", daemon=True).start()
+
+    # Start Samsung TV client (WS + HTTP power-poll background tasks).
+    # Config is read from env vars (set in docker-compose or start.sh).
+    # on_power_change pushes state to all registered Hubitat callbacks via
+    # the blueprint's push_state_changes() so Hubitat stays in sync in real-time.
+    from services.samsung_tv_client import get_tv_client
+    from apps.samsung_tv.blueprint import push_state_changes as _tv_push, _persist_token
+
+    async def _on_tv_state_change(state) -> None:
+        """Bridge TV power OR connection state changes → Hubitat LAN push."""
+        nonlocal _tv_client
+        await _tv_push(_tv_client)
+
+    async def _on_tv_token_save(new_token: str) -> None:
+        """Persist a newly-issued TV auth token so it survives container restarts."""
+        os.environ["SAMSUNG_TV_TOKEN"] = new_token
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _persist_token, new_token)
+
+    # Token loaded from env var — populated by start.sh from ./state/samsung_tv_token.txt.
+    _saved_token = os.environ.get("SAMSUNG_TV_TOKEN", "")
+
+    _tv_client = get_tv_client(
+        tv_ip            = os.environ.get("SAMSUNG_TV_IP",   "<LAN_IP>"),
+        mac_address      = os.environ.get("SAMSUNG_TV_MAC",  "AABBCCDDEEFF"),
+        token            = _saved_token,
+        use_ssl          = os.environ.get("SAMSUNG_TV_SSL",  "true").lower() == "true",
+        name             = os.environ.get("SAMSUNG_TV_NAME", "living_room_tv"),
+        on_power_change  = _on_tv_state_change,
+        on_conn_change   = _on_tv_state_change,
+        on_token_save    = _on_tv_token_save,
+    )
+    await _tv_client.start()
+
     yield
 
     stop_cache_refresh()
     stop_matter_discovery()
+
+    # Stop Samsung TV client cleanly
+    await _tv_client.stop()
+
     logger.info("Shutting down...")
 
 
@@ -181,6 +276,9 @@ templates = Jinja2Templates(directory="templates")
 
 from apps.advanced_motion_lighting.blueprint import router as motion_router  # noqa: E402
 app.include_router(motion_router)
+
+from apps.samsung_tv.blueprint import router as samsung_tv_router  # noqa: E402
+app.include_router(samsung_tv_router)
 
 
 # =============================================================================
@@ -313,6 +411,35 @@ async def delete_instance(instance_id: int):
     raise HTTPException(status_code=500, detail="Failed to delete instance")
 
 
+@app.post("/api/instances/{instance_id}/stop", tags=["instances"])
+async def stop_instance(instance_id: int):
+    """Kill a running instance (e.g. when entering edit mode).
+
+    The instance stays in the DB but is no longer processing events.
+    Call POST .../start or PUT to restart it.
+    """
+    from services.instance_manager import get_instance_manager
+    manager = get_instance_manager()
+    was_running = manager.stop_instance(instance_id)
+    return {"message": "Instance stopped", "was_running": was_running}
+
+
+@app.post("/api/instances/{instance_id}/start", tags=["instances"])
+async def start_instance(instance_id: int):
+    """Start an instance from its current DB state.
+
+    Used after cancelling an edit (instance was stopped on edit entry).
+    """
+    from services.instance_manager import get_instance_manager
+    manager = get_instance_manager()
+    # Stop first in case it's somehow still running
+    manager.stop_instance(instance_id)
+    started = manager._start_from_db(instance_id)
+    if started:
+        return {"message": "Instance started"}
+    raise HTTPException(status_code=500, detail="Failed to start instance")
+
+
 @app.post("/api/instances/{instance_id}/pause", tags=["instances"])
 async def pause_instance(instance_id: int, body: PauseInstanceRequest = PauseInstanceRequest()):
     """Pause an instance."""
@@ -401,7 +528,9 @@ async def update_initialize_instance(instance_id: int):
     # Reset memoization on reload (stale memo causes incorrect behavior)
     manager.update_memoization(instance_id, {})
 
-    manager._reload_instance(instance_id)
+    manager.stop_instance(instance_id)
+    manager._rebuild_subscriptions(instance_id)
+    manager._start_from_db(instance_id)
     return {"message": "Instance reloaded with memoization reset"}
 
 
@@ -430,8 +559,16 @@ async def get_devices(capability: Optional[str] = Query(None)):
         else:
             devices = client.get_all_devices()
 
-        # Update cache
-        cache.update_all(devices)
+        # update_all needs to know which hub these devices came from so
+        # it can resolve the per-hub Hubitat ids to canonical PKs (the
+        # cache's primary key post-Phase-5). client.config.hub_ip is set
+        # at HubitatClient construction time.
+        try:
+            hub_ip = getattr(client, 'config', None) and client.config.hub_ip
+        except Exception:
+            hub_ip = None
+        if hub_ip:
+            cache.update_all(devices, hub_ip=hub_ip)
 
         return devices
 
@@ -443,11 +580,10 @@ async def get_devices(capability: Optional[str] = Query(None)):
 @app.get("/api/devices/{device_id}", tags=["devices"])
 async def get_device(device_id: str):
     """Get device details."""
-    from services.hubitat_client import get_default_client
+    from services.hub_classifier import fetch_device_live
 
     try:
-        client = get_default_client()
-        device = client.get_device(device_id)
+        device = fetch_device_live(device_id)
         if device:
             return device
         raise HTTPException(status_code=404, detail="Device not found")
@@ -523,7 +659,7 @@ async def handle_event_webhook(request: Request):
         logger.debug(f"Webhook received: {payload}")
 
         router = get_webhook_router()
-        routed_count = router.route_event(payload)
+        routed_count = await router.route_event(payload)
 
         return {"routed_to": routed_count}
     except Exception as e:
@@ -541,7 +677,7 @@ async def handle_mode_webhook(request: Request):
         logger.info(f"Mode change webhook: {payload}")
 
         router = get_webhook_router()
-        notified = router.route_mode_change(payload)
+        notified = await router.route_mode_change(payload)
 
         return {"notified": notified}
     except Exception as e:
@@ -552,6 +688,123 @@ async def handle_mode_webhook(request: Request):
 # =============================================================================
 # Modes
 # =============================================================================
+
+
+# =============================================================================
+# Hub Classification (native-hub device routing)
+# =============================================================================
+
+
+@app.post("/api/hub/classify", tags=["hub-classification"])
+async def run_hub_classification():
+    """
+    Run device classification across all configured hubs.
+
+    Queries each hub's Maker API, classifies devices as native vs
+    mesh-linked, builds cross-reference routing table, and writes
+    to the device_hub_mapping table.
+
+    This enables the DeviceCommander to route commands directly to
+    the hub that physically owns each device (bypassing Hub Mesh relay).
+    """
+    from services.hub_classifier import run_classification, invalidate_cache
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+        # Run classification in executor to avoid blocking event loop
+        # (makes HTTP requests to all 4 hubs)
+        result = await loop.run_in_executor(None, run_classification)
+        # Invalidate in-memory routing cache so new data is picked up
+        invalidate_cache()
+        return result
+    except Exception as e:
+        logger.error(f"Hub classification failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/hub/mapping", tags=["hub-classification"])
+async def get_hub_mapping(
+    hub_name: Optional[str] = Query(None, description="Filter by native hub name"),
+    protocol: Optional[str] = Query(None, description="Filter by protocol"),
+):
+    """
+    Get the current device-to-hub mapping table.
+
+    Returns all classified devices with their native hub, protocol,
+    and mirror info. Optionally filter by hub or protocol.
+    """
+    import requests as req
+
+    postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    params = {}
+    if hub_name:
+        params["native_hub_name"] = f"eq.{hub_name}"
+    if protocol:
+        params["protocol"] = f"eq.{protocol}"
+    params["order"] = "device_label.asc"
+
+    try:
+        resp = req.get(
+            f"{postgrest_url}/device_hub_mapping",
+            params=params,
+            headers={"Accept": "application/json"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            entries = resp.json()
+            return {
+                "count": len(entries),
+                "entries": entries,
+            }
+        return {"error": f"PostgREST returned {resp.status_code}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/hub/mapping/stats", tags=["hub-classification"])
+async def get_hub_mapping_stats():
+    """
+    Get summary statistics for the device hub mapping.
+
+    Returns per-hub and per-protocol counts.
+    """
+    import requests as req
+    from collections import defaultdict
+
+    postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+
+    try:
+        resp = req.get(
+            f"{postgrest_url}/device_hub_mapping",
+            headers={"Accept": "application/json"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return {"error": f"PostgREST returned {resp.status_code}"}
+
+        entries = resp.json()
+        hub_counts = defaultdict(int)
+        proto_counts = defaultdict(int)
+        hub_proto = defaultdict(lambda: defaultdict(int))
+
+        for e in entries:
+            hub = e.get("native_hub_name", "unknown")
+            proto = e.get("protocol", "unknown")
+            hub_counts[hub] += 1
+            proto_counts[proto] += 1
+            hub_proto[hub][proto] += 1
+
+        return {
+            "total": len(entries),
+            "by_hub": dict(hub_counts),
+            "by_protocol": dict(proto_counts),
+            "hub_protocol_matrix": {
+                hub: dict(protos) for hub, protos in hub_proto.items()
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =============================================================================
@@ -955,9 +1208,8 @@ async def matter_update_match(body: UpdateMatterDeviceMatchRequest):
     # Get the Maker API device name for display
     maker_name = ''
     try:
-        from services.hubitat_client import get_default_client
-        client = get_default_client()
-        device = client.get_device(body.maker_api_device_id)
+        from services.hub_classifier import fetch_device_live
+        device = fetch_device_live(body.maker_api_device_id)
         if device:
             maker_name = device.get('label') or device.get('name', '')
     except Exception:
@@ -1249,28 +1501,49 @@ async def get_test_devices(instance_id: int):
     to the browser.
     """
     from services.instance_manager import get_instance_manager
-    from services.hubitat_client import get_default_client
+    from services.hub_classifier import fetch_device_live
 
     manager = get_instance_manager()
     instance = manager.get_instance(instance_id)
     if not instance:
         raise HTTPException(status_code=404, detail="Instance not found")
 
-    client = get_default_client()
     device_selections = instance.get("device_selections", {})
+
+    # Pre-resolve every selected canonical id to its (hub_ip, hubitat_id)
+    # via the canonical devices row joined with hub_config — used to enrich
+    # the response so the frontend can render hub-specific links and open
+    # one EventSocket per distinct hub without an extra roundtrip.
+    from services.hub_classifier import get_device_by_canonical_id
 
     result = {}
     for category, device_ids in device_selections.items():
         devices = []
         for did in device_ids:
-            device = client.get_device(str(did))
+            # Selection ids are canonical PKs (Phase 5). fetch_device_live
+            # resolves them to (hub, hubitat_id) and queries the right hub.
+            device = fetch_device_live(did)
+            row = get_device_by_canonical_id(did)
+            extras = {}
+            if row:
+                extras = {
+                    "_canonical_id": row["id"],
+                    "_hub_ip":       row.get("hub_ip"),
+                    "_hub_name":     row.get("hub_name"),
+                    "_hubitat_id":   row.get("hubitat_id"),
+                }
             if device:
+                # Carry canonical/hub metadata alongside the Maker API
+                # device dict. Underscore-prefixed so they don't collide
+                # with any future Hubitat field names.
+                device.update(extras)
                 devices.append(device)
             else:
                 devices.append({
                     "id": did,
-                    "label": f"Device {did}",
-                    "error": "not found in Maker API"
+                    "label": (row.get("label") if row else f"Device {did}"),
+                    "error": "not found in Maker API",
+                    **extras,
                 })
         result[category] = devices
 
@@ -1309,6 +1582,27 @@ async def run_test_scenario(instance_id: int, scenario_id: str):
         "message": f"Scenario '{scenario_id}' started",
         "instance_id": instance_id
     }
+
+
+@app.post("/api/e2e/test/{instance_id}/stop", tags=["e2e-testing"])
+async def stop_test(instance_id: int):
+    """
+    Cancel the currently-running scenario for this instance, if any.
+
+    Sets the runner's cancel flag; the scenario loop checks it between
+    steps. Returns immediately — does NOT block waiting for the in-flight
+    step to actually unwind.
+    """
+    from services.e2e_test_runner import get_active_runner
+    runner = get_active_runner(instance_id)
+    if runner is None:
+        return {"ok": True, "stopped": False, "reason": "no active run"}
+    try:
+        await runner.cancel()
+        return {"ok": True, "stopped": True}
+    except Exception as e:
+        logger.error(f"stop_test({instance_id}) failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/e2e/test/{instance_id}/run-all", tags=["e2e-testing"])
@@ -1445,12 +1739,510 @@ async def matter_page(request: Request):
     return templates.TemplateResponse(request, "matter.html")
 
 
+@app.get("/hubs", response_class=HTMLResponse, include_in_schema=False)
+async def hubs_page(request: Request):
+    """Hub configuration page — edit hub_config rows."""
+    return templates.TemplateResponse(request, "hubs.html")
+
+
+# =============================================================================
+# Hub config CRUD
+# =============================================================================
+# All routing in the app reads from hub_config (joined into devices via
+# hub_id FK). Editing hub_config from the UI lets the user change a hub's
+# IP / app number / token env without redeploying. After every write we
+# invalidate the in-process lookup caches so changes take effect within
+# a single event-loop tick.
+
+@app.get("/api/canonical-devices/{canonical_id}/recent-events", tags=["devices"])
+async def get_recent_events_for_device(
+    canonical_id: int,
+    event_type: Optional[str] = None,
+    limit: int = 20,
+):
+    """
+    Return the most recent N events for a canonical device, optionally
+    filtered by event_type. Used by the KPI modal's per-chip popover to
+    show the last raw values that produced the breakdown count.
+
+    event_log.hubitat_device_id contains the canonical PK post-Phase-5
+    (the column name is legacy).
+    """
+    import requests as _req
+    if limit <= 0 or limit > 200:
+        limit = 20
+    params = {
+        "hubitat_device_id": f"eq.{canonical_id}",
+        "order": "received_at.desc",
+        "limit": str(limit),
+        "select": "event_type,event_value,event_unit,received_at",
+    }
+    if event_type:
+        params["event_type"] = f"eq.{event_type}"
+    try:
+        r = _req.get(
+            f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/event_log",
+            params=params,
+            timeout=5,
+        )
+        if r.status_code == 200:
+            return r.json()
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"get_recent_events_for_device({canonical_id}, {event_type}) failed: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/canonical-devices", tags=["devices"])
+async def list_canonical_devices():
+    """
+    List all rows in the canonical `devices` table.
+    Used by the wizard to render chips with labels for any saved selection,
+    even when the selection's device id doesn't appear in the current
+    category's capability-filtered device list.
+    """
+    import requests as _requests
+    try:
+        r = _requests.get(
+            f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/devices",
+            params={"select": "id,label,hub_ip,hubitat_id", "order": "label"},
+            timeout=5,
+        )
+        if r.status_code == 200:
+            return r.json()
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"list_canonical_devices failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/hubs", tags=["hubs"])
+async def list_hubs():
+    """List all configured Hubitat hubs (rows of hub_config)."""
+    import requests as _requests
+    try:
+        r = _requests.get(
+            f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/hub_config",
+            params={"order": "id"},
+            timeout=5,
+        )
+        if r.status_code == 200:
+            return r.json()
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"list_hubs failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _invalidate_hub_caches():
+    """Drop in-process caches that reference hub_config rows."""
+    try:
+        from services.hub_classifier import invalidate_device_lookup_cache
+        invalidate_device_lookup_cache()
+    except Exception:
+        pass
+    try:
+        from services.webhook_router import get_webhook_router
+        get_webhook_router().invalidate_device_cache()
+    except Exception:
+        pass
+
+
+@app.patch("/api/hubs/{hub_id}", tags=["hubs"])
+async def update_hub(hub_id: int, body: Dict[str, Any]):
+    """
+    Update a hub_config row. Accepts any subset of:
+      hub_name, hub_ip, maker_api_app_number, maker_api_token_env,
+      is_primary, is_enabled.
+    Other fields are ignored.
+
+    On success, invalidates the in-process device-lookup caches and
+    re-syncs `devices.hub_ip` from the new `hub_config.hub_ip` for any
+    rows that referenced this hub (denormalized cache stays consistent).
+    """
+    import requests as _requests
+    allowed = {
+        "hub_name", "hub_ip", "maker_api_app_number",
+        "maker_api_token_env", "is_primary", "is_enabled",
+    }
+    patch = {k: v for k, v in body.items() if k in allowed}
+    if not patch:
+        raise HTTPException(status_code=400, detail="No editable fields in body")
+
+    postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+
+    # If the user is setting is_primary=true, clear it on every other row
+    # first — exactly one primary at a time.
+    if patch.get("is_primary") is True:
+        try:
+            _requests.patch(
+                f"{postgrest_url}/hub_config",
+                params={"id": f"neq.{hub_id}"},
+                json={"is_primary": False},
+                headers={"Content-Type": "application/json"},
+                timeout=5,
+            )
+        except Exception as e:
+            logger.warning(f"Could not clear is_primary on others: {e}")
+
+    try:
+        r = _requests.patch(
+            f"{postgrest_url}/hub_config",
+            params={"id": f"eq.{hub_id}"},
+            json=patch,
+            headers={
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            timeout=5,
+        )
+        if r.status_code not in (200, 204):
+            raise HTTPException(status_code=r.status_code, detail=r.text)
+
+        # If hub_ip changed, mirror it into devices.hub_ip (denormalized).
+        if "hub_ip" in patch:
+            try:
+                _requests.patch(
+                    f"{postgrest_url}/devices",
+                    params={"hub_id": f"eq.{hub_id}"},
+                    json={"hub_ip": patch["hub_ip"]},
+                    headers={"Content-Type": "application/json"},
+                    timeout=10,
+                )
+            except Exception as e:
+                logger.warning(f"Could not resync devices.hub_ip: {e}")
+
+        _invalidate_hub_caches()
+        return r.json() if r.status_code == 200 else {"ok": True, "id": hub_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"update_hub({hub_id}) failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/hubs", tags=["hubs"])
+async def create_hub(body: Dict[str, Any]):
+    """Create a new hub_config row."""
+    import requests as _requests
+    required = ("hub_name", "hub_ip", "maker_api_app_number", "maker_api_token_env")
+    missing = [k for k in required if not body.get(k)]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing fields: {missing}")
+
+    payload = {k: body[k] for k in required}
+    payload["is_primary"] = bool(body.get("is_primary", False))
+    payload["is_enabled"] = bool(body.get("is_enabled", True))
+
+    postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    try:
+        r = _requests.post(
+            f"{postgrest_url}/hub_config",
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            timeout=5,
+        )
+        if r.status_code not in (200, 201):
+            raise HTTPException(status_code=r.status_code, detail=r.text)
+        _invalidate_hub_caches()
+        return r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"create_hub failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/hubs/{hub_id}", tags=["hubs"])
+async def delete_hub(hub_id: int):
+    """
+    Delete a hub. Refuses if any device still references this hub via FK.
+    User must move or remove those devices first (or run a fresh classifier
+    cycle that lets them be re-homed).
+    """
+    import requests as _requests
+    postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    try:
+        r = _requests.get(
+            f"{postgrest_url}/devices",
+            params={"hub_id": f"eq.{hub_id}", "select": "id", "limit": "1"},
+            timeout=5,
+        )
+        if r.status_code == 200 and r.json():
+            raise HTTPException(
+                status_code=409,
+                detail="Hub has devices; remove or re-classify them first",
+            )
+        d = _requests.delete(
+            f"{postgrest_url}/hub_config",
+            params={"id": f"eq.{hub_id}"},
+            timeout=5,
+        )
+        if d.status_code not in (200, 204):
+            raise HTTPException(status_code=d.status_code, detail=d.text)
+        _invalidate_hub_caches()
+        return {"ok": True, "id": hub_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"delete_hub({hub_id}) failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/instance/{instance_id}", response_class=HTMLResponse, include_in_schema=False)
 async def instance_detail(request: Request, instance_id: int):
     """Instance detail/edit page."""
     return templates.TemplateResponse(
         request, "instance_detail.html", {"instance_id": instance_id}
     )
+
+
+# =============================================================================
+# Dashboard WebSocket (real-time updates — replaces polling)
+# =============================================================================
+
+
+@app.websocket("/ws/dashboard")
+async def dashboard_websocket(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time dashboard updates.
+
+    Replaces the 30-second polling loop. When Hubitat webhooks arrive,
+    events are pushed instantly to all connected dashboard clients.
+    The frontend uses these events to patch individual cards instead
+    of re-rendering the entire grid (no more flicker).
+
+    Message types sent to client:
+        - device_event: A device changed state
+        - instance_update: Instance metadata changed
+        - instances_snapshot: Full instance list (sent on connect)
+    """
+    from services.dashboard_broadcaster import get_dashboard_broadcaster
+    from services.instance_manager import get_instance_manager
+    import json
+
+    await websocket.accept()
+    broadcaster = get_dashboard_broadcaster()
+    queue = await broadcaster.connect()
+
+    try:
+        # Send initial snapshot so the client doesn't need a separate fetch
+        manager = get_instance_manager()
+        instances = manager.get_all_instances()
+        await websocket.send_json({
+            "type": "instances_snapshot",
+            "instances": instances
+        })
+
+        # Stream events to client
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                await websocket.send_json(event)
+            except asyncio.TimeoutError:
+                # Keepalive ping — detect dead connections
+                await websocket.send_json({"type": "ping"})
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.debug(f"Dashboard WS closed: {e}")
+    finally:
+        await broadcaster.disconnect(queue)
+
+
+# =============================================================================
+# KPI Metrics
+# =============================================================================
+
+
+@app.get("/api/instances/{instance_id}/metrics", tags=["instances"])
+async def get_instance_metrics(
+    instance_id: int,
+    hours: int = Query(24, description="Lookback window in hours")
+):
+    """
+    Aggregated KPI metrics for a single instance.
+
+    Queries event_log for the instance's subscribed devices and computes:
+    - Event counts (total, per-hour, per-device, per-type)
+    - Last activity timestamps per device
+    - Switch on/off operation counts
+    - Motion active/inactive ratios
+    - Error tracking from app_instances table
+
+    Args:
+        instance_id: Target instance
+        hours: Lookback window (default 24h)
+    """
+    from services.instance_manager import get_instance_manager
+    import requests as req
+    from datetime import datetime, timedelta, timezone
+
+    manager = get_instance_manager()
+    instance = manager.get_instance(instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    # Collect device IDs from instance
+    device_ids = []
+    for ids in (instance.get('device_selections') or {}).values():
+        device_ids.extend(str(d) for d in ids)
+
+    postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(hours=hours)).isoformat()
+
+    # Fetch events for this instance's devices within the time window
+    events = []
+    if device_ids:
+        try:
+            resp = req.get(
+                f"{postgrest_url}/event_log",
+                params={
+                    "hubitat_device_id": f"in.({','.join(device_ids)})",
+                    "received_at": f"gte.{since}",
+                    "order": "received_at.desc",
+                    "limit": "2000"
+                },
+                timeout=10
+            )
+            if resp.status_code == 200:
+                events = resp.json()
+        except Exception as e:
+            logger.error(f"Failed to fetch metrics events: {e}")
+
+    # Compute aggregations
+    total_events = len(events)
+
+    # Events per hour (for chart)
+    hourly_buckets = {}
+    for h in range(hours):
+        bucket_time = now - timedelta(hours=h)
+        key = bucket_time.strftime('%Y-%m-%dT%H:00:00')
+        hourly_buckets[key] = 0
+
+    # Per-device stats
+    device_stats = {}
+    # Per-event-type counts
+    type_counts = {}
+
+    for evt in events:
+        # Hourly bucketing
+        received = evt.get('received_at', '')
+        if received:
+            try:
+                # Truncate to hour
+                hour_key = received[:13] + ':00:00'
+                if hour_key in hourly_buckets:
+                    hourly_buckets[hour_key] += 1
+            except (IndexError, TypeError):
+                pass
+
+        # Device stats
+        dev_id = evt.get('hubitat_device_id', '')
+        dev_name = evt.get('device_name', dev_id)
+        evt_type = evt.get('event_type', '')
+        evt_value = evt.get('event_value', '')
+
+        if dev_id not in device_stats:
+            device_stats[dev_id] = {
+                'device_name': dev_name,
+                'event_count': 0,
+                'last_event_at': received,
+                'last_event_type': evt_type,
+                'last_event_value': evt_value,
+                'type_breakdown': {}
+            }
+        device_stats[dev_id]['event_count'] += 1
+
+        # Type breakdown per device
+        if evt_type not in device_stats[dev_id]['type_breakdown']:
+            device_stats[dev_id]['type_breakdown'][evt_type] = {
+                'count': 0,
+                'last_value': evt_value,
+                'last_at': received
+            }
+        device_stats[dev_id]['type_breakdown'][evt_type]['count'] += 1
+
+        # Global type counts
+        type_counts[evt_type] = type_counts.get(evt_type, 0) + 1
+
+    # Sort hourly buckets chronologically
+    hourly_sorted = sorted(hourly_buckets.items())
+
+    # Enrich device_stats with canonical-→hub mapping so the UI can render
+    # a hyperlink to the device's edit page on the hub that natively owns
+    # it. event_log.hubitat_device_id contains the CANONICAL devices.id PK
+    # post-Phase-5 (the column name is legacy). For each id we look up the
+    # canonical row + its hub_config join in one batch.
+    if device_stats:
+        try:
+            import requests as _req
+            postgrest_url = os.environ.get(
+                "POSTGREST_URL", "http://postgrest:3001"
+            )
+            ids_csv = ",".join(str(k) for k in device_stats.keys())
+            resp = _req.get(
+                f"{postgrest_url}/devices",
+                params={
+                    "select": "id,hubitat_id,label,hub_config(hub_name,hub_ip)",
+                    "id": f"in.({ids_csv})",
+                },
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                for row in resp.json():
+                    cid = str(row["id"])
+                    if cid in device_stats:
+                        hub = row.get("hub_config") or {}
+                        device_stats[cid]["canonical_id"]  = row["id"]
+                        device_stats[cid]["hubitat_id"]    = row.get("hubitat_id")
+                        device_stats[cid]["hub_ip"]        = hub.get("hub_ip")
+                        device_stats[cid]["hub_name"]      = hub.get("hub_name")
+                        # Prefer the canonical label when we have it — the
+                        # event_log device_name may carry the mirror's
+                        # ' on Home N' suffix.
+                        if row.get("label"):
+                            device_stats[cid]["device_name"] = row["label"]
+        except Exception as e:
+            logger.warning(f"KPI device enrichment failed: {e}")
+
+    # Instance metadata
+    running = manager.get_running_instance(instance_id) is not None
+
+    return {
+        "instance_id": instance_id,
+        "label": instance.get("label"),
+        "is_paused": instance.get("is_paused", False),
+        "is_running": running,
+        "error_count": instance.get("error_count", 0),
+        "last_error": instance.get("last_error"),
+        "last_activity_at": instance.get("last_activity_at"),
+        "created_at": instance.get("created_at"),
+        "device_count": len(device_ids),
+        "window_hours": hours,
+        "total_events": total_events,
+        "hourly_events": [
+            {"hour": h, "count": c} for h, c in hourly_sorted
+        ],
+        "device_stats": device_stats,
+        "type_counts": type_counts,
+        "device_selections": instance.get("device_selections", {}),
+        "settings": instance.get("settings", {}),
+    }
 
 
 # =============================================================================

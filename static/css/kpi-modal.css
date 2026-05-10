@@ -1,0 +1,602 @@
+/* =============================================================================
+   KPI Modal Stylesheet
+   Prefix: kpi- (avoids collisions with dtm-, e2e-, etc.)
+   ============================================================================= */
+
+/* === Backdrop & Modal Shell === */
+
+.kpi-backdrop {
+    position: fixed;
+    inset: 0;
+    background: var(--color-overlay);
+    z-index: 1000;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 2.5vh 2vw;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    overflow-y: auto;
+}
+
+.kpi-backdrop.show {
+    opacity: 1;
+}
+
+.kpi-modal {
+    position: relative;
+    width: 100%;
+    max-width: 1200px;
+    min-height: 80vh;
+    max-height: 95vh;
+    overflow-y: auto;
+    background: var(--color-card);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    padding: 2rem;
+    color: var(--color-text);
+}
+
+.kpi-close {
+    position: sticky;
+    top: 0;
+    float: right;
+    background: none;
+    border: none;
+    color: var(--color-text-muted);
+    font-size: 1.8rem;
+    cursor: pointer;
+    line-height: 1;
+    padding: 0 0.25rem;
+    z-index: 10;
+    transition: color 0.2s;
+}
+
+.kpi-close:hover {
+    color: var(--color-danger);
+}
+
+/* === Loading / Error === */
+
+.kpi-loading,
+.kpi-error {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 300px;
+    font-size: 1.1rem;
+    color: var(--color-text-muted);
+}
+
+.kpi-error {
+    color: var(--color-danger);
+}
+
+/* === Header === */
+
+.kpi-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.kpi-header h2 {
+    margin: 0;
+    font-size: 1.5rem;
+}
+
+.kpi-subtitle {
+    color: var(--color-text-muted);
+    font-size: 0.85rem;
+    margin-top: 0.25rem;
+}
+
+.kpi-status-badge {
+    padding: 0.3rem 0.8rem;
+    border-radius: var(--radius-pill);
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.kpi-status-badge.running {
+    background: var(--color-state-green-bg);
+    color: var(--color-state-green-text);
+}
+
+.kpi-status-badge.paused {
+    background: var(--color-state-amber-bg);
+    color: var(--color-state-amber-text);
+}
+
+.kpi-status-badge.stopped {
+    background: var(--color-state-slate-bg);
+    color: var(--color-state-slate-text);
+}
+
+/* === Overview Cards Grid === */
+
+.kpi-overview {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.kpi-card {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 1rem;
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-start;
+    transition: border-color 0.2s;
+}
+
+.kpi-card:hover {
+    border-color: var(--color-primary-alpha-30);
+}
+
+.kpi-card-warn {
+    border-color: var(--color-warning);
+}
+
+.kpi-card-icon {
+    font-size: 1.5rem;
+    flex-shrink: 0;
+    line-height: 1;
+}
+
+.kpi-card-body {
+    min-width: 0;
+}
+
+.kpi-card-value {
+    font-size: 1.4rem;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.kpi-card-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    margin-top: 0.2rem;
+}
+
+.kpi-card-detail {
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+    margin-top: 0.3rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* === Charts Row === */
+
+.kpi-charts-row {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.kpi-chart-container {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 1rem;
+}
+
+.kpi-chart-container h3 {
+    margin: 0 0 0.75rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+}
+
+.kpi-chart-wide canvas {
+    height: 220px !important;
+}
+
+.kpi-chart-narrow canvas {
+    height: 220px !important;
+}
+
+/* === Section Headers === */
+
+.kpi-section {
+    margin-bottom: 1.5rem;
+}
+
+.kpi-section h3 {
+    font-size: 0.9rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    margin: 0 0 0.75rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--color-border);
+}
+
+/* === Device Activity Table === */
+
+.kpi-table-scroll {
+    overflow-x: auto;
+}
+
+.kpi-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+
+.kpi-table thead th {
+    text-align: left;
+    padding: 0.6rem 0.75rem;
+    border-bottom: 2px solid var(--color-border);
+    color: var(--color-text-muted);
+    font-weight: 600;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+}
+
+.kpi-table tbody tr {
+    border-bottom: 1px solid var(--color-border);
+    transition: background 0.15s;
+}
+
+.kpi-table tbody tr:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.kpi-table td {
+    padding: 0.6rem 0.75rem;
+    vertical-align: top;
+}
+
+.kpi-td-device {
+    min-width: 180px;
+}
+
+.kpi-device-name {
+    font-weight: 500;
+}
+
+.kpi-device-id {
+    font-size: 0.72rem;
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    line-height: 1.4;
+}
+
+/* Canonical PK gets a subtle accent so it visually differs from the
+   per-hub Hubitat id inline next to it. Pure cosmetic — both are mono. */
+.kpi-id-canon {
+    color: var(--color-accent, #8ae);
+    font-weight: 600;
+}
+.kpi-id-hubitat {
+    color: var(--color-text);
+    font-weight: 500;
+}
+
+/* Hyperlink style for device names that point to the hub edit page.
+   Inherits color so it matches the surrounding text; underline only on
+   hover so the table doesn't become visually noisy. */
+.kpi-device-link {
+    color: inherit;
+    text-decoration: none;
+    border-bottom: 1px dashed var(--color-text-muted);
+}
+.kpi-device-link:hover {
+    color: var(--color-accent, #8ae);
+    border-bottom-color: var(--color-accent, #8ae);
+}
+
+/* =============================================================================
+   Debug Terminal panel inside the KPI modal
+   ============================================================================= */
+
+.kpi-debug-section .kpi-debug-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+}
+.kpi-debug-section .kpi-debug-header h3 {
+    margin: 0;
+}
+.kpi-debug-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+.kpi-debug-status {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+}
+
+.kpi-debug-log {
+    /* Larger than the dashboard mini debug panel — fills most of the
+       remaining modal height. Min 400px so it stays useful on small
+       viewports; max 60vh so it doesn't push everything else off-screen. */
+    height: clamp(400px, 50vh, 60vh);
+    background: #111;
+    color: #ddd;
+    border: 1px solid var(--border-color, #333);
+    border-radius: 4px;
+    padding: 0.5rem 0.75rem;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    line-height: 1.4;
+    overflow-y: auto;
+    overflow-x: hidden;
+    word-break: break-word;
+}
+.kpi-debug-line {
+    padding: 1px 0;
+    border-bottom: 1px solid #1c1c1c;
+}
+.kpi-debug-time {
+    color: #6a6a6a;
+    margin-right: 0.5em;
+}
+.kpi-debug-type {
+    display: inline-block;
+    min-width: 8em;
+    padding: 0 0.4em;
+    margin-right: 0.5em;
+    border-radius: 2px;
+    font-weight: 600;
+    text-align: center;
+    background: #2a2a2a;
+}
+.kpi-debug-type-device_event { background: #1d3a4d; color: #9ad; }
+.kpi-debug-type-step_start,
+.kpi-debug-type-step_complete { background: #3a2a1d; color: #fc9; }
+.kpi-debug-type-scenario_start,
+.kpi-debug-type-scenario_complete { background: #1d3a2a; color: #9d9; }
+.kpi-debug-meta {
+    color: #6a6a6a;
+}
+
+.kpi-td-count {
+    font-weight: 700;
+    font-size: 1rem;
+    text-align: center;
+    min-width: 60px;
+}
+
+.kpi-td-last {
+    min-width: 120px;
+}
+
+.kpi-last-detail {
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+    margin-top: 0.15rem;
+}
+
+.kpi-td-breakdown {
+    min-width: 200px;
+}
+
+.kpi-type-chip {
+    display: inline-block;
+    background: var(--color-primary-alpha-15);
+    color: var(--color-primary);
+    font-size: 0.7rem;
+    padding: 0.15rem 0.4rem;
+    border-radius: var(--radius-small);
+    margin: 0.1rem 0.15rem;
+    white-space: nowrap;
+}
+.kpi-type-chip-clickable {
+    cursor: pointer;
+    user-select: none;
+}
+.kpi-type-chip-clickable:hover {
+    background: var(--color-primary-alpha-25, rgba(120, 170, 230, 0.25));
+    color: var(--color-text, #fff);
+}
+
+/* =============================================================================
+   Chip popover — recent events for a (canonical_id, event_type) pair
+   ============================================================================= */
+
+.kpi-chip-popover {
+    z-index: 10010;        /* above the KPI modal (10000) */
+    background: #181818;
+    color: #ddd;
+    border: 1px solid var(--border-color, #333);
+    border-radius: 6px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+    min-width: 320px;
+    max-width: 460px;
+    max-height: 60vh;
+    display: flex;
+    flex-direction: column;
+    font-size: 0.78rem;
+}
+.kpi-chip-popover-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--border-color, #333);
+    font-size: 0.85rem;
+}
+.kpi-chip-popover-header code {
+    font-family: var(--font-mono);
+    background: #2a2a2a;
+    padding: 0 0.35em;
+    border-radius: 2px;
+    color: #9ad;
+}
+.kpi-chip-popover-close {
+    margin-left: auto;
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted, #888);
+    font-size: 1.2rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 0.2em;
+}
+.kpi-chip-popover-close:hover {
+    color: var(--color-text, #fff);
+}
+.kpi-chip-popover-body {
+    overflow-y: auto;
+    padding: 0.4rem 0.6rem;
+}
+.kpi-chip-popover-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+}
+.kpi-chip-popover-table th {
+    text-align: left;
+    color: var(--color-text-muted, #888);
+    font-weight: 500;
+    padding: 0.2em 0.4em;
+    border-bottom: 1px solid #2a2a2a;
+}
+.kpi-chip-popover-table td {
+    padding: 0.18em 0.4em;
+    border-bottom: 1px solid #1a1a1a;
+}
+.kpi-chip-popover-time {
+    color: #6a6a6a;
+    white-space: nowrap;
+}
+.kpi-chip-popover-value {
+    font-weight: 500;
+    color: #ddd;
+}
+.kpi-chip-popover-unit {
+    color: var(--color-text-muted, #888);
+    margin-left: 0.25em;
+}
+.kpi-chip-popover-empty,
+.kpi-chip-popover-error {
+    padding: 0.5rem 0;
+    color: var(--color-text-muted, #888);
+    font-style: italic;
+}
+.kpi-chip-popover-error {
+    color: #e57373;
+}
+.kpi-chip-popover-footer {
+    padding: 0.3rem 0.6rem;
+    border-top: 1px solid var(--border-color, #333);
+    color: var(--color-text-muted, #888);
+    font-size: 0.7rem;
+}
+
+/* === Configuration Summary === */
+
+.kpi-config-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+
+.kpi-config-section h4 {
+    margin: 0 0 0.5rem;
+    font-size: 0.85rem;
+    color: var(--color-text);
+}
+
+.kpi-config-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+}
+
+.kpi-config-table td {
+    padding: 0.35rem 0.5rem;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.kpi-config-key {
+    color: var(--color-text-muted);
+    font-weight: 500;
+    white-space: nowrap;
+    width: 40%;
+}
+
+.kpi-config-val {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    word-break: break-all;
+}
+
+/* === Empty / placeholder === */
+
+.kpi-empty {
+    color: var(--color-text-muted);
+    font-style: italic;
+    text-align: center;
+    padding: 1rem;
+}
+
+/* === Responsive === */
+
+@media (max-width: 768px) {
+    .kpi-backdrop {
+        padding: 1vh 1vw;
+    }
+
+    .kpi-modal {
+        padding: 1rem;
+    }
+
+    .kpi-overview {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .kpi-charts-row {
+        grid-template-columns: 1fr;
+    }
+
+    .kpi-config-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* === Custom Scrollbar (modal) === */
+
+.kpi-modal::-webkit-scrollbar {
+    width: 8px;
+}
+
+.kpi-modal::-webkit-scrollbar-track {
+    background: var(--color-scrollbar-track);
+}
+
+.kpi-modal::-webkit-scrollbar-thumb {
+    background: var(--color-scrollbar-thumb);
+    border-radius: 4px;
+}
+
+.kpi-modal::-webkit-scrollbar-thumb:hover {
+    background: var(--color-scrollbar-thumb-hover);
+}

@@ -85,6 +85,16 @@ class TestScenario:
 # Test Runner
 # ---------------------------------------------------------------------------
 
+# Active runners by instance_id. Each E2ETestRunner registers itself in
+# __init__ and removes itself in cancel() / on completion. The /stop
+# endpoint looks up here to find an in-flight run for a given instance.
+_active_runners: Dict[int, "E2ETestRunner"] = {}
+
+
+def get_active_runner(instance_id: int) -> Optional["E2ETestRunner"]:
+    """Return the in-flight runner for an instance, or None if none."""
+    return _active_runners.get(instance_id)
+
 
 class E2ETestRunner:
     """
@@ -106,6 +116,12 @@ class E2ETestRunner:
         self._cancel_flag = False
         # Device state snapshot for save/restore
         self._saved_device_states: Dict[str, Dict[str, str]] = {}
+        # Register self in the active-runner table so external callers
+        # (the /api/e2e/.../stop endpoint) can find an in-flight run by
+        # instance_id and call cancel() on it. Last writer wins; tests
+        # are not designed to run multiple times concurrently per
+        # instance, and the registry is cleared on completion below.
+        _active_runners[instance_id] = self
 
     async def initialize(self):
         """Load instance data and build test scenarios."""
@@ -217,11 +233,18 @@ class E2ETestRunner:
         }
 
         await self._broadcast("scenario_complete", summary)
+        # Natural completion — remove from registry so a fresh run can
+        # claim the instance slot.
+        _active_runners.pop(self.instance_id, None)
         return summary
 
     async def cancel(self):
         """Cancel the currently running scenario."""
         self._cancel_flag = True
+        # Remove from the active-runner registry immediately so a
+        # follow-up start works cleanly, even if cancellation hasn't
+        # propagated through all in-flight steps yet.
+        _active_runners.pop(self.instance_id, None)
 
     # =========================================================================
     # Device State Save/Restore
@@ -237,18 +260,33 @@ class E2ETestRunner:
         Returns:
             Dict mapping device_id -> {attribute: value}
         """
-        from services.hubitat_client import get_default_client
-        client = get_default_client()
+        from services.hubitat_client import get_default_client, get_hub_client_by_ip
+        from services.hub_classifier import (
+            get_device_by_canonical_id, get_hub_for_device,
+        )
+        default_client = get_default_client()
 
         all_device_ids: set = set()
         ds = self._instance.get("device_selections", {})
         for category_ids in ds.values():
             all_device_ids.update(str(did) for did in category_ids)
 
+        def _client_and_hubitat_id(did):
+            try:
+                row = get_device_by_canonical_id(did) or get_hub_for_device(did)
+                if row and row.get("hub_ip"):
+                    c = get_hub_client_by_ip(row["hub_ip"])
+                    if c:
+                        return c, str(row.get("hubitat_id") or did)
+            except Exception:
+                pass
+            return default_client, str(did)
+
         saved: Dict[str, Dict[str, str]] = {}
         for device_id in all_device_ids:
             try:
-                device = client.get_device(device_id)
+                client, hubitat_id = _client_and_hubitat_id(device_id)
+                device = client.get_device(hubitat_id)
                 if not device:
                     logger.warning(
                         f"save_device_states: device {device_id} not found"
@@ -470,7 +508,10 @@ class E2ETestRunner:
             retries: Number of attempts (default: 3)
             retry_delay: Seconds between retries (default: 1.0)
         """
-        from services.hubitat_client import get_default_client
+        from services.hubitat_client import get_default_client, get_hub_client_by_ip
+        from services.hub_classifier import (
+            get_device_by_canonical_id, get_hub_for_device,
+        )
 
         device_id = step.params["device_id"]
         attribute = step.params["attribute"]
@@ -478,11 +519,24 @@ class E2ETestRunner:
         retries = step.params.get("retries", 3)
         delay = step.params.get("retry_delay", 1.0)
 
-        client = get_default_client()
+        # Route verification to the hub that natively owns this device.
+        # device_id may be either a canonical devices.id PK (post-Phase-5)
+        # or a Hubitat per-hub id (legacy scenarios). Try canonical first.
+        client = None
+        hubitat_id = str(device_id)
+        try:
+            row = get_device_by_canonical_id(device_id) or get_hub_for_device(device_id)
+            if row and row.get("hub_ip"):
+                client = get_hub_client_by_ip(row["hub_ip"])
+                hubitat_id = str(row.get("hubitat_id") or device_id)
+        except Exception:
+            pass
+        if client is None:
+            client = get_default_client()
         actual = None
 
         for attempt in range(retries):
-            device = client.get_device(device_id)
+            device = client.get_device(hubitat_id)
             if device:
                 # Hubitat returns attributes as a list of {name, currentValue}
                 attrs = device.get("attributes", [])
@@ -1115,3 +1169,5 @@ class E2ETestRunner:
             "type": event_type,
             **data
         })
+# reload-e2e-routing
+# reload-stop-clear-reset

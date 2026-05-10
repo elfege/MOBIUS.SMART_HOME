@@ -113,8 +113,10 @@ CREATE INDEX IF NOT EXISTS idx_app_instances_paused ON app_instances(is_paused) 
 CREATE TABLE IF NOT EXISTS device_subscriptions (
     id BIGSERIAL PRIMARY KEY,
 
-    -- Device reference (Hubitat device ID as string)
-    hubitat_device_id VARCHAR(50) NOT NULL,
+    -- Canonical device reference. Hubitat per-hub ids are NOT unique across
+    -- a multi-hub setup (the same id can identify different physical devices
+    -- on different hubs), so the routing key is our own devices.id PK.
+    device_id BIGINT NOT NULL,
 
     -- Instance reference
     instance_id BIGINT NOT NULL REFERENCES app_instances(id) ON DELETE CASCADE,
@@ -125,18 +127,38 @@ CREATE TABLE IF NOT EXISTS device_subscriptions (
     -- Subscription metadata
     created_at TIMESTAMPTZ DEFAULT NOW(),
 
-    -- Unique constraint: one subscription per device/instance/event combination
+    -- Unique constraint: one subscription per (canonical device, instance, event)
     CONSTRAINT device_subscriptions_unique
-        UNIQUE (hubitat_device_id, instance_id, event_type)
+        UNIQUE (device_id, instance_id, event_type)
 );
 
 -- Primary index for event routing: device_id + event_type → instance_ids
-CREATE INDEX IF NOT EXISTS idx_device_subscriptions_lookup
-    ON device_subscriptions(hubitat_device_id, event_type);
+CREATE INDEX IF NOT EXISTS idx_device_subscriptions_canonical
+    ON device_subscriptions(device_id, event_type);
 
 -- Secondary index for cleanup when instance deleted (handled by CASCADE)
 CREATE INDEX IF NOT EXISTS idx_device_subscriptions_instance
     ON device_subscriptions(instance_id);
+
+-- Add the FK to devices(id) only after `devices` is created (later in this file).
+-- Idempotent: skipped on existing installs that already have it.
+DO $devsubsfk$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'device_subscriptions_device_id_fkey'
+    ) THEN
+        BEGIN
+            ALTER TABLE device_subscriptions
+              ADD CONSTRAINT device_subscriptions_device_id_fkey
+              FOREIGN KEY (device_id) REFERENCES devices(id);
+        EXCEPTION WHEN undefined_table THEN
+            -- `devices` not yet created in this run; the constraint will be
+            -- added at the bottom of this file in a follow-up DO block.
+            NULL;
+        END;
+    END IF;
+END$devsubsfk$;
 
 -- =============================================================================
 -- DEVICE CACHE TABLE
@@ -145,8 +167,10 @@ CREATE INDEX IF NOT EXISTS idx_device_subscriptions_instance
 -- Refreshed on events and periodically via TTL
 
 CREATE TABLE IF NOT EXISTS device_cache (
-    -- Device identification (Hubitat device ID)
-    hubitat_device_id VARCHAR(50) PRIMARY KEY,
+    -- Canonical devices.id PK (post-Phase-5). Hubitat per-hub ids are NOT
+    -- unique across hubs, so the cache primary key must be our own PK.
+    -- See `devices` table for the canonical hub_ip + hubitat_id pair.
+    device_id BIGINT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
 
     -- Device metadata
     device_name VARCHAR(200),
@@ -361,11 +385,199 @@ CREATE INDEX IF NOT EXISTS idx_hubitat_matter_devices_commissioned
     ON hubitat_matter_devices(is_commissioned) WHERE is_commissioned = false;
 
 -- =============================================================================
+-- DEVICE HUB MAPPING TABLE
+-- =============================================================================
+-- Maps each device to its native (physically paired) Hubitat hub.
+-- Populated by the hub_classifier service which queries all hubs' Maker APIs
+-- and uses the hubMeshDisabled attribute to distinguish native vs linked devices.
+--
+-- This table enables:
+-- 1. Command routing: send commands to the hub that owns the radio (no mesh relay)
+-- 2. Event source identification: know which hub's event stream is authoritative
+-- 3. Protocol awareness: know if a device is Z-Wave, Zigbee, Matter, LAN, etc.
+
+CREATE TABLE IF NOT EXISTS device_hub_mapping (
+    -- Composite key: device label + native hub (a device has one native hub)
+    device_label VARCHAR(200) NOT NULL,
+    native_hub_name VARCHAR(100) NOT NULL,
+
+    -- Native hub connection info (denormalized from hub_config for fast lookups)
+    native_hub_ip VARCHAR(50) NOT NULL,
+    native_device_id VARCHAR(50) NOT NULL,
+
+    -- Radio protocol (zwave, zigbee, matter, lan, virtual, cloud, unknown)
+    protocol VARCHAR(30) NOT NULL DEFAULT 'unknown',
+
+    -- Driver type from Hubitat (e.g., 'Generic Z-Wave Smart Switch')
+    device_type VARCHAR(200),
+
+    -- Mirror device IDs on other hubs (for cross-reference)
+    -- Format: {"hub_name": {"id": "device_id", "hub_ip": "ip"}, ...}
+    mirrors JSONB DEFAULT '{}',
+
+    -- Classification metadata
+    is_mesh_linked BOOLEAN DEFAULT false,
+    last_classified_at TIMESTAMPTZ DEFAULT NOW(),
+
+    PRIMARY KEY (device_label, native_hub_name)
+);
+
+-- Index for fast lookups by label (most common query: "which hub owns this device?")
+CREATE INDEX IF NOT EXISTS idx_device_hub_mapping_label
+    ON device_hub_mapping(device_label);
+
+-- Index for per-hub queries ("list all native devices on Home 2")
+CREATE INDEX IF NOT EXISTS idx_device_hub_mapping_hub
+    ON device_hub_mapping(native_hub_name);
+
+-- Index for protocol queries ("list all Z-Wave devices")
+CREATE INDEX IF NOT EXISTS idx_device_hub_mapping_protocol
+    ON device_hub_mapping(protocol);
+
+-- =============================================================================
+-- DEVICES TABLE (canonical, mesh-phobic)
+-- =============================================================================
+-- Single source of truth for physical devices across all hubs.
+--
+-- Hub Mesh exposes the same physical sensor under DIFFERENT hubitat IDs on
+-- each hub (e.g. one motion sensor → ids 112 on Main, 456 on Home1, 1461 on
+-- Home2). The legacy device_cache used hubitat_device_id as PK, so cross-hub
+-- collisions silently overwrote each other. This table fixes that:
+--   - id: our own stable PK (used by subscriptions and selections)
+--   - (hub_ip, hubitat_id): per-hub identity, UNIQUE so we never insert
+--     the same hub-id pair twice
+--   - label: Hubitat user-assigned label, UNIQUE because this IS one-per-
+--     physical-device. (The Hubitat 'name' field is the driver type and
+--     IS NOT unique — many devices share the same driver name.) A second
+--     hub trying to register the same label hits the upsert_device()
+--     SKIP_MESH branch and the first row wins.
+--
+-- Ingestion is double-defended:
+--   1. hub_classifier._is_mesh_linked() filters mirrors at fetch time
+--      (presence of hubMeshDisabled attribute = mirror, skip)
+--   2. UNIQUE (label) + upsert_device() function enforces it at the DB
+
+CREATE TABLE IF NOT EXISTS devices (
+    -- Our own auto-incrementing primary key
+    id BIGSERIAL PRIMARY KEY,
+
+    -- Hub the device lives on (commands route here, events expected from here)
+    hub_ip VARCHAR(50) NOT NULL,
+
+    -- Device's id on that hub (Hubitat's internal id field)
+    hubitat_id VARCHAR(50) NOT NULL,
+
+    -- Hubitat 'name' field — driver type (e.g. 'Generic Zigbee Motion
+    -- Sensor', 'Aeon Multisensor 6'). NOT unique per physical device —
+    -- many devices share the same driver. Stored for diagnostics only.
+    name VARCHAR(255) NOT NULL,
+
+    -- Hubitat 'label' — user-assigned device identity (e.g. 'Motion
+    -- Sensor Living Bookshelves'). UNIQUE: this IS one-per-physical-
+    -- device, so it's the right key for mesh-duplicate rejection.
+    -- A second hub trying to register the same label gets SKIP_MESH.
+    label VARCHAR(255) NOT NULL UNIQUE,
+
+    -- Driver type (e.g. 'Generic Z-Wave Smart Switch')
+    device_type VARCHAR(200),
+
+    -- Radio protocol (zwave, zigbee, matter, lan, virtual, cloud, unknown)
+    protocol VARCHAR(30) DEFAULT 'unknown',
+
+    -- Capability list from Maker API (for filtering in device pickers)
+    capabilities JSONB DEFAULT '[]',
+
+    -- Current attribute snapshot (motion, switch, level, etc.)
+    attributes JSONB DEFAULT '{}',
+
+    -- When this row was last refreshed from the hub
+    last_synced_at TIMESTAMPTZ DEFAULT NOW(),
+
+    -- Belt + suspenders: a (hub_ip, hubitat_id) pair must also be unique.
+    UNIQUE (hub_ip, hubitat_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_devices_hub_hubitat
+    ON devices(hub_ip, hubitat_id);
+CREATE INDEX IF NOT EXISTS idx_devices_label
+    ON devices(label);
+CREATE INDEX IF NOT EXISTS idx_devices_capabilities
+    ON devices USING GIN (capabilities);
+
+
+-- =============================================================================
+-- DEVICES UPSERT FUNCTION (mesh-phobic)
+-- =============================================================================
+-- Single entry point for ingesting devices. Atomically:
+--   - INSERT a never-before-seen name
+--   - UPDATE attributes if the same (hub_ip, hubitat_id) reappears
+--   - SKIP_MESH if a different hub tries to claim the same name (mirror)
+--
+-- Returns (device_id, action) so the caller can log INSERT / UPDATE / SKIP_MESH.
+
+CREATE OR REPLACE FUNCTION upsert_device(
+    p_hub_ip       TEXT,
+    p_hubitat_id   TEXT,
+    p_name         TEXT,
+    p_label        TEXT,
+    p_device_type  TEXT,
+    p_protocol     TEXT,
+    p_capabilities JSONB,
+    p_attributes   JSONB
+) RETURNS TABLE(device_id BIGINT, action TEXT) AS $$
+DECLARE
+    v_existing_id         BIGINT;
+    v_existing_hub_ip     TEXT;
+    v_existing_hubitat_id TEXT;
+BEGIN
+    -- Lookup by label (canonical user-facing identity, unique per device)
+    SELECT d.id, d.hub_ip, d.hubitat_id
+      INTO v_existing_id, v_existing_hub_ip, v_existing_hubitat_id
+      FROM devices d
+     WHERE d.label = p_label
+     LIMIT 1;
+
+    IF v_existing_id IS NULL THEN
+        INSERT INTO devices
+            (hub_ip, hubitat_id, name, label, device_type, protocol,
+             capabilities, attributes, last_synced_at)
+        VALUES
+            (p_hub_ip, p_hubitat_id, p_name, p_label, p_device_type,
+             p_protocol, p_capabilities, p_attributes, NOW())
+        RETURNING id INTO v_existing_id;
+        device_id := v_existing_id;
+        action    := 'INSERT';
+        RETURN NEXT;
+
+    ELSIF v_existing_hub_ip = p_hub_ip AND v_existing_hubitat_id = p_hubitat_id THEN
+        UPDATE devices SET
+            name           = p_name,
+            device_type    = p_device_type,
+            protocol       = p_protocol,
+            capabilities   = p_capabilities,
+            attributes     = p_attributes,
+            last_synced_at = NOW()
+        WHERE id = v_existing_id;
+        device_id := v_existing_id;
+        action    := 'UPDATE';
+        RETURN NEXT;
+
+    ELSE
+        device_id := v_existing_id;
+        action    := 'SKIP_MESH';
+        RETURN NEXT;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- =============================================================================
 -- GRANT PERMISSIONS TO ANONYMOUS ROLE (for PostgREST)
 -- =============================================================================
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO smarthome_anon;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO smarthome_anon;
+GRANT EXECUTE ON FUNCTION upsert_device TO smarthome_anon;
 
 -- =============================================================================
 -- TRIGGER: Update updated_at timestamp
@@ -398,6 +610,18 @@ INSERT INTO hub_config (hub_name, hub_ip, maker_api_app_number, maker_api_token_
 VALUES ('main', '<LAN_IP>', '268', 'HUBITAT_API_TOKEN_MAIN', true)
 ON CONFLICT (hub_name) DO NOTHING;
 
+INSERT INTO hub_config (hub_name, hub_ip, maker_api_app_number, maker_api_token_env, is_primary)
+VALUES ('home_1', '<LAN_IP>', '1717', 'HUBITAT_API_TOKEN_OTHER_HUB_1', false)
+ON CONFLICT (hub_name) DO NOTHING;
+
+INSERT INTO hub_config (hub_name, hub_ip, maker_api_app_number, maker_api_token_env, is_primary)
+VALUES ('home_2', '<LAN_IP>', '2151', 'HUBITAT_API_TOKEN_OTHER_HUB_2', false)
+ON CONFLICT (hub_name) DO NOTHING;
+
+INSERT INTO hub_config (hub_name, hub_ip, maker_api_app_number, maker_api_token_env, is_primary)
+VALUES ('home_3', '<LAN_IP>', '1269', 'HUBITAT_API_TOKEN_OTHER_HUB_3', false)
+ON CONFLICT (hub_name) DO NOTHING;
+
 -- =============================================================================
 -- COMMENTS
 -- =============================================================================
@@ -412,3 +636,4 @@ COMMENT ON TABLE hub_config IS 'Hubitat hub connection configuration';
 COMMENT ON TABLE location_modes IS 'Cached Hubitat location modes';
 COMMENT ON TABLE device_matter_map IS 'Maps Hubitat devices to Matter protocol nodes for dual-command control';
 COMMENT ON TABLE hubitat_matter_devices IS 'Discovered Matter devices from Hubitat hubs, deduplicated by unique_id';
+COMMENT ON TABLE device_hub_mapping IS 'Maps devices to their native hub for direct command routing and parallel event processing';

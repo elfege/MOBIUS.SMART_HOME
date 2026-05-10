@@ -15,6 +15,11 @@
     <link rel="stylesheet" href="/static/css/variables.css">
     <!-- Main CSS -->
     <link rel="stylesheet" href="/static/css/main.css">
+    <!-- KPI Modal CSS -->
+    <link rel="stylesheet" href="/static/css/kpi-modal.css">
+
+    <!-- Chart.js (lightweight charting for KPI dashboards) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 
     {% block extra_css %}{% endblock %}
 </head>
@@ -29,11 +34,13 @@
             </div>
             <nav class="main-nav">
                 <a href="/" class="nav-link">Dashboard</a>
+                <a href="/hubs" class="nav-link">Hubs</a>
                 <a href="/matter" class="nav-link">Matter</a>
+                <a href="/samsung-tv" class="nav-link">TV</a>
                 <a href="/instance/new" class="nav-link btn-add">+ Add</a>
                 <span class="nav-sep"></span>
-                <a href="https://<LAN_IP>:443" class="nav-link nav-app">TILES</a>
-                <a href="https://<LAN_IP>:8443" class="nav-link nav-app">NVR</a>
+                <a href="https://mobius.tiles" class="nav-link nav-app">TILES</a>
+                <a href="https://mobius.nvr" class="nav-link nav-app">NVR</a>
             </nav>
         </div>
     </header>

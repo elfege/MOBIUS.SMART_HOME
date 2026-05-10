@@ -1,18 +1,22 @@
 """
 Device Cache Service
 
-Caches Hubitat device states to reduce API polling. The cache is backed by
-PostgreSQL (via PostgREST) for persistence across restarts.
+Caches device states to reduce Hubitat API polling. Backed by PostgreSQL
+(via PostgREST) for persistence.
+
+Post-Phase-5 the cache is keyed by the canonical `devices.id` PK, NOT
+the per-hub Hubitat id. This matches the rest of the system:
+device_selections, device_subscriptions, and event.device_id all use
+canonical ids. Callers that have a Hubitat per-hub id must translate
+via services.hub_classifier (get_device_by_canonical_id /
+get_hub_for_device) before hitting the cache.
 
 Key features:
 - TTL-based cache invalidation
-- Event-driven cache updates (when webhooks arrive)
+- Event-driven cache updates (when webhooks arrive — canonical id is
+  already resolved by the webhook router)
 - Capability filtering for device picker UI
 - Bulk operations for efficiency
-
-The cache serves two purposes:
-1. Reduce load on Hubitat hub by avoiding repeated API calls
-2. Provide fast device lookups for the UI device picker
 """
 
 import os
@@ -90,38 +94,39 @@ class DeviceCache:
         # Try to load from database
         devices = self._load_from_database()
         if devices:
-            self._memory_cache = {d['hubitat_device_id']: d for d in devices}
+            self._memory_cache = {str(d['device_id']): d for d in devices}
             self._last_full_sync = datetime.now()
             return devices
 
         return []
 
-    def get_device(self, device_id: str) -> Optional[Dict[str, Any]]:
+    def get_device(self, device_id) -> Optional[Dict[str, Any]]:
         """
         Get a single cached device.
 
         Args:
-            device_id: Hubitat device ID
+            device_id: Canonical devices.id PK (int or stringified int)
 
         Returns:
             Device dictionary or None if not cached
         """
+        key = str(device_id)
         # Check memory cache first
-        if device_id in self._memory_cache:
-            return self._memory_cache[device_id]
+        if key in self._memory_cache:
+            return self._memory_cache[key]
 
         # Try database
         try:
             response = requests.get(
                 f"{self.postgrest_url}/device_cache",
-                params={"hubitat_device_id": f"eq.{device_id}"},
+                params={"device_id": f"eq.{key}"},
                 timeout=5
             )
             if response.status_code == 200:
                 devices = response.json()
                 if devices:
                     device = devices[0]
-                    self._memory_cache[device_id] = device
+                    self._memory_cache[key] = device
                     return device
         except Exception as e:
             self.logger.error(f"Failed to get device from cache: {e}", exc_info=True)
@@ -165,15 +170,19 @@ class DeviceCache:
     # Write Operations
     # =========================================================================
 
-    def update_all(self, devices: List[Dict[str, Any]]) -> bool:
+    def update_all(self, devices: List[Dict[str, Any]], hub_ip: str = None) -> bool:
         """
-        Update cache with full device list from Hubitat.
+        Update cache with full device list from one hub's Maker API.
 
-        This is typically called after get_all_devices() from HubitatClient.
-        Performs an upsert (insert or update) for each device.
+        This is typically called after get_all_devices() from a HubitatClient.
+        Each device dict carries a per-hub Hubitat id; we translate to
+        the canonical devices.id PK via the (hub_ip, hubitat_id) lookup.
 
         Args:
-            devices: List of device dictionaries from Hubitat API
+            devices: List of device dictionaries from Hubitat Maker API
+            hub_ip: IP of the hub the devices came from (required for
+                    canonical-id resolution; devices from different hubs
+                    can share the same Hubitat per-hub id)
 
         Returns:
             True if update succeeded
@@ -181,11 +190,34 @@ class DeviceCache:
         if not devices:
             return True
 
-        # Transform to database format
+        if not hub_ip:
+            self.logger.warning(
+                "update_all called without hub_ip — cannot resolve "
+                "canonical ids; skipping cache update"
+            )
+            return False
+
+        # Resolve (hub_ip, hubitat_id) → canonical id for each device.
+        # Single batch query against the canonical devices table.
+        from services.hub_classifier import get_hub_for_device  # late import
+
         cache_entries = []
         for device in devices:
+            hubitat_id = str(device.get('id') or '')
+            if not hubitat_id:
+                continue
+            row = get_hub_for_device(hubitat_id)
+            # The lookup matches the FIRST row with this hubitat_id; for
+            # devices on multiple hubs that share an id we'd need
+            # disambiguation, but `devices` already drops mesh duplicates
+            # so by construction each canonical row maps to one (hub_ip,
+            # hubitat_id) pair.
+            if not row or row.get("hub_ip") != hub_ip:
+                # Different hub or unknown device — likely a mesh mirror
+                # we don't track. Skip.
+                continue
             entry = {
-                "hubitat_device_id": str(device.get('id')),
+                "device_id": int(row["id"]),
                 "device_name": device.get('name'),
                 "device_label": device.get('label'),
                 "device_type": device.get('type'),
@@ -195,9 +227,11 @@ class DeviceCache:
                 "sync_source": "api"
             }
             cache_entries.append(entry)
+            # Memory cache keyed by canonical PK as a string
+            self._memory_cache[str(entry['device_id'])] = entry
 
-            # Update memory cache
-            self._memory_cache[entry['hubitat_device_id']] = entry
+        if not cache_entries:
+            return True
 
         # Bulk upsert to database
         try:
@@ -213,7 +247,9 @@ class DeviceCache:
 
             if response.status_code in (200, 201):
                 self._last_full_sync = datetime.now()
-                self.logger.info(f"Updated cache with {len(devices)} devices")
+                self.logger.info(
+                    f"Updated cache with {len(cache_entries)} devices from {hub_ip}"
+                )
                 return True
             else:
                 self.logger.error(f"Cache update failed: {response.text}")
@@ -223,19 +259,23 @@ class DeviceCache:
             self.logger.error(f"Failed to update device cache: {e}", exc_info=True)
             return False
 
-    def update_device(self, device_id: str, device_data: Dict[str, Any]) -> bool:
+    def update_device(self, device_id, device_data: Dict[str, Any]) -> bool:
         """
-        Update a single device in the cache.
+        Update a single cached device by canonical PK.
 
         Args:
-            device_id: Hubitat device ID
-            device_data: Full device data from Hubitat API
+            device_id: Canonical devices.id PK
+            device_data: Full device data from a Hubitat Maker API call.
+                The 'id' field on device_data (Hubitat per-hub id) is
+                preserved in attributes only; the cache row is keyed
+                solely by the canonical id passed in.
 
         Returns:
             True if update succeeded
         """
+        canonical_id = int(device_id)
         entry = {
-            "hubitat_device_id": str(device_id),
+            "device_id": canonical_id,
             "device_name": device_data.get('name'),
             "device_label": device_data.get('label'),
             "device_type": device_data.get('type'),
@@ -245,10 +285,8 @@ class DeviceCache:
             "sync_source": "api"
         }
 
-        # Update memory cache
-        self._memory_cache[str(device_id)] = entry
+        self._memory_cache[str(canonical_id)] = entry
 
-        # Update database
         try:
             response = requests.post(
                 f"{self.postgrest_url}/device_cache",
@@ -266,7 +304,7 @@ class DeviceCache:
 
     def update_device_attribute(
         self,
-        device_id: str,
+        device_id,
         attribute_name: str,
         attribute_value: Any
     ) -> bool:
@@ -277,22 +315,22 @@ class DeviceCache:
         one attribute changed (e.g., motion sensor state).
 
         Args:
-            device_id: Hubitat device ID
+            device_id: Canonical devices.id PK
             attribute_name: Attribute name (e.g., 'motion', 'switch', 'level')
             attribute_value: New attribute value
 
         Returns:
             True if update succeeded
         """
-        device_id = str(device_id)
+        key = str(device_id)
 
         # Update memory cache
-        if device_id in self._memory_cache:
-            attrs = self._memory_cache[device_id].get('attributes', {})
+        if key in self._memory_cache:
+            attrs = self._memory_cache[key].get('attributes', {})
             attrs[attribute_name] = attribute_value
-            self._memory_cache[device_id]['attributes'] = attrs
-            self._memory_cache[device_id]['last_synced_at'] = datetime.now().isoformat()
-            self._memory_cache[device_id]['sync_source'] = 'webhook'
+            self._memory_cache[key]['attributes'] = attrs
+            self._memory_cache[key]['last_synced_at'] = datetime.now().isoformat()
+            self._memory_cache[key]['sync_source'] = 'webhook'
 
         # Update database using PATCH
         try:
@@ -304,7 +342,7 @@ class DeviceCache:
 
                 response = requests.patch(
                     f"{self.postgrest_url}/device_cache",
-                    params={"hubitat_device_id": f"eq.{device_id}"},
+                    params={"device_id": f"eq.{key}"},
                     json={
                         "attributes": attrs,
                         "last_synced_at": datetime.now().isoformat(),
@@ -323,14 +361,14 @@ class DeviceCache:
     # Cache Management
     # =========================================================================
 
-    def invalidate(self, device_id: str = None) -> None:
+    def invalidate(self, device_id=None) -> None:
         """
         Invalidate cached data.
 
         Args:
-            device_id: Specific device to invalidate, or None for all
+            device_id: Specific canonical PK to invalidate, or None for all
         """
-        if device_id:
+        if device_id is not None:
             self._memory_cache.pop(str(device_id), None)
         else:
             self._memory_cache.clear()
@@ -349,7 +387,7 @@ class DeviceCache:
         try:
             response = requests.delete(
                 f"{self.postgrest_url}/device_cache",
-                params={"hubitat_device_id": "neq."},  # Match all
+                params={"device_id": "gt.0"},  # Match all
                 timeout=10
             )
             return response.status_code in (200, 204)

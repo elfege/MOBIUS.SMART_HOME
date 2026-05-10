@@ -22,6 +22,25 @@ cd "$SCRIPT_DIR" &>/dev/null || true
 	exit 1
 }
 
+# ── Wait for internet / AWS connectivity (post-power-loss guard) ─────────────
+_AWS_WAIT_URL="https://sts.amazonaws.com"
+_LOG_FILE="${LOG_FILE:-$HOME/0_LOGS/log.log}"
+mkdir -p "$(dirname "$_LOG_FILE")"
+if ! curl -sf --max-time 5 "$_AWS_WAIT_URL" -o /dev/null 2>&1; then
+    _msg="[$(date '+%H:%M:%S')] Waiting for internet/AWS (${_AWS_WAIT_URL}) — logging every 5s to: $_LOG_FILE"
+    echo -e "${FLASH_ACCENT_YELLOW:-\033[5;33m}${_msg}${NC:-\033[0m}"
+    echo "$_msg" >> "$_LOG_FILE"
+    until curl -sf --max-time 5 "$_AWS_WAIT_URL" -o /dev/null 2>&1; do
+        _msg="[$(date '+%H:%M:%S')] Still waiting for internet/AWS — retrying in 5s"
+        echo -e "${FLASH_ACCENT_YELLOW:-\033[5;33m}${_msg}${NC:-\033[0m}"
+        echo "$_msg" >> "$_LOG_FILE"
+        sleep 5
+    done
+fi
+echo -e "${GREEN:-\033[0;32m}[$(date '+%H:%M:%S')] Internet/AWS connectivity confirmed — proceeding${NC:-\033[0m}"
+echo "[$(date '+%H:%M:%S')] Internet/AWS connectivity confirmed" >> "$_LOG_FILE"
+# ─────────────────────────────────────────────────────────────────────────────
+
 echo "=========================================="
 echo "  0_MOBIUS.SMART_HOME - Startup"
 echo "=========================================="
@@ -41,6 +60,14 @@ fi
 echo ""
 echo "Fetching configuration from AWS Secrets Manager..."
 set -a
+
+# Source .env for local overrides (ports, Samsung TV token/app name, etc.)
+# .env is gitignored — safe for non-secret but persistent local config.
+if [ -f "$SCRIPT_DIR/.env" ]; then
+	# shellcheck disable=SC1090
+	. "$SCRIPT_DIR/.env"
+	echo -e "${GREEN:-}OK: .env loaded${NC:-}"
+fi
 
 # Application config: ports, DB creds, API token, server IP
 pull_aws_secrets SMARTHOME 1
@@ -84,6 +111,28 @@ export HUBITAT_API_NUMBER_OTHER_HUB_3="${HUBITAT_API_NUMBER_3:-}"
 
 # Derived vars
 export WEBHOOK_TARGETS="${WEBHOOK_TARGETS:-http://smarthome-app:${APP_INTERNAL_PORT:-5000}/api/webhook/event,http://tiles-app:80/api/webhook/event}"
+
+# Samsung TV token — priority: state file > .env > AWS secret.
+# The container writes /app/state/samsung_tv_token.txt on every token update.
+_TV_TOKEN_FILE="$(pwd)/state/samsung_tv_token.txt"
+_TV_ENV_FILE="$(pwd)/.env"
+if [ -f "$_TV_TOKEN_FILE" ]; then
+	_file_token="$(cat "$_TV_TOKEN_FILE" | tr -d '[:space:]')"
+	if [ -n "$_file_token" ]; then
+		export SAMSUNG_TV_TOKEN="$_file_token"
+		echo -e "${GREEN:-}OK: Samsung TV token loaded from state file${NC:-}"
+	fi
+fi
+if [ -z "$SAMSUNG_TV_TOKEN" ] && [ -f "$_TV_ENV_FILE" ]; then
+	_env_token="$(grep '^SAMSUNG_TV_TOKEN=' "$_TV_ENV_FILE" | cut -d= -f2 | tr -d '[:space:]')"
+	if [ -n "$_env_token" ]; then
+		export SAMSUNG_TV_TOKEN="$_env_token"
+		echo -e "${GREEN:-}OK: Samsung TV token loaded from .env${NC:-}"
+	fi
+fi
+if [ -z "$SAMSUNG_TV_TOKEN" ]; then
+	echo -e "${YELLOW:-}NOTE: No Samsung TV token found — TV will require pairing on first connect${NC:-}"
+fi
 
 set +a
 

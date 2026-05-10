@@ -61,6 +61,14 @@ echo ""
 echo "Fetching configuration from AWS Secrets Manager..."
 set -a
 
+# Source .env for local overrides (ports, Samsung TV token/app name, etc.)
+# .env is gitignored — safe for non-secret but persistent local config.
+if [ -f "$SCRIPT_DIR/.env" ]; then
+	# shellcheck disable=SC1090
+	. "$SCRIPT_DIR/.env"
+	echo -e "${GREEN:-}OK: .env loaded${NC:-}"
+fi
+
 # Application config: ports, DB creds, API token, server IP
 pull_aws_secrets SMARTHOME 1
 
@@ -103,6 +111,28 @@ export HUBITAT_API_NUMBER_OTHER_HUB_3="${HUBITAT_API_NUMBER_3:-}"
 
 # Derived vars
 export WEBHOOK_TARGETS="${WEBHOOK_TARGETS:-http://smarthome-app:${APP_INTERNAL_PORT:-5000}/api/webhook/event,http://tiles-app:80/api/webhook/event}"
+
+# Samsung TV token — priority: state file > .env > AWS secret.
+# The container writes /app/state/samsung_tv_token.txt on every token update.
+_TV_TOKEN_FILE="$(pwd)/state/samsung_tv_token.txt"
+_TV_ENV_FILE="$(pwd)/.env"
+if [ -f "$_TV_TOKEN_FILE" ]; then
+	_file_token="$(cat "$_TV_TOKEN_FILE" | tr -d '[:space:]')"
+	if [ -n "$_file_token" ]; then
+		export SAMSUNG_TV_TOKEN="$_file_token"
+		echo -e "${GREEN:-}OK: Samsung TV token loaded from state file${NC:-}"
+	fi
+fi
+if [ -z "$SAMSUNG_TV_TOKEN" ] && [ -f "$_TV_ENV_FILE" ]; then
+	_env_token="$(grep '^SAMSUNG_TV_TOKEN=' "$_TV_ENV_FILE" | cut -d= -f2 | tr -d '[:space:]')"
+	if [ -n "$_env_token" ]; then
+		export SAMSUNG_TV_TOKEN="$_env_token"
+		echo -e "${GREEN:-}OK: Samsung TV token loaded from .env${NC:-}"
+	fi
+fi
+if [ -z "$SAMSUNG_TV_TOKEN" ]; then
+	echo -e "${YELLOW:-}NOTE: No Samsung TV token found — TV will require pairing on first connect${NC:-}"
+fi
 
 set +a
 

@@ -31,8 +31,14 @@ import asyncio
 import logging
 import traceback
 import threading
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
+
+
+def _now_iso() -> str:
+    """UTC ISO-8601 timestamp PostgREST accepts as TIMESTAMPTZ."""
+    return datetime.now(timezone.utc).isoformat()
 
 from models.command import (
     CommandResult,
@@ -152,6 +158,21 @@ class DeviceCommander:
         # Thread-safe device status tracking
         self._device_status: Dict[str, CommandStatus] = {}
         self._status_lock = threading.Lock()
+
+        # Whether to log every command to the `device_commands` table.
+        # Default on; set DEVICE_COMMANDS_LOGGING=false to disable if writes
+        # become a bottleneck or PostgREST is misbehaving.
+        self._db_logging_enabled = (
+            os.environ.get('DEVICE_COMMANDS_LOGGING', 'true').strip().lower()
+            == 'true'
+        )
+        self._postgrest_url = os.environ.get(
+            'POSTGREST_URL', 'http://postgrest:3001'
+        )
+        # Reusable session so DB writes don't pay TCP handshake per command.
+        # (requests.Session is thread-safe for separate request() calls.)
+        import requests as _req
+        self._db_http = _req.Session()
 
         logger.info(
             f"DeviceCommander initialized: "
@@ -325,6 +346,148 @@ class DeviceCommander:
             return self._device_status.get(device_id, CommandStatus.IDLE)
 
     # =========================================================================
+    # Two-phase command logging (device_commands table)
+    # =========================================================================
+
+    def _log_command_issued(
+        self,
+        canonical_device_id: str,
+        hubitat_device_id: str,
+        hub_name: str,
+        command: str,
+        args: Optional[List],
+    ) -> Optional[int]:
+        """
+        Insert a 'pending' device_commands row at command issue time.
+
+        Returns the inserted row id (used by _log_command_completed to
+        UPDATE the same row), or None if logging is disabled or failed.
+        Errors are swallowed — DB logging must never block command execution.
+        """
+        if not self._db_logging_enabled:
+            return None
+        try:
+            # canonical_device_id may be a stringified int (post-Phase-5)
+            # or a Hubitat per-hub id (transitional fallback). Only insert
+            # canonical_device_id into the FK column if it parses cleanly
+            # AND looks like a small int (canonical PKs in this DB are 1-1000ish).
+            canonical_fk = None
+            try:
+                cid = int(canonical_device_id)
+                if 0 < cid < 100000:
+                    canonical_fk = cid
+            except (ValueError, TypeError):
+                pass
+
+            # Look up hub_ip from hub_name (cheap; one-off per command).
+            hub_ip = self._hub_name_to_ip(hub_name)
+
+            payload = {
+                'canonical_device_id': canonical_fk,
+                'hubitat_device_id': str(hubitat_device_id),
+                'hub_ip': hub_ip,
+                'command': command,
+                'arguments': args or [],
+                'attempt': 1,
+                'max_attempts': 1,
+                'outcome': 'pending',
+            }
+            r = self._db_http.post(
+                f'{self._postgrest_url}/device_commands',
+                json=payload,
+                headers={
+                    'Content-Type': 'application/json',
+                    'Prefer': 'return=representation',
+                },
+                timeout=3,
+            )
+            if r.status_code in (200, 201):
+                body = r.json()
+                if isinstance(body, list) and body:
+                    return body[0].get('id')
+                if isinstance(body, dict):
+                    return body.get('id')
+        except Exception as e:
+            logger.debug(f'device_commands insert failed: {e}')
+        return None
+
+    def _log_command_completed(
+        self,
+        command_log_id: Optional[int],
+        result: CommandResult,
+    ) -> None:
+        """UPDATE the 'pending' row with the final outcome from CommandResult."""
+        if not self._db_logging_enabled or command_log_id is None:
+            return
+        try:
+            # Map CommandStatus → device_commands.outcome enum.
+            status = result.status
+            if status == CommandStatus.VERIFIED:
+                outcome = 'confirmed'
+            elif status == CommandStatus.TIMEOUT:
+                outcome = 'failed_timeout'
+            elif status == CommandStatus.FAILED:
+                # If verification was attempted (we have expected_state),
+                # it's a verify failure; otherwise a network/send failure.
+                outcome = (
+                    'failed_verify' if result.expected_state is not None
+                    else 'failed_network'
+                )
+            else:
+                # IDLE/UPDATING shouldn't appear here, but cover them.
+                outcome = 'confirmed' if result.success else 'failed_network'
+
+            payload = {
+                'outcome': outcome,
+                'completed_at': _now_iso(),
+                'final_observed_value': (
+                    str(result.actual_state) if result.actual_state is not None
+                    else None
+                ),
+                'verify_retries_used': result.retries_used.get('verify')
+                    if isinstance(result.retries_used, dict) else None,
+                'latency_ms': int(result.elapsed_ms or 0),
+                'error': result.error,
+            }
+            self._db_http.patch(
+                f'{self._postgrest_url}/device_commands',
+                params={'id': f'eq.{command_log_id}'},
+                json=payload,
+                headers={
+                    'Content-Type': 'application/json',
+                    'Prefer': 'return=minimal',
+                },
+                timeout=3,
+            )
+        except Exception as e:
+            logger.debug(f'device_commands update failed: {e}')
+
+    def _hub_name_to_ip(self, hub_name: str) -> Optional[str]:
+        """Resolve hub_name → hub_ip via hub_config. Cached per process."""
+        if not hub_name or hub_name == 'default':
+            return None
+        if not hasattr(self, '_hub_ip_cache'):
+            self._hub_ip_cache: Dict[str, str] = {}
+        if hub_name in self._hub_ip_cache:
+            return self._hub_ip_cache[hub_name]
+        try:
+            r = self._db_http.get(
+                f'{self._postgrest_url}/hub_config',
+                params={
+                    'hub_name': f'eq.{hub_name}',
+                    'select': 'hub_ip',
+                },
+                timeout=3,
+            )
+            rows = r.json() if r.status_code == 200 else []
+            ip = rows[0]['hub_ip'] if rows else None
+            if ip:
+                self._hub_ip_cache[hub_name] = ip
+            return ip
+        except Exception:
+            return None
+
+    # =========================================================================
     # Core Execution (runs in thread)
     # =========================================================================
 
@@ -434,6 +597,19 @@ class DeviceCommander:
             args=args,
         )
         start_time = time.monotonic()
+
+        # Two-phase logging — record the intent before firing so even a
+        # crash mid-execution leaves a 'pending' row that the watchdog
+        # can flag later. canonical_device_id == device_id (post-Phase-5
+        # device_selections store canonical PKs); effective_device_id is
+        # the per-hub native id used in the actual Hubitat HTTP call.
+        command_log_id = self._log_command_issued(
+            canonical_device_id=device_id,
+            hubitat_device_id=effective_device_id,
+            hub_name=hub_name,
+            command=command,
+            args=args,
+        )
 
         # Resolve expected state for verification
         expected = resolve_expected_state(command, args) if verify else None
@@ -611,6 +787,14 @@ class DeviceCommander:
             self._set_device_status(device_id, CommandStatus.FAILED)
 
         result.elapsed_ms = (time.monotonic() - start_time) * 1000
+
+        # Two-phase logging — completion update. Maps CommandStatus to the
+        # device_commands.outcome enum:
+        #   VERIFIED → confirmed
+        #   TIMEOUT  → failed_timeout
+        #   FAILED   → failed_verify (if verification ran) or failed_network
+        self._log_command_completed(command_log_id, result)
+
         logger.debug(f"{log_prefix} completed: {result}")
         return result
 

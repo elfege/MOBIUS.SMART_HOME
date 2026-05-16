@@ -263,6 +263,12 @@ def run_db_migrations():
         # and reconcile-poll have somewhere to UPDATE from boot.
         "INSERT INTO hub_health (hub_id) SELECT id FROM hub_config WHERE is_enabled = TRUE "
         "ON CONFLICT (hub_id) DO NOTHING",
+
+        # Tell PostgREST to reload its schema cache. Without this, columns
+        # added by ALTER TABLE above are invisible to PostgREST's OpenAPI
+        # and POST/PATCH requests fail with PGRST204 "column does not exist".
+        # Surfaced by tests/integration/test_live_crud_and_cascades.py on 2026-05-16.
+        "NOTIFY pgrst, 'reload schema'",
     ]
 
     try:

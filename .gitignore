@@ -41,3 +41,5 @@ nginx/certs/
 
 # Claude Code
 .claude/
+venv_test/
+.pytest_cache/

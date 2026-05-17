@@ -452,6 +452,19 @@ async def lifespan(app: FastAPI):
     )
     await start_reconcile_poll()
 
+    # DB size-cap auto-prune (2026-05-17). Per-table max bytes; oldest rows
+    # dropped + VACUUM ANALYZE every hour. Targets ~100MB total budget across
+    # event_log / raw_events / event_routings / device_commands / etc.
+    # See services/db_size_cap.py for the policy.
+    try:
+        from services.db_size_cap import schedule_prune_job, run_prune_pass
+        from services.scheduler_service import get_scheduler
+        schedule_prune_job(get_scheduler(), interval_seconds=3600)
+        # Also run one pass synchronously at boot so we never start over budget.
+        await asyncio.to_thread(run_prune_pass)
+    except Exception as e:
+        logger.warning(f"db_size_cap startup failed (non-fatal): {e}")
+
     # Run hub classification on startup (populates device_hub_mapping table).
     # Runs in background thread so it doesn't block app readiness.
     # TILES and DeviceCommander depend on this data for native-hub routing.

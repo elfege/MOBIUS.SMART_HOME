@@ -86,7 +86,10 @@ class TestPayloadShape:
         assert isinstance(p["_received_at_monotonic_ms"], float)
         assert p["_received_at_monotonic_ms"] > 0
 
-    async def test_non_device_source_is_skipped(self, mocker):
+    async def test_unknown_source_is_skipped(self, mocker):
+        """LOCATION mode events go to route_mode_change (separate path);
+        DEVICE events go to route_event; APP_STATUS / HUB_INFO / etc are
+        dropped silently."""
         captured = []
 
         async def fake_router(payload):
@@ -95,20 +98,20 @@ class TestPayloadShape:
         client = _make_client_with_fake_ws()
         client._router = MagicMock()
         client._router.route_event = AsyncMock(side_effect=fake_router)
+        client._router.route_mode_change = AsyncMock()
 
         ws = _FakeWs()
-        # Mode-change comes through as source=LOCATION; we don't handle it yet
-        ws.push(json.dumps({
-            "source": "LOCATION",
-            "name": "mode",
-            "value": "Night",
-            "displayName": "Mode Changed",
-        }))
-        # APP_STATUS too — skip
+        # APP_STATUS — neither DEVICE nor LOCATION → skip
         ws.push(json.dumps({
             "source": "APP_STATUS",
             "name": "appstatus",
             "value": "running",
+        }))
+        # HUB_INFO — also skip
+        ws.push(json.dumps({
+            "source": "HUB_INFO",
+            "name": "info",
+            "value": "x",
         }))
         # A real DEVICE frame at the end so we know the drain didn't bail
         ws.push(json.dumps(make_eventsocket_frame(
@@ -122,9 +125,63 @@ class TestPayloadShape:
 
         await client._drain("hub4", "<LAN_IP>", 1, ws)
 
-        # Only the DEVICE frame was forwarded
+        # Only the DEVICE frame was forwarded to route_event
         assert len(captured) == 1
         assert captured[0]["name"] == "motion"
+        # route_mode_change wasn't called (no LOCATION mode events)
+        client._router.route_mode_change.assert_not_called()
+
+    async def test_location_mode_event_routes_to_mode_change(self, mocker):
+        """LOCATION source with name='mode' must route through
+        WebhookRouter.route_mode_change so AML's on_mode_change fires."""
+        client = _make_client_with_fake_ws()
+        client._router = MagicMock()
+        client._router.route_event = AsyncMock()
+        client._router.route_mode_change = AsyncMock()
+
+        ws = _FakeWs()
+        ws.push(json.dumps({
+            "source": "LOCATION",
+            "name": "mode",
+            "value": "Night",
+            "displayName": "Mode Changed",
+        }))
+        mocker.patch(
+            "services.hubitat_eventsocket_client.DATA_WATCHDOG_SECS", 0.05
+        )
+
+        await client._drain("hub4", "<LAN_IP>", 1, ws)
+
+        client._router.route_mode_change.assert_called_once()
+        payload = client._router.route_mode_change.call_args.args[0]
+        assert payload["value"] == "Night"
+        assert payload["_hub_ip"] == "<LAN_IP>"
+        assert payload["_intake"] == "eventsocket"
+        # mode events do NOT go through route_event
+        client._router.route_event.assert_not_called()
+
+    async def test_location_event_with_other_name_is_skipped(self, mocker):
+        """A LOCATION frame whose name isn't 'mode' (e.g., sunset, sunrise)
+        is skipped — we only handle mode changes through this path."""
+        client = _make_client_with_fake_ws()
+        client._router = MagicMock()
+        client._router.route_mode_change = AsyncMock()
+        client._router.route_event = AsyncMock()
+
+        ws = _FakeWs()
+        ws.push(json.dumps({
+            "source": "LOCATION",
+            "name": "sunset",
+            "value": "2026-05-17T19:30:00Z",
+        }))
+        mocker.patch(
+            "services.hubitat_eventsocket_client.DATA_WATCHDOG_SECS", 0.05
+        )
+
+        await client._drain("hub4", "<LAN_IP>", 1, ws)
+
+        client._router.route_mode_change.assert_not_called()
+        client._router.route_event.assert_not_called()
 
     async def test_invalid_json_frame_skipped_silently(self, mocker):
         captured = []

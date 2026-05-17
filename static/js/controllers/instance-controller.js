@@ -816,6 +816,240 @@ export class InstanceWizardController {
 
         // Bind timeWithMode toggle to show/hide per-mode timeouts
         this._bindModeTimeoutToggle(container);
+
+        // Motion-timeout floor enforcement (2026-05-17). Live-validate
+        // noMotionTime + modeTimeouts against system_settings floor; surface
+        // a warning banner with an "I acknowledge" opt-out.
+        this._wireMotionFloorEnforcement(container);
+    }
+
+    /**
+     * Per-field motion-timeout floor enforcement (2026-05-17).
+     *
+     * For every numeric timeout field the user can edit, place a "?" icon
+     * next to it. Click → modal explains the PIR-cooldown issue and offers
+     * a per-field exception button. Granting writes a row to
+     * instance_setting_exceptions; revoking deletes it. Both are
+     * synchronous DB ops so the next master() run sees the new state.
+     *
+     * The runtime enforcer in apps/advanced_motion_lighting/timeout.py
+     * checks the same exception table; UI and runtime are consistent.
+     */
+    async _wireMotionFloorEnforcement(container) {
+        const props = this.appTypeSchema.settings_schema?.properties || {};
+        if (!('noMotionTime' in props) && !('modeTimeouts' in props)) return;
+
+        // Fetch floor + existing exceptions in parallel
+        if (this._motionFloorSecs === undefined) {
+            try {
+                const r = await api.get('/system_settings/motion_timeout_floor_seconds');
+                this._motionFloorSecs = parseInt(r.value, 10) || 60;
+            } catch (e) {
+                this._motionFloorSecs = 60;
+            }
+        }
+        if (this.isEditMode && !this._exceptionPaths) {
+            try {
+                const rows = await api.get(
+                    `/instances/${this.instanceId}/setting-exceptions`
+                );
+                this._exceptionPaths = new Set((rows || []).map(r => r.setting_path));
+            } catch (e) {
+                this._exceptionPaths = new Set();
+            }
+        } else if (!this._exceptionPaths) {
+            this._exceptionPaths = new Set();
+        }
+
+        // Per-field "?" icon insertion + initial validation pass
+        this._attachFloorQuestionIcons(container);
+        this._revalidateMotionFloor(container);
+
+        // Live revalidation as the user types
+        container.querySelectorAll(
+            'input[name="noMotionTime"], [name="timeUnit"], '
+            + '.mode-timeout-input, [data-mode-timeout]'
+        ).forEach(el => {
+            el.addEventListener('input', () => this._revalidateMotionFloor(container));
+            el.addEventListener('change', () => this._revalidateMotionFloor(container));
+        });
+    }
+
+    /**
+     * Discover every numeric-timeout field and place a small "?" icon next
+     * to it. Click → opens the modal.
+     */
+    _attachFloorQuestionIcons(container) {
+        const candidates = [];
+        const noMotionEl = container.querySelector('input[name="noMotionTime"]');
+        if (noMotionEl) candidates.push({ el: noMotionEl, path: 'noMotionTime', label: 'No Motion Time' });
+        container.querySelectorAll('.mode-timeout-input, [data-mode-timeout]').forEach(el => {
+            const modeName = el.dataset.modeName || el.dataset.modeTimeout || el.name;
+            if (modeName) candidates.push({
+                el, path: `modeTimeouts.${modeName}`, label: modeName,
+            });
+        });
+        candidates.forEach(({ el, path, label }) => {
+            if (el.dataset.floorIconAttached) return;
+            el.dataset.floorIconAttached = '1';
+            el.dataset.floorPath = path;
+            el.dataset.floorLabel = label;
+            const icon = document.createElement('button');
+            icon.type = 'button';
+            icon.className = 'motion-floor-help';
+            icon.innerHTML = '?';
+            icon.title = 'Minimum timeout — why it exists';
+            icon.addEventListener('click', (e) => {
+                e.preventDefault();
+                this._openMotionFloorModal(path, label);
+            });
+            el.insertAdjacentElement('afterend', icon);
+        });
+    }
+
+    /**
+     * Re-evaluate per-field warnings inline. For each candidate field,
+     * compute effective seconds and toggle an inline ".below-floor" class
+     * (CSS handles the visual treatment). Fields with active exceptions
+     * stay marked but with ".floor-exception-active" instead.
+     */
+    _revalidateMotionFloor(container) {
+        const floor = this._motionFloorSecs ?? 60;
+        const unitEl = container.querySelector('[name="timeUnit"]');
+        const unit = (unitEl?.value || this.settings.timeUnit || 'minutes').toLowerCase();
+        const mult = unit === 'minutes' ? 60 : 1;
+        const exceptions = this._exceptionPaths || new Set();
+
+        const all = [
+            ...container.querySelectorAll('input[name="noMotionTime"]'),
+            ...container.querySelectorAll('.mode-timeout-input, [data-mode-timeout]'),
+        ];
+        all.forEach(el => {
+            const path = el.dataset.floorPath;
+            if (!path) return;
+            const v = parseFloat(el.value);
+            const below = !isNaN(v) && v > 0 && v * mult < floor;
+            const granted = exceptions.has(path);
+            el.classList.toggle('below-floor', below && !granted);
+            el.classList.toggle('floor-exception-active', granted);
+            // Visible hint inline (small text next to icon)
+            const hint = el.parentNode.querySelector(`.motion-floor-hint[data-for="${CSS.escape(path)}"]`);
+            if (below && !granted) {
+                if (!hint) {
+                    const h = document.createElement('span');
+                    h.className = 'motion-floor-hint';
+                    h.dataset.for = path;
+                    h.textContent = `⚠ < ${floor}s; clamped at runtime`;
+                    el.insertAdjacentElement('afterend', h);
+                }
+            } else if (granted) {
+                if (!hint || !hint.classList.contains('granted')) {
+                    if (hint) hint.remove();
+                    const h = document.createElement('span');
+                    h.className = 'motion-floor-hint granted';
+                    h.dataset.for = path;
+                    h.textContent = '✓ Exception granted for this field';
+                    el.insertAdjacentElement('afterend', h);
+                }
+            } else if (hint) {
+                hint.remove();
+            }
+        });
+    }
+
+    /**
+     * Modal — opens on "?" click. Shows the explanation, lets the user
+     * grant or revoke an exception for THIS specific field. Writes to
+     * /api/instances/{id}/setting-exceptions on grant, deletes on revoke.
+     */
+    async _openMotionFloorModal(settingPath, label) {
+        const floor = this._motionFloorSecs ?? 60;
+        const granted = (this._exceptionPaths || new Set()).has(settingPath);
+        // Strip existing instance of this modal if open
+        document.querySelectorAll('.motion-floor-modal').forEach(m => m.remove());
+        const overlay = document.createElement('div');
+        overlay.className = 'motion-floor-modal';
+        overlay.innerHTML = `
+            <div class="motion-floor-modal-body">
+                <h3>Minimum timeout — ${utils.escapeHtml(label)}</h3>
+                <p>
+                    The system enforces a minimum of <b>${floor} seconds</b> for
+                    no-motion timeouts. PIR motion sensors typically have an
+                    internal re-trigger cooldown of 10–60 seconds: while motion
+                    continues, they emit <code>active</code> once and then go
+                    silent for that cooldown window before emitting again.
+                </p>
+                <p>
+                    If your timeout is shorter than the sensor's cooldown,
+                    the lights turn off between successive <code>active</code>
+                    events even though someone is actually in the room — the
+                    flicker pattern you'd see all evening.
+                </p>
+                <p>
+                    Field path: <code>${utils.escapeHtml(settingPath)}</code>
+                </p>
+                <p>
+                    You can grant an exception for <b>this specific field</b>
+                    if you know what you're doing (e.g., you have an mmWave
+                    radar sensor with no cooldown, or several PIRs covering
+                    the same area). The exception is recorded in the database
+                    (instance_setting_exceptions) and persists across restarts.
+                </p>
+                <div class="motion-floor-modal-actions">
+                    ${granted
+                        ? `<button type="button" class="btn btn-danger motion-floor-revoke">Revoke exception</button>`
+                        : `<button type="button" class="btn btn-secondary motion-floor-grant">Allow lower values for this field, I acknowledge</button>`}
+                    <button type="button" class="btn motion-floor-close">Close</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        overlay.querySelector('.motion-floor-close').addEventListener('click', () => overlay.remove());
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) overlay.remove();
+        });
+
+        if (!granted) {
+            overlay.querySelector('.motion-floor-grant').addEventListener('click', async () => {
+                if (!this.isEditMode) {
+                    // For NEW instances, grant must be deferred until after
+                    // first save (we don't have an instance_id yet).
+                    utils.notify(
+                        'Save this automation first; grant the exception from the edit page.',
+                        'info'
+                    );
+                    overlay.remove();
+                    return;
+                }
+                try {
+                    await api.post(
+                        `/instances/${this.instanceId}/setting-exceptions`,
+                        { setting_path: settingPath, reason: 'granted via wizard ? modal' },
+                    );
+                    this._exceptionPaths.add(settingPath);
+                    utils.notify(`Exception granted for ${label}`, 'success');
+                    this._revalidateMotionFloor(document.getElementById('settings-form-container'));
+                } catch (e) {
+                    utils.notify(`Failed to grant: ${e.message}`, 'error');
+                }
+                overlay.remove();
+            });
+        } else {
+            overlay.querySelector('.motion-floor-revoke').addEventListener('click', async () => {
+                try {
+                    await api.delete(
+                        `/instances/${this.instanceId}/setting-exceptions/${encodeURIComponent(settingPath)}`,
+                    );
+                    this._exceptionPaths.delete(settingPath);
+                    utils.notify(`Exception revoked for ${label}`, 'success');
+                    this._revalidateMotionFloor(document.getElementById('settings-form-container'));
+                } catch (e) {
+                    utils.notify(`Failed to revoke: ${e.message}`, 'error');
+                }
+                overlay.remove();
+            });
+        }
     }
 
     /**

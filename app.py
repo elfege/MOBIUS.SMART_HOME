@@ -2384,6 +2384,23 @@ async def list_canonical_devices():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/hubs/health", tags=["hubs"])
+async def list_hub_health():
+    """
+    Per-hub WS + reconcile health. Used by the dashboard alert banner to
+    decide whether to surface a 'recommend Maker API as fallback' warning.
+    """
+    import requests as _requests
+    r = _requests.get(
+        f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/hub_health",
+        params={"order": "hub_id"},
+        timeout=5,
+    )
+    if r.status_code == 200:
+        return r.json()
+    raise HTTPException(status_code=r.status_code, detail=r.text)
+
+
 @app.get("/api/hubs", tags=["hubs"])
 async def list_hubs():
     """List all configured Hubitat hubs (rows of hub_config)."""

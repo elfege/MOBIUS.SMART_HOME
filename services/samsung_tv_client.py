@@ -110,6 +110,42 @@ _POLL_INTERVAL: int = 5
 # Max queued commands before the oldest is dropped to prevent memory growth
 _MAX_QUEUE_DEPTH: int = 50
 
+# Hysteresis for ON → OFF transitions.
+#
+# The Samsung Tizen HTTP info endpoint at :8001/api/v2/ is intermittently
+# unresponsive even when the TV is actively on — a single timeout or transient
+# network blip is NOT proof that the TV powered off.  Without hysteresis, one
+# bad poll flips power_state to OFF, fires the on_power_change callback, and
+# pushes "off" to every Hubitat subscriber, which then unsets WatchingTV mode
+# (or any other mode/automation gated on the TV switch).  Five seconds later
+# the next poll succeeds and we push "on" again — but the spurious mode change
+# has already happened.
+#
+# Strategy:
+#   • Any observation reading "on" (PowerState == "on") flips state to ON
+#     immediately and resets the streak.  Spurious ON-when-OFF has never been
+#     reported and would only happen if the TV lied — accept it as truth.
+#   • Any non-ON observation (timeout, HTTP error, PowerState=standby, missing
+#     field, etc.) increments _off_streak.  Only after _OFF_STREAK_THRESHOLD
+#     consecutive non-ON readings do we flip ON → OFF.
+#
+# With _POLL_INTERVAL = 5 s and threshold = 3, worst-case Hubitat lag when the
+# TV actually turns off is ~15-25 s.  That's acceptable for a "you stopped
+# watching TV" signal and eliminates the false-positive mode changes.
+_OFF_STREAK_THRESHOLD: int = 3
+
+# Per-request HTTP timeout for the TV info endpoint poll.  Raised from the
+# old 4 s default because Samsung's web server can stall for 5-7 s under load
+# (especially during channel changes or app launches) without actually being
+# unreachable.
+_HTTP_POLL_TIMEOUT: int = 8
+
+# Quick-retry budget inside a single poll cycle.  A single missed packet
+# should not count as a "TV is off" observation — we retry once with a short
+# gap before declaring the poll failed for this cycle.
+_HTTP_POLL_RETRIES: int = 1
+_HTTP_POLL_RETRY_GAP_S: float = 0.4
+
 
 # =============================================================================
 # Enums
@@ -233,6 +269,18 @@ class SamsungTVClient:
         self._use_ssl:      bool              = config.use_ssl
         self._retry_count:  int               = 0
         self._last_error:   Optional[str]     = None
+
+        # ON → OFF debounce counter.  Counts consecutive non-ON poll
+        # observations; only when it reaches _OFF_STREAK_THRESHOLD do we
+        # actually transition power_state to OFF.  Reset to 0 on any ON
+        # observation.  Prevents spurious mode changes in Hubitat caused by
+        # the Samsung HTTP info endpoint occasionally timing out while the
+        # TV is in fact on.  See module-level docstring on _OFF_STREAK_THRESHOLD.
+        self._off_streak:   int               = 0
+
+        # Last raw observation (for log/debug visibility — what the poll
+        # actually saw before hysteresis was applied).
+        self._last_observation: TVPowerState  = TVPowerState.UNKNOWN
 
         # --- Command queue ---
         # asyncio.Queue is FIFO and coroutine-safe.
@@ -483,39 +531,100 @@ class SamsungTVClient:
 
     async def poll_power(self) -> TVPowerState:
         """
-        Query the TV's HTTP API to determine its current power state.
+        Query the TV's HTTP API to determine its current power state, then
+        apply ON → OFF hysteresis before pushing any state change.
 
-        Checks device.PowerState in the JSON response body to distinguish
-        between truly on and standby (screen off but network still active).
+        Observation rules:
+            • HTTP 200 + device.PowerState == "on"     → observation = ON
+            • HTTP 200 + device.PowerState == anything → observation = OFF
+            • timeout / connection refused / exception → observation = OFF
+
+        Hysteresis rules (the whole point of this method):
+            • observation == ON  → _off_streak = 0, transition to ON immediately.
+            • observation == OFF → _off_streak += 1.  Only transition to OFF
+              after _OFF_STREAK_THRESHOLD consecutive OFF observations.
+              This prevents one bad poll from pushing a spurious "switch=off"
+              event to Hubitat (which would unset WatchingTV mode / similar).
+
+        The "first OFF observation while currently ON" case is special:
+        we deliberately hold _power_state at ON until the streak threshold
+        is reached, so callbacks (push_state_changes → Hubitat LAN push)
+        do NOT fire on the transient blip.
 
         Returns:
-            TVPowerState.ON  if the TV responds AND PowerState == "on".
-            TVPowerState.OFF if unreachable, no response, or PowerState
-                             is "standby" / any value other than "on".
+            The current debounced TVPowerState (not necessarily the raw
+            observation — that's only exposed via self._last_observation).
         """
-        url = f"http://{self.config.tv_ip}:{_HTTP_PORT}{_HTTP_PATH}"
+        url  = f"http://{self.config.tv_ip}:{_HTTP_PORT}{_HTTP_PATH}"
         loop = asyncio.get_running_loop()
+
         try:
             resp = await loop.run_in_executor(None, _http_get_sync, url)
-            if not resp:
-                new_state = TVPowerState.OFF
-            else:
-                # Samsung TVs with Instant On keep the network active in
-                # standby — HTTP 200 still returns but PowerState != "on".
-                power_field = (resp.get("device") or {}).get("PowerState", "")
-                new_state = (
-                    TVPowerState.ON if power_field == "on" else TVPowerState.OFF
-                )
-                if power_field and power_field != "on":
-                    self._log.info(
-                        "TV HTTP responded but PowerState=%s — treating as OFF",
-                        power_field,
-                    )
-        except Exception:
-            new_state = TVPowerState.OFF
+        except Exception as exc:
+            # Belt-and-braces — _http_get_sync should swallow its own
+            # exceptions, but if anything leaks out, treat as a failed poll.
+            self._log.debug("poll_power: executor raised %s", exc)
+            resp = None
 
-        await self._update_power_state(new_state)
-        return new_state
+        if not resp:
+            observation = TVPowerState.OFF
+            obs_reason  = "no_http_response"
+        else:
+            # Samsung TVs with Instant On keep the network active even in
+            # standby — HTTP 200 still returns but PowerState != "on".
+            power_field = (resp.get("device") or {}).get("PowerState", "")
+            if power_field == "on":
+                observation = TVPowerState.ON
+                obs_reason  = "PowerState=on"
+            else:
+                observation = TVPowerState.OFF
+                obs_reason  = f"PowerState={power_field or 'MISSING'}"
+
+        self._last_observation = observation
+
+        # --- Hysteresis ---
+        if observation == TVPowerState.ON:
+            # Any ON reading is taken at face value and resets the streak.
+            if self._off_streak:
+                self._log.debug(
+                    "ON observation cleared _off_streak (was %d)", self._off_streak
+                )
+            self._off_streak = 0
+            await self._update_power_state(TVPowerState.ON)
+            return TVPowerState.ON
+
+        # observation == OFF
+        self._off_streak += 1
+
+        # Already-OFF case: nothing to debounce, just stay OFF.
+        if self._power_state == TVPowerState.OFF:
+            return TVPowerState.OFF
+
+        # UNKNOWN → OFF on the first observation is fine (startup case).
+        if self._power_state == TVPowerState.UNKNOWN:
+            self._log.info(
+                "First OFF observation from UNKNOWN startup state (%s)", obs_reason
+            )
+            await self._update_power_state(TVPowerState.OFF)
+            return TVPowerState.OFF
+
+        # ON → OFF transition: only fire after threshold consecutive OFFs.
+        if self._off_streak < _OFF_STREAK_THRESHOLD:
+            self._log.info(
+                "Suppressing ON→OFF transition (streak %d/%d, reason=%s) — "
+                "TV may have hiccuped; holding state ON",
+                self._off_streak, _OFF_STREAK_THRESHOLD, obs_reason,
+            )
+            return TVPowerState.ON
+
+        # Threshold reached — TV is genuinely off / unreachable.
+        self._log.info(
+            "ON→OFF transition committed after %d consecutive OFF observations "
+            "(latest reason=%s)",
+            self._off_streak, obs_reason,
+        )
+        await self._update_power_state(TVPowerState.OFF)
+        return TVPowerState.OFF
 
     async def _update_power_state(self, new_state: TVPowerState) -> None:
         """
@@ -598,7 +707,8 @@ class SamsungTVClient:
 
         Returns:
             Dict with keys: name, tv_ip, mac, conn_state, power_state,
-            use_ssl, queued_commands, retry_count, last_error, token_set.
+            use_ssl, queued_commands, retry_count, last_error, token_set,
+            off_streak, last_observation.
         """
         return {
             "name":             self.config.name,
@@ -611,6 +721,11 @@ class SamsungTVClient:
             "retry_count":      self._retry_count,
             "last_error":       self._last_error,
             "token_set":        bool(self.config.token),
+            # Debounce visibility: how many consecutive OFF observations
+            # we've seen.  Used to debug "Hubitat thinks TV is off but it's on".
+            "off_streak":         self._off_streak,
+            "off_threshold":      _OFF_STREAK_THRESHOLD,
+            "last_observation":   self._last_observation.value,
         }
 
     # =========================================================================
@@ -981,31 +1096,58 @@ def _send_wol_sync(mac: str, tv_ip: str) -> None:
             time.sleep(0.2)
 
 
-def _http_get_sync(url: str, timeout: int = 4) -> Optional[Dict[str, Any]]:
+def _http_get_sync(
+    url: str,
+    timeout: int = _HTTP_POLL_TIMEOUT,
+    retries: int = _HTTP_POLL_RETRIES,
+) -> Optional[Dict[str, Any]]:
     """
-    Synchronous HTTP GET to the TV's info endpoint.
+    Synchronous HTTP GET to the TV's info endpoint, with quick retries.
 
-    Returns the parsed JSON body if the request succeeds with HTTP 200,
-    or None if the TV is unreachable (off) or returns a non-200 status.
+    A single dropped packet should not count as "the TV is off".  Inside
+    one poll cycle we attempt the request up to (1 + retries) times,
+    sleeping _HTTP_POLL_RETRY_GAP_S between attempts.  Only if every
+    attempt fails do we return None, which the caller then folds into
+    the OFF-streak debounce.
+
+    Returns the parsed JSON body if any attempt succeeds with HTTP 200,
+    or None if all attempts fail / return a non-200 status.
 
     Args:
         url:     Full URL to query.
-        timeout: Request timeout in seconds.
+        timeout: Per-attempt request timeout in seconds.
+        retries: Number of retry attempts after the first failure.
 
     Returns:
         Parsed JSON dict or None.
     """
-    try:
-        resp = requests.get(url, timeout=timeout)
-        if resp.status_code == 200:
-            try:
-                return resp.json()
-            except Exception:
-                # 200 but non-JSON body still means the TV is responding.
-                return {"raw": resp.text[:200]}
-        return None
-    except requests.exceptions.RequestException:
-        return None
+    attempts = 1 + max(0, retries)
+    last_exc: Optional[BaseException] = None
+
+    for attempt_idx in range(attempts):
+        try:
+            resp = requests.get(url, timeout=timeout)
+            if resp.status_code == 200:
+                try:
+                    return resp.json()
+                except Exception:
+                    # 200 but non-JSON body still means the TV is responding.
+                    return {"raw": resp.text[:200]}
+            # Non-200 — not retriable in any useful way for this endpoint
+            # (no auth, no 429), so bail immediately.
+            return None
+        except requests.exceptions.RequestException as exc:
+            last_exc = exc
+            if attempt_idx < attempts - 1:
+                time.sleep(_HTTP_POLL_RETRY_GAP_S)
+                continue
+
+    # All attempts failed.  We deliberately swallow the exception — the
+    # caller cares whether the TV responded, not why it didn't.  The
+    # debug-level log here is enough for forensic analysis.
+    if last_exc:
+        logger.debug("HTTP GET %s failed after %d attempts: %s", url, attempts, last_exc)
+    return None
 
 
 def _classify_error(exc: Exception) -> _ErrorClass:

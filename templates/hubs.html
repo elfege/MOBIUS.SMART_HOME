@@ -28,10 +28,10 @@
                 <button type="button" id="btn-maker-api-info" class="motion-floor-help"
                         title="Why this matters" style="vertical-align:middle;">?</button>
                 <p style="opacity:.7;font-size:.85rem;margin:.4rem 0 0;">
-                    Maker API is no longer mandatory for inbound events (the eventsocket WS
-                    provides those directly). It remains the default outbound HTTP path
-                    for command verification and the reconcile poll. Disable to test the
-                    new architecture without it.
+                    Default OFF. Outbound HTTP (reconcile, commands, verify) goes
+                    through the Hubitat admin API. Enable as a fallback if the
+                    admin path has issues on your firmware. The eventsocket WS
+                    handles all inbound events either way.
                 </p>
             </div>
             <button type="button" id="btn-toggle-maker-api" class="btn btn-secondary">
@@ -87,43 +87,33 @@
          motion-floor modal so theme-neutral.css styling applies. -->
     <div id="maker-api-modal" class="motion-floor-modal" style="display:none;">
         <div class="motion-floor-modal-body">
-            <h3>Maker API — what it is and when to disable it</h3>
+            <h3>Maker API — legacy fallback (default OFF)</h3>
             <p>
-                <strong>Old architecture (until 2026-05-16):</strong> the app
-                received all device events as HTTP POSTs from each Hubitat hub's
-                Maker API. Required per-device opt-in on the hub; brittle across
-                firmware updates; per-event HTTP latency.
+                <strong>The primary intake is the eventsocket WS</strong>
+                (<code>ws://hub/eventsocket</code>). Every event from every
+                device streams through it, no per-device opt-in. Mobius
+                writes everything to <code>event_log</code> + <code>raw_events</code>;
+                the database is the source of truth for state.
             </p>
             <p>
-                <strong>New architecture:</strong> a persistent WebSocket
-                (<code>ws://hub/eventsocket</code>) streams every event from
-                every device, no opt-in, no HTTP. Mobius writes them all into
-                its own database (<code>event_log</code> + <code>raw_events</code>)
-                which becomes the source of truth for state.
+                <strong>Outbound HTTP (reconcile poll + commands + command
+                verify) uses Hubitat's admin API by default</strong> —
+                <code>POST /device/runmethod</code> for commands,
+                <code>GET /device/fullJson/&lt;id&gt;</code> for verify and
+                reconcile. Faster than Maker (skips the Groovy app layer)
+                and doesn't need per-device opt-in.
             </p>
             <p>
-                <strong>What Maker API still does (for now):</strong>
-            </p>
-            <ul style="opacity:.8;font-size:.9rem;margin:0 0 .8rem 1.2rem;">
-                <li>The reconcile poll pulls <code>/devices/all</code> every 60s
-                    as a safety net for events the WS may have missed during
-                    a reconnect window.</li>
-                <li>Outbound commands (turn on, set level) go through
-                    <code>/devices/&lt;id&gt;/&lt;cmd&gt;</code>.</li>
-            </ul>
-            <p>
-                <strong>Disabling it:</strong> the toggle switches both paths to
-                Hubitat's <em>admin API</em> (what the web UI itself uses).
-                Reconcile becomes per-subscribed-device <code>/device/fullJson/&lt;id&gt;</code>
-                lookups; commands use <code>/device/&lt;id&gt;/&lt;cmd&gt;</code>
-                on the admin endpoint. The admin command path is not yet
-                production-verified — keep Maker API enabled for now unless
-                you're actively testing the cutover.
+                <strong>The toggle below re-enables Maker API</strong> for
+                outbound HTTP only — a fallback if the admin API has issues
+                on your firmware version. The WS intake is unaffected
+                either way.
             </p>
             <p style="opacity:.65;font-size:.85rem;">
-                If the eventsocket fails (hub reboot, firmware update), the
-                landing page shows a warning and recommends re-enabling Maker
-                API as the fallback intake until the WS is healthy again.
+                If the eventsocket itself fails (hub reboot, firmware update),
+                the dashboard surfaces a warning. WS will reconnect on its
+                own; nothing to do unless the failure persists, in which case
+                the warning suggests escalating.
             </p>
             <div class="motion-floor-modal-actions">
                 <button type="button" class="btn motion-floor-close"
@@ -208,9 +198,9 @@
         try {
             const row = await api.get('/system_settings/maker_api_enabled');
             const on = (row.value === true || row.value === 'true');
-            stateEl.textContent = on ? 'enabled' : 'disabled (admin API in use)';
-            stateEl.style.color = on ? 'var(--color-success)' : 'var(--color-warning)';
-            btn.textContent = on ? 'Disable Maker API' : 'Re-enable Maker API';
+            stateEl.textContent = on ? 'fallback ENABLED' : 'OFF (admin API in use, default)';
+            stateEl.style.color = on ? 'var(--color-warning)' : 'var(--color-success)';
+            btn.textContent = on ? 'Disable Maker API' : 'Enable Maker API as fallback';
             btn.dataset.currentOn = String(on);
         } catch (err) {
             stateEl.textContent = `error: ${err.message}`;

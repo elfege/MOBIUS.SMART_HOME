@@ -629,12 +629,43 @@ class DeviceCommander:
                 result.retries_used['outer'] = outer
 
                 # ----- SEND COMMAND -----
-                # Inner retries (network) handled by hubitat_client._make_request()
-                # Uses effective_client (native hub) and effective_device_id
+                # Backend selection:
+                #   maker_api_enabled=True  → Maker API via hubitat_client
+                #   maker_api_enabled=False → admin API via hubitat_admin_client
+                # No silent fallback. If the user disabled Maker, they're
+                # testing the new path; failures surface as failures.
+                use_admin_for_commands = False
                 try:
-                    send_ok = effective_client.send_command(
-                        effective_device_id, command, args
-                    )
+                    from services.settings_resolver import get_resolver
+                    maker_on = get_resolver().get_system('maker_api_enabled', True)
+                    use_admin_for_commands = (maker_on is False)
+                except Exception:
+                    pass
+
+                try:
+                    if use_admin_for_commands:
+                        # Pick the right hub for this device. hub_name comes
+                        # from _resolve_native_hub above; admin client is
+                        # per-hub-IP. Look up hub_ip from hub_config.
+                        hub_ip = self._hub_name_to_ip(hub_name) or '<LAN_IP>'
+                        from services.hubitat_admin_client import get_client
+                        admin = get_client(hub_ip, hub_name or 'default')
+                        # admin.send_command expects (device_id, command, argument)
+                        # where argument is a single value. args is a list;
+                        # if non-empty, use the first element.
+                        arg = args[0] if args else None
+                        arg_str = str(arg) if arg is not None else None
+                        send_ok = admin.send_command(
+                            int(effective_device_id), command, arg_str,
+                        )
+                        if send_ok:
+                            logger.info(
+                                f"{log_prefix} sent via ADMIN API"
+                            )
+                    else:
+                        send_ok = effective_client.send_command(
+                            effective_device_id, command, args
+                        )
                 except Exception as e:
                     logger.error(
                         f"{log_prefix} send_command exception on attempt "
@@ -695,11 +726,35 @@ class DeviceCommander:
                         return result
 
                     try:
-                        # LIVE API call — bypasses cache
-                        # Use effective_client + effective_device_id for native hub
-                        device_data = effective_client.get_device(
-                            effective_device_id
-                        )
+                        # LIVE API call — bypasses cache. Backend mirrors
+                        # the send path: admin API when Maker is disabled,
+                        # else Maker. Without this, 'disable Maker API'
+                        # was a lie — sends went admin but verify-poll
+                        # still hit Maker.
+                        if use_admin_for_commands:
+                            from services.hubitat_admin_client import get_client
+                            hub_ip = self._hub_name_to_ip(hub_name) or '<LAN_IP>'
+                            admin = get_client(hub_ip, hub_name or 'default')
+                            raw = admin.get_device(int(effective_device_id))
+                            # Admin returns {currentStates: [{name, value, ...}]};
+                            # extract_attribute expects Maker's
+                            # {attributes: [{name, currentValue, ...}]} shape,
+                            # so normalize before handing off.
+                            if raw:
+                                states = raw.get('currentStates') or []
+                                device_data = {
+                                    'attributes': [
+                                        {'name': s.get('name'),
+                                         'currentValue': s.get('value')}
+                                        for s in states
+                                    ],
+                                }
+                            else:
+                                device_data = None
+                        else:
+                            device_data = effective_client.get_device(
+                                effective_device_id
+                            )
                         if device_data:
                             actual = extract_attribute(
                                 device_data, expected['attribute']

@@ -61,18 +61,19 @@ export class InstanceWizardController {
     }
 
     /**
-     * Mark step pills as clickable for any step the user has already visited
-     * or is at, so they can jump back/forward without dead-ending. Step 1
-     * is hidden in edit mode (see init()).
+     * Mark step pills as clickable. ALL steps except the current one are
+     * navigable — forward jumps are gated by validation inside goToStep()
+     * (which walks nextStep one step at a time and bails on validation
+     * failure), backward jumps are always allowed. The current step gets
+     * the .active class for visual emphasis but is not clickable (no point
+     * in clicking the step you're already on).
      */
     _refreshStepPills() {
         document.querySelectorAll('.wizard-steps .step').forEach((el) => {
             const step = parseInt(el.dataset.step, 10);
-            // Clickable if it's the current step or an earlier step we've
-            // legitimately seen. Forward jumps are gated by validation.
-            const isReachable = step <= this.currentStep;
-            el.classList.toggle('clickable', isReachable);
-            el.setAttribute('aria-disabled', isReachable ? 'false' : 'true');
+            const isCurrent = step === this.currentStep;
+            el.classList.toggle('clickable', !isCurrent);
+            el.setAttribute('aria-disabled', isCurrent ? 'true' : 'false');
         });
     }
 

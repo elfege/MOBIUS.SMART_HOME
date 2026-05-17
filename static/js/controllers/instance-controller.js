@@ -883,8 +883,9 @@ export class InstanceWizardController {
         const candidates = [];
         const noMotionEl = container.querySelector('input[name="noMotionTime"]');
         if (noMotionEl) candidates.push({ el: noMotionEl, path: 'noMotionTime', label: 'No Motion Time' });
-        container.querySelectorAll('.mode-timeout-input, [data-mode-timeout]').forEach(el => {
-            const modeName = el.dataset.modeName || el.dataset.modeTimeout || el.name;
+        container.querySelectorAll('.mode-timeout-input, [data-mode-timeout], [data-mode]').forEach(el => {
+            // Per-mode inputs use data-mode="ModeName" (see _renderModeTimeoutsList)
+            const modeName = el.dataset.mode || el.dataset.modeName || el.dataset.modeTimeout;
             if (modeName) candidates.push({
                 el, path: `modeTimeouts.${modeName}`, label: modeName,
             });
@@ -1218,6 +1219,15 @@ export class InstanceWizardController {
                 }
             });
         });
+
+        // Re-wire floor enforcement now that per-mode inputs exist in the DOM.
+        // _attachFloorQuestionIcons is idempotent (dataset.floorIconAttached
+        // guard); _revalidateMotionFloor reruns the live validation.
+        const formContainer = document.getElementById('settings-form-container');
+        if (formContainer && this._motionFloorSecs !== undefined) {
+            this._attachFloorQuestionIcons(formContainer);
+            this._revalidateMotionFloor(formContainer);
+        }
     }
 
     /**

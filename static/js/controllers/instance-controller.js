@@ -27,11 +27,54 @@ export class InstanceWizardController {
      * Initialize the wizard
      */
     async init() {
+        this._applyHeaderForMode();
         if (this.isEditMode) {
             await this.loadExistingInstance();
+            // In edit mode, skip the "Choose Type" step entirely — the type is
+            // immutable for an existing instance. Hide the pill (via CSS class)
+            // and jump straight to step 2.
+            document.querySelector('.wizard-steps')?.classList.add('edit-mode');
+            this.goToStep(2);
         } else {
             await this.loadAppTypes();
         }
+        this._refreshStepPills();
+    }
+
+    /**
+     * Adjust header text + Save button label depending on add vs edit mode.
+     * Lets the same template serve both flows without two URLs.
+     */
+    _applyHeaderForMode() {
+        const title = document.getElementById('wizard-title');
+        const step4Title = document.getElementById('step-4-title');
+        const saveBtn = document.getElementById('wizard-save-btn');
+        if (this.isEditMode) {
+            if (title) title.textContent = 'Edit Automation';
+            if (step4Title) step4Title.textContent = 'Save Changes';
+            if (saveBtn) saveBtn.textContent = 'Save';
+        } else {
+            if (title) title.textContent = 'New Automation';
+            if (step4Title) step4Title.textContent = 'Name Your Automation';
+            if (saveBtn) saveBtn.textContent = 'Create Automation';
+        }
+    }
+
+    /**
+     * Mark step pills as clickable. ALL steps except the current one are
+     * navigable — forward jumps are gated by validation inside goToStep()
+     * (which walks nextStep one step at a time and bails on validation
+     * failure), backward jumps are always allowed. The current step gets
+     * the .active class for visual emphasis but is not clickable (no point
+     * in clicking the step you're already on).
+     */
+    _refreshStepPills() {
+        document.querySelectorAll('.wizard-steps .step').forEach((el) => {
+            const step = parseInt(el.dataset.step, 10);
+            const isCurrent = step === this.currentStep;
+            el.classList.toggle('clickable', !isCurrent);
+            el.setAttribute('aria-disabled', isCurrent ? 'true' : 'false');
+        });
     }
 
     /**
@@ -184,15 +227,40 @@ export class InstanceWizardController {
 
         this.currentStep++;
         this.showStep(this.currentStep);
+        this._refreshStepPills();
     }
 
     /**
-     * Go to previous step
+     * Go to previous step. Edit mode floor is step 2 (no type-pick).
      */
     prevStep() {
-        if (this.currentStep > 1) {
+        const floor = this.isEditMode ? 2 : 1;
+        if (this.currentStep > floor) {
             this.currentStep--;
             this.showStep(this.currentStep);
+            this._refreshStepPills();
+        }
+    }
+
+    /**
+     * Jump directly to a step (via pill click). Forward jumps validate the
+     * intervening steps; backward jumps are always allowed.
+     */
+    goToStep(target) {
+        if (target < 1 || target > 4) return;
+        // Disallow jumping to step 1 in edit mode (type is immutable).
+        if (this.isEditMode && target === 1) return;
+        if (target > this.currentStep) {
+            // Forward jump: walk steps to validate each intermediate gate.
+            while (this.currentStep < target) {
+                const before = this.currentStep;
+                this.nextStep();
+                if (this.currentStep === before) return; // validation blocked
+            }
+        } else if (target < this.currentStep) {
+            this.currentStep = target;
+            this.showStep(this.currentStep);
+            this._refreshStepPills();
         }
     }
 
@@ -249,17 +317,40 @@ export class InstanceWizardController {
         // current category's capability filter wouldn't return (so the
         // chip can still render the label, never a bare numeric id).
         this._allDevicesById = {};
+
+        // Perf 2026-05-17: ONE bulk call to /api/devices/by-categories instead
+        // of N sequential per-category calls. The endpoint reads the canonical
+        // `devices` table (no Hubitat HTTP), so this is ~10ms total vs
+        // ~700ms × N categories previously.
+        const capabilities = categories.map(c => c.capability).filter(Boolean);
+        let grouped = {};
         try {
-            const all = await api.get('/canonical-devices');
-            for (const d of (all || [])) {
+            if (capabilities.length) {
+                grouped = await api.get(
+                    `/devices/by-categories?categories=${encodeURIComponent(capabilities.join(','))}`
+                );
+            }
+        } catch (err) {
+            console.error('Bulk devices load failed, falling back to per-category', err);
+            grouped = {};
+        }
+
+        // Populate fallback dict from the bulk response itself (every device
+        // we just loaded is fair game for chip labels).
+        for (const cap of Object.keys(grouped)) {
+            for (const d of (grouped[cap] || [])) {
                 this._allDevicesById[String(d.id)] = d;
             }
-        } catch (_) { /* fallback not critical, chips degrade gracefully */ }
+        }
 
-        // Render each category
+        // Render each category from the bulk response. Fallback to per-category
+        // call if the bulk call somehow missed (defensive).
         let html = '';
         for (const category of categories) {
-            const devices = await this.loadDevices(category.capability);
+            let devices = grouped[category.capability] || [];
+            if (!devices.length) {
+                devices = await this.loadDevices(category.capability);
+            }
             this._devicesByCategory[category.key] = devices;
             html += this.renderDeviceCategory(category, devices);
         }
@@ -725,6 +816,241 @@ export class InstanceWizardController {
 
         // Bind timeWithMode toggle to show/hide per-mode timeouts
         this._bindModeTimeoutToggle(container);
+
+        // Motion-timeout floor enforcement (2026-05-17). Live-validate
+        // noMotionTime + modeTimeouts against system_settings floor; surface
+        // a warning banner with an "I acknowledge" opt-out.
+        this._wireMotionFloorEnforcement(container);
+    }
+
+    /**
+     * Per-field motion-timeout floor enforcement (2026-05-17).
+     *
+     * For every numeric timeout field the user can edit, place a "?" icon
+     * next to it. Click → modal explains the PIR-cooldown issue and offers
+     * a per-field exception button. Granting writes a row to
+     * instance_setting_exceptions; revoking deletes it. Both are
+     * synchronous DB ops so the next master() run sees the new state.
+     *
+     * The runtime enforcer in apps/advanced_motion_lighting/timeout.py
+     * checks the same exception table; UI and runtime are consistent.
+     */
+    async _wireMotionFloorEnforcement(container) {
+        const props = this.appTypeSchema.settings_schema?.properties || {};
+        if (!('noMotionTime' in props) && !('modeTimeouts' in props)) return;
+
+        // Fetch floor + existing exceptions in parallel
+        if (this._motionFloorSecs === undefined) {
+            try {
+                const r = await api.get('/system_settings/motion_timeout_floor_seconds');
+                this._motionFloorSecs = parseInt(r.value, 10) || 60;
+            } catch (e) {
+                this._motionFloorSecs = 60;
+            }
+        }
+        if (this.isEditMode && !this._exceptionPaths) {
+            try {
+                const rows = await api.get(
+                    `/instances/${this.instanceId}/setting-exceptions`
+                );
+                this._exceptionPaths = new Set((rows || []).map(r => r.setting_path));
+            } catch (e) {
+                this._exceptionPaths = new Set();
+            }
+        } else if (!this._exceptionPaths) {
+            this._exceptionPaths = new Set();
+        }
+
+        // Per-field "?" icon insertion + initial validation pass
+        this._attachFloorQuestionIcons(container);
+        this._revalidateMotionFloor(container);
+
+        // Live revalidation as the user types
+        container.querySelectorAll(
+            'input[name="noMotionTime"], [name="timeUnit"], '
+            + '.mode-timeout-input, [data-mode-timeout]'
+        ).forEach(el => {
+            el.addEventListener('input', () => this._revalidateMotionFloor(container));
+            el.addEventListener('change', () => this._revalidateMotionFloor(container));
+        });
+    }
+
+    /**
+     * Discover every numeric-timeout field and place a small "?" icon next
+     * to it. Click → opens the modal.
+     */
+    _attachFloorQuestionIcons(container) {
+        const candidates = [];
+        const noMotionEl = container.querySelector('input[name="noMotionTime"]');
+        if (noMotionEl) candidates.push({ el: noMotionEl, path: 'noMotionTime', label: 'No Motion Time' });
+        container.querySelectorAll('.mode-timeout-input, [data-mode-timeout], [data-mode]').forEach(el => {
+            // Per-mode inputs use data-mode="ModeName" (see _renderModeTimeoutsList)
+            const modeName = el.dataset.mode || el.dataset.modeName || el.dataset.modeTimeout;
+            if (modeName) candidates.push({
+                el, path: `modeTimeouts.${modeName}`, label: modeName,
+            });
+        });
+        candidates.forEach(({ el, path, label }) => {
+            if (el.dataset.floorIconAttached) return;
+            el.dataset.floorIconAttached = '1';
+            el.dataset.floorPath = path;
+            el.dataset.floorLabel = label;
+            const icon = document.createElement('button');
+            icon.type = 'button';
+            icon.className = 'motion-floor-help';
+            icon.innerHTML = '?';
+            icon.title = 'Minimum timeout — why it exists';
+            icon.addEventListener('click', (e) => {
+                e.preventDefault();
+                this._openMotionFloorModal(path, label);
+            });
+            el.insertAdjacentElement('afterend', icon);
+        });
+    }
+
+    /**
+     * Re-evaluate per-field warnings inline. For each candidate field,
+     * compute effective seconds and toggle an inline ".below-floor" class
+     * (CSS handles the visual treatment). Fields with active exceptions
+     * stay marked but with ".floor-exception-active" instead.
+     */
+    _revalidateMotionFloor(container) {
+        const floor = this._motionFloorSecs ?? 60;
+        const unitEl = container.querySelector('[name="timeUnit"]');
+        const unit = (unitEl?.value || this.settings.timeUnit || 'minutes').toLowerCase();
+        const mult = unit === 'minutes' ? 60 : 1;
+        const exceptions = this._exceptionPaths || new Set();
+
+        const all = [
+            ...container.querySelectorAll('input[name="noMotionTime"]'),
+            ...container.querySelectorAll('.mode-timeout-input, [data-mode-timeout]'),
+        ];
+        all.forEach(el => {
+            const path = el.dataset.floorPath;
+            if (!path) return;
+            const v = parseFloat(el.value);
+            const below = !isNaN(v) && v > 0 && v * mult < floor;
+            const granted = exceptions.has(path);
+            el.classList.toggle('below-floor', below && !granted);
+            el.classList.toggle('floor-exception-active', granted);
+            // Visible hint inline (small text next to icon)
+            const hint = el.parentNode.querySelector(`.motion-floor-hint[data-for="${CSS.escape(path)}"]`);
+            if (below && !granted) {
+                if (!hint) {
+                    const h = document.createElement('span');
+                    h.className = 'motion-floor-hint';
+                    h.dataset.for = path;
+                    h.textContent = `⚠ < ${floor}s; clamped at runtime`;
+                    el.insertAdjacentElement('afterend', h);
+                }
+            } else if (granted) {
+                if (!hint || !hint.classList.contains('granted')) {
+                    if (hint) hint.remove();
+                    const h = document.createElement('span');
+                    h.className = 'motion-floor-hint granted';
+                    h.dataset.for = path;
+                    h.textContent = '✓ Exception granted for this field';
+                    el.insertAdjacentElement('afterend', h);
+                }
+            } else if (hint) {
+                hint.remove();
+            }
+        });
+    }
+
+    /**
+     * Modal — opens on "?" click. Shows the explanation, lets the user
+     * grant or revoke an exception for THIS specific field. Writes to
+     * /api/instances/{id}/setting-exceptions on grant, deletes on revoke.
+     */
+    async _openMotionFloorModal(settingPath, label) {
+        const floor = this._motionFloorSecs ?? 60;
+        const granted = (this._exceptionPaths || new Set()).has(settingPath);
+        // Strip existing instance of this modal if open
+        document.querySelectorAll('.motion-floor-modal').forEach(m => m.remove());
+        const overlay = document.createElement('div');
+        overlay.className = 'motion-floor-modal';
+        overlay.innerHTML = `
+            <div class="motion-floor-modal-body">
+                <h3>Minimum timeout — ${utils.escapeHtml(label)}</h3>
+                <p>
+                    The system enforces a minimum of <b>${floor} seconds</b> for
+                    no-motion timeouts. PIR motion sensors typically have an
+                    internal re-trigger cooldown of 10–60 seconds: while motion
+                    continues, they emit <code>active</code> once and then go
+                    silent for that cooldown window before emitting again.
+                </p>
+                <p>
+                    If your timeout is shorter than the sensor's cooldown,
+                    the lights turn off between successive <code>active</code>
+                    events even though someone is actually in the room — the
+                    flicker pattern you'd see all evening.
+                </p>
+                <p>
+                    Field path: <code>${utils.escapeHtml(settingPath)}</code>
+                </p>
+                <p>
+                    You can grant an exception for <b>this specific field</b>
+                    if you know what you're doing (e.g., you have an mmWave
+                    radar sensor with no cooldown, or several PIRs covering
+                    the same area). The exception is recorded in the database
+                    (instance_setting_exceptions) and persists across restarts.
+                </p>
+                <div class="motion-floor-modal-actions">
+                    ${granted
+                        ? `<button type="button" class="btn btn-danger motion-floor-revoke">Revoke exception</button>`
+                        : `<button type="button" class="btn btn-secondary motion-floor-grant">Allow lower values for this field, I acknowledge</button>`}
+                    <button type="button" class="btn motion-floor-close">Close</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        overlay.querySelector('.motion-floor-close').addEventListener('click', () => overlay.remove());
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) overlay.remove();
+        });
+
+        if (!granted) {
+            overlay.querySelector('.motion-floor-grant').addEventListener('click', async () => {
+                if (!this.isEditMode) {
+                    // For NEW instances, grant must be deferred until after
+                    // first save (we don't have an instance_id yet).
+                    utils.notify(
+                        'Save this automation first; grant the exception from the edit page.',
+                        'info'
+                    );
+                    overlay.remove();
+                    return;
+                }
+                try {
+                    await api.post(
+                        `/instances/${this.instanceId}/setting-exceptions`,
+                        { setting_path: settingPath, reason: 'granted via wizard ? modal' },
+                    );
+                    this._exceptionPaths.add(settingPath);
+                    utils.notify(`Exception granted for ${label}`, 'success');
+                    this._revalidateMotionFloor(document.getElementById('settings-form-container'));
+                } catch (e) {
+                    utils.notify(`Failed to grant: ${e.message}`, 'error');
+                }
+                overlay.remove();
+            });
+        } else {
+            overlay.querySelector('.motion-floor-revoke').addEventListener('click', async () => {
+                try {
+                    await api.delete(
+                        `/instances/${this.instanceId}/setting-exceptions/${encodeURIComponent(settingPath)}`,
+                    );
+                    this._exceptionPaths.delete(settingPath);
+                    utils.notify(`Exception revoked for ${label}`, 'success');
+                    this._revalidateMotionFloor(document.getElementById('settings-form-container'));
+                } catch (e) {
+                    utils.notify(`Failed to revoke: ${e.message}`, 'error');
+                }
+                overlay.remove();
+            });
+        }
     }
 
     /**
@@ -893,6 +1219,15 @@ export class InstanceWizardController {
                 }
             });
         });
+
+        // Re-wire floor enforcement now that per-mode inputs exist in the DOM.
+        // _attachFloorQuestionIcons is idempotent (dataset.floorIconAttached
+        // guard); _revalidateMotionFloor reruns the live validation.
+        const formContainer = document.getElementById('settings-form-container');
+        if (formContainer && this._motionFloorSecs !== undefined) {
+            this._attachFloorQuestionIcons(formContainer);
+            this._revalidateMotionFloor(formContainer);
+        }
     }
 
     /**

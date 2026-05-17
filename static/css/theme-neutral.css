@@ -1,0 +1,476 @@
+/* =============================================================================
+   Neutral Theme Overlay — 2026-05-17
+   --------------------------------------------------------------------------
+   Loaded AFTER variables.css and main.css. Overrides the saturated default
+   palette with a slate-neutral set, kills the cartoon "filled pill" look
+   for buttons + step indicators, and normalizes field sizing.
+
+   Design rule: "this is an app, not a cartoon" — pull saturation down ~30%
+   from defaults, no bright accent fills, hairline borders over heavy fills.
+   Inspiration: Linear / Vercel / Logseq dark themes.
+
+   To disable: comment out the link in templates/base.html. No layout
+   regressions — this only adjusts colors, sizing, and visual weight.
+   ============================================================================= */
+
+:root {
+    /* ---------- core palette ---------- */
+    --color-bg:            #14161c;
+    --color-card:          #1c1f27;
+    --color-surface:       #1c1f27;
+    --color-surface-2:     #232733;
+    --color-border:        #2a2e38;
+    --color-border-strong: #3a3f4d;
+
+    --color-text:          #e6e8ec;
+    --color-text-muted:    #8a8f99;
+
+    --color-header-bg:     rgba(20, 22, 28, 0.94);
+
+    /* ---------- accent (slate-blue, NOT cobalt) ---------- */
+    --color-primary:             #6b7d96;
+    --color-primary-hover:       #7e90a8;
+    --color-primary-alpha-15:    rgba(107, 125, 150, 0.15);
+    --color-primary-alpha-30:    rgba(107, 125, 150, 0.30);
+    --color-accent:              #8b7d63;        /* warm slate, not orange */
+
+    /* ---------- semantic (muted) ---------- */
+    --color-success:        #6a8a5a;             /* sage, not lime */
+    --color-success-border: #4d6845;
+    --color-success-glow:   rgba(106, 138, 90, 0.30);
+
+    --color-warning:        #c79a5a;
+    --color-danger:         #a85a5a;             /* brick, not fire-engine */
+    --color-danger-hover:   #b96a6a;
+    --color-danger-dark:    #8a4848;
+
+    --color-neutral:        #7a808c;
+
+    /* ---------- state badges, also de-saturated ---------- */
+    --color-state-green-bg:   #243426;
+    --color-state-green-text: #a9c4a0;
+    --color-state-green-border: #3a5237;
+
+    --color-state-red-bg:     #3a2424;
+    --color-state-red-text:   #d5a0a0;
+    --color-state-red-border: #5a3838;
+
+    /* ---------- radii — kill the giant pills ---------- */
+    --radius:       6px;
+    --radius-sm:    4px;
+    --radius-pill:  6px;   /* OVERRIDE: was 999px; pills are now squarish */
+}
+
+/* =============================================================================
+   Buttons — IDE-style, not iOS bubblegum
+   ============================================================================= */
+
+.btn,
+.btn-primary,
+.btn-secondary,
+.btn-danger {
+    height: 36px;
+    padding: 0 14px;
+    font-size: 0.875rem;
+    font-weight: 500;
+    line-height: 1;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: background 120ms, border-color 120ms, color 120ms;
+    box-shadow: none;            /* no glow */
+}
+
+.btn-primary {
+    background: #2a3142;
+    border-color: #38415a;
+    color: #e6e8ec;
+}
+.btn-primary:hover {
+    background: #344056;
+    border-color: #4a5572;
+}
+.btn-primary:active { background: #2a3142; }
+
+.btn-secondary {
+    background: transparent;
+    color: var(--color-text);
+    border-color: var(--color-border);
+}
+.btn-secondary:hover {
+    background: var(--color-surface-2);
+    border-color: var(--color-border-strong);
+}
+
+.btn-danger {
+    background: rgba(168, 90, 90, 0.10);
+    color: #d8a0a0;
+    border-color: #5e3a3a;
+}
+.btn-danger:hover {
+    background: rgba(168, 90, 90, 0.18);
+    border-color: #7a4a4a;
+}
+
+.btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+}
+
+/* The "Create Automation" CTA stays slightly more emphasized than .btn-primary,
+   but still neutral — no cobalt. */
+.btn-create {
+    background: #3a4762;
+    border-color: #4a5572;
+}
+.btn-create:hover {
+    background: #485670;
+    border-color: #5a6480;
+}
+
+/* =============================================================================
+   Wizard step indicators — text + hairline, NOT filled pills
+   ============================================================================= */
+
+.wizard-steps {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    flex-wrap: wrap;
+}
+
+.wizard-steps .step {
+    background: transparent !important;          /* kill the colored fill */
+    color: var(--color-text-muted);
+    font-size: 0.85rem;
+    font-weight: 500;
+    padding: 6px 12px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    position: relative;
+    transition: color 120ms;
+}
+
+/* Separator between pills */
+.wizard-steps .step + .step::before {
+    content: '›';
+    color: var(--color-border-strong);
+    margin-right: 12px;
+    margin-left: -6px;
+    font-weight: 400;
+}
+
+.wizard-steps .step.active {
+    background: transparent !important;
+    color: var(--color-text) !important;
+    border-color: var(--color-border-strong);
+}
+
+.wizard-steps .step.completed {
+    background: transparent !important;
+    color: var(--color-text-muted) !important;
+}
+
+.wizard-steps .step.completed::after {
+    content: ' ✓';
+    color: #6a8a5a;
+    margin-left: 4px;
+}
+
+.wizard-steps .step.clickable:hover {
+    background: var(--color-surface-2) !important;
+    color: var(--color-text);
+    cursor: pointer;
+}
+
+/* =============================================================================
+   Forms — uniform field sizing, labels above, narrow numbers
+   ============================================================================= */
+
+.form-group label {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    font-weight: 500;
+    margin-bottom: 6px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+}
+
+.form-group input[type="text"],
+.form-group input[type="number"],
+.form-group select,
+input[type="text"],
+input[type="number"],
+select,
+textarea {
+    height: 36px;
+    padding: 0 12px;
+    font-size: 0.9rem;
+    line-height: 36px;
+    background: var(--color-surface);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    transition: border-color 120ms;
+    text-align: left;             /* override any inherited center */
+    box-shadow: none;
+}
+
+input[type="number"] {
+    max-width: 120px;             /* numeric fields stay compact */
+    -moz-appearance: textfield;   /* hide spin buttons on FF */
+}
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: none;
+}
+
+/* Per-mode timeout grid — was rendering as full-width number fields.
+   Label sits left at fixed width, input is the compact 120px next to it. */
+.mode-timeout-row,
+.timeout-row,
+[class*="mode-timeout"] {
+    display: grid;
+    grid-template-columns: 140px 120px;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 0;
+}
+.mode-timeout-row label,
+.timeout-row label,
+[class*="mode-timeout"] label {
+    margin-bottom: 0;
+    font-size: 0.85rem;
+    color: var(--color-text);
+}
+.mode-timeout-row .current-label,
+[class*="mode-timeout"] .current-label {
+    color: var(--color-primary);
+    font-size: 0.7rem;
+    font-style: italic;
+    display: block;
+}
+
+/* =============================================================================
+   App-type cards (wizard step 1) — subtle hover, no cobalt
+   ============================================================================= */
+
+.app-type-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 1.25rem;
+    transition: border-color 120ms, background 120ms;
+}
+.app-type-card:hover {
+    border-color: var(--color-border-strong);
+    background: var(--color-surface-2);
+}
+.app-type-card.selected {
+    border-color: var(--color-primary);
+    background: var(--color-primary-alpha-15);
+}
+
+/* =============================================================================
+   Misc cleanup
+   ============================================================================= */
+
+/* Card backgrounds throughout the app */
+.card,
+.dashboard-tile,
+.instance-card {
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    box-shadow: none;
+}
+
+/* Header — subtle, not opaque */
+.app-header {
+    background: var(--color-header-bg);
+    border-bottom: 1px solid var(--color-border);
+    box-shadow: none;
+}
+
+/* Wizard container */
+.wizard {
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    box-shadow: none;
+}
+
+/* =============================================================================
+   Motion-floor enforcement UI (per-field exceptions)
+   ============================================================================= */
+
+/* The "?" icon next to each numeric timeout input */
+.motion-floor-help {
+    margin-left: 8px;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--color-border);
+    background: var(--color-surface);
+    color: var(--color-text-muted);
+    border-radius: 50%;
+    font-size: 0.8rem;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+    vertical-align: middle;
+    transition: color 120ms, border-color 120ms;
+}
+.motion-floor-help:hover {
+    color: var(--color-text);
+    border-color: var(--color-border-strong);
+}
+
+/* Inline hint text after a problem field */
+.motion-floor-hint {
+    display: inline-block;
+    margin-left: 10px;
+    font-size: 0.75rem;
+    color: var(--color-warning);
+    vertical-align: middle;
+}
+.motion-floor-hint.granted {
+    color: var(--color-success);
+}
+
+/* Field highlight when below floor / when exception is active */
+input[type="number"].below-floor,
+.mode-timeout-input.below-floor {
+    border-color: var(--color-warning);
+}
+input[type="number"].floor-exception-active,
+.mode-timeout-input.floor-exception-active {
+    border-color: var(--color-success);
+    border-style: dashed;
+}
+
+/* The modal — neutral, in keeping with the theme */
+.motion-floor-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.55);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    backdrop-filter: blur(2px);
+}
+.motion-floor-modal-body {
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 24px;
+    max-width: 560px;
+    width: 100%;
+    color: var(--color-text);
+    box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+}
+.motion-floor-modal-body h3 {
+    margin: 0 0 12px;
+    font-size: 1.05rem;
+    font-weight: 600;
+}
+.motion-floor-modal-body p {
+    margin: 0 0 10px;
+    color: var(--color-text-muted);
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+.motion-floor-modal-body code {
+    background: var(--color-surface-2);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 0.85em;
+    color: var(--color-text);
+}
+.motion-floor-modal-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+}
+
+/* =============================================================================
+   KPI chart header — title + cycle-diagram button on one line
+   ============================================================================= */
+
+.kpi-chart-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.kpi-chart-header h3 {
+    margin: 0;
+    font-size: 0.95rem;
+}
+.kpi-chart-cycle-btn {
+    height: 28px;
+    padding: 0 10px;
+    font-size: 0.75rem;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+    border-radius: 4px;
+    cursor: pointer;
+    line-height: 1;
+}
+.kpi-chart-cycle-btn:hover {
+    color: var(--color-text);
+    border-color: var(--color-border-strong);
+}
+
+/* =============================================================================
+   Colorblind mode (Okabe-Ito) — body.colorblind class
+   Charts pull their palette from js/services/colorblind.js; this section
+   handles non-chart UI surfaces (status badges, button accents) that use
+   CSS color values.
+   ============================================================================= */
+
+body.colorblind {
+    --color-primary: #0072B2;       /* Okabe-Ito blue */
+    --color-primary-hover: #1F8DC8;
+    --color-primary-alpha-15: rgba(0, 114, 178, 0.15);
+    --color-primary-alpha-30: rgba(0, 114, 178, 0.30);
+    --color-success: #009E73;       /* Okabe-Ito bluish green */
+    --color-danger:  #D55E00;       /* Okabe-Ito vermilion (NOT pure red — distinguishable from blue under CVD) */
+    --color-warning: #E69F00;       /* Okabe-Ito orange */
+}
+
+/* In CVD mode, dashed-success border on "exception granted" inputs is
+   easier to distinguish than a color swap alone. */
+body.colorblind input[type="number"].floor-exception-active,
+body.colorblind .mode-timeout-input.floor-exception-active {
+    border-color: var(--color-success);
+    border-style: dashed;
+    border-width: 2px;  /* extra emphasis */
+}
+
+/* Loading placeholder text — should fade in, not glow */
+.loading-placeholder {
+    color: var(--color-text-muted);
+    font-size: 0.9rem;
+    font-style: italic;
+    text-align: center;
+    padding: 2rem 0;
+}

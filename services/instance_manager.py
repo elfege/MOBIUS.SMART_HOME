@@ -817,7 +817,11 @@ class InstanceManager:
             'illuminance_sensor': 'illuminance',
             'pause_buttons': button_event,
             'keep_off_switches': 'switch',
-            'keep_on_switches': 'switch'
+            'keep_on_switches': 'switch',
+            # Fan Automation app (and any future fan/humidity-driven app):
+            'fans': 'switch',
+            'humidity_sensors': 'humidity',
+            'presence_sensors': 'presence',
         }
 
         # device_selections stores CANONICAL devices.id PKs (Phase 5).

@@ -169,37 +169,46 @@ class HubitatAdminClient:
         argument: Optional[str] = None,
     ) -> bool:
         """
-        Issue a command. Tries the conventional admin paths in order:
-          1. POST /device/<id>/<command> (with body if argument given)
-          2. GET  /device/<id>/<command>[/argument]   (legacy GET-style)
-        Returns True on 2xx.
+        Issue a command via the admin API's runmethod endpoint:
+          POST /device/runmethod
+          Content-Type: application/x-www-form-urlencoded
+          body: id=<device_id>&method=<command>[&arg=<argument>]
 
-        IMPORTANT: this method is currently UNTESTED against live devices
-        on the user's hubs. Wave D of the admin-API plan tests + cuts over
-        commands. For now we ship the method so the wiring exists but it
-        should NOT be invoked in production until verified.
+        Endpoint shape verified against live hubs via Elfege's chrome_nvr
+        function in .bash_utils (firmware 2.5.x).  Success = HTTP 2xx OR 3xx
+        (302 is the standard admin-form-flow response).
         """
-        # Attempt 1: POST style
+        body = {"id": str(device_id), "method": command}
+        if argument is not None:
+            # Hubitat's runmethod takes the argument as a separate field.
+            # Field name varies by firmware ("arg" or "value"); we send
+            # both so either parses.
+            body["arg"] = str(argument)
+            body["value"] = str(argument)
         try:
-            payload = {"command_argument": argument} if argument else {}
             r = self._request(
-                "POST", f"/device/{device_id}/{command}", data=payload
+                "POST", "/device/runmethod",
+                data=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                allow_redirects=False,
             )
-            if 200 <= r.status_code < 300:
-                return True
-        except Exception as e:
-            logger.debug(f"hubitat_admin send_command POST: {e}")
-        # Attempt 2: GET fallback (some firmwares use GET)
-        try:
-            path = f"/device/{device_id}/{command}"
-            if argument is not None:
-                path += f"/{argument}"
-            r = self._request("GET", path)
-            return 200 <= r.status_code < 300
+            ok = (200 <= r.status_code < 400)
+            if ok:
+                logger.info(
+                    f"hubitat_admin [{self.hub_name}] device {device_id}/"
+                    f"{command} via /device/runmethod HTTP {r.status_code}"
+                )
+            else:
+                logger.warning(
+                    f"hubitat_admin [{self.hub_name}] device {device_id}/"
+                    f"{command} non-2xx/3xx: HTTP {r.status_code} "
+                    f"body={r.text[:120]!r}"
+                )
+            return ok
         except Exception as e:
             logger.warning(
                 f"hubitat_admin [{self.hub_name}] send_command "
-                f"({device_id}/{command}) both POST + GET failed: {e}"
+                f"({device_id}/{command}) failed: {e}"
             )
             return False
 
@@ -213,23 +222,56 @@ _clients: Dict[str, HubitatAdminClient] = {}
 _clients_lock = threading.Lock()
 
 
-def _credentials_for_hub(hub_name: str) -> tuple:
+def _credentials_for_hub(hub_name: str, hub_ip: str = '') -> tuple:
     """
     Look up admin-login credentials for the given hub.
 
-    Resolution order:
-      1. encrypted_secrets table — keys 'hubitat_admin_user_<hub>',
-         'hubitat_admin_password_<hub>'. (Not implemented yet — schema is
-         in place, decrypt path is part of the deferred KEK work.)
-      2. Env vars HUBITAT_ADMIN_USER_<HUB>, HUBITAT_ADMIN_PASSWORD_<HUB>
-         (uppercase hub name).
-      3. (None, None) → unauthenticated. Fine for hubs without a login
-         password set in the Hubitat admin UI.
+    Resolution order (first non-empty pair wins):
+      1. hub_config row — admin_username + admin_password columns
+         (populated via the /hubs page form).
+      2. Env vars HUBITAT_ADMIN_USER_<n> / HUBITAT_ADMIN_PASSWORD_<n>
+         where <n> = hub_config.admin_creds_index. Populated by
+         pull_aws_secrets HUBITAT — same convention as Elfege's
+         chrome_nvr bash helper (.bash_utils:7373 et seq).
+      3. (None, None) → unauthenticated. Correct for the default state
+         where Hubitat Hub Login Security is OFF.
+
+    Empty strings are treated as "no credential" (matching the bash
+    helper's `[[ -n "$VAR" ]]` test). pull_aws_secrets exports every key
+    in the secret including empties, so we must NOT treat empty as set.
     """
-    upper = hub_name.upper()
-    user = os.environ.get(f"HUBITAT_ADMIN_USER_{upper}")
-    password = os.environ.get(f"HUBITAT_ADMIN_PASSWORD_{upper}")
-    return (user, password)
+    pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+
+    # Step 1 + 2: query hub_config for both the inline credentials AND
+    # the admin_creds_index that maps to env vars. One round trip.
+    try:
+        r = requests.get(
+            f'{pg}/hub_config',
+            params={
+                'hub_name': f'eq.{hub_name}',
+                'select': 'admin_username,admin_password,admin_creds_index',
+            },
+            timeout=3,
+        )
+        rows = r.json() if r.status_code == 200 else []
+    except Exception:
+        rows = []
+
+    row = rows[0] if rows else {}
+    user = (row.get('admin_username') or '').strip()
+    password = (row.get('admin_password') or '').strip()
+    if user and password:
+        return (user, password)
+
+    # Fall back to env vars via the slot index.
+    slot = row.get('admin_creds_index')
+    if slot:
+        env_user = (os.environ.get(f'HUBITAT_ADMIN_USER_{slot}') or '').strip()
+        env_pw = (os.environ.get(f'HUBITAT_ADMIN_PASSWORD_{slot}') or '').strip()
+        if env_user and env_pw:
+            return (env_user, env_pw)
+
+    return (None, None)
 
 
 def get_client(hub_ip: str, hub_name: str) -> HubitatAdminClient:
@@ -237,7 +279,7 @@ def get_client(hub_ip: str, hub_name: str) -> HubitatAdminClient:
     key = hub_ip
     with _clients_lock:
         if key not in _clients:
-            user, password = _credentials_for_hub(hub_name)
+            user, password = _credentials_for_hub(hub_name, hub_ip)
             _clients[key] = HubitatAdminClient(
                 hub_ip=hub_ip,
                 hub_name=hub_name,

@@ -387,6 +387,14 @@ def run_db_migrations():
         "CREATE INDEX IF NOT EXISTS idx_ise_instance ON instance_setting_exceptions(instance_id)",
         "GRANT SELECT, INSERT, UPDATE, DELETE ON instance_setting_exceptions TO smarthome_anon",
 
+        # Per-hub admin credentials (2026-05-17). Optional — populated only
+        # when the user enables Hubitat Hub Login Security. Plaintext for
+        # now; KEK-encryption layer coming. AWS Secrets Manager fallback
+        # via admin_creds_index → HUBITAT_ADMIN_USER_<n>/PASSWORD_<n>.
+        "ALTER TABLE hub_config ADD COLUMN IF NOT EXISTS admin_username VARCHAR(80)",
+        "ALTER TABLE hub_config ADD COLUMN IF NOT EXISTS admin_password VARCHAR(200)",
+        "ALTER TABLE hub_config ADD COLUMN IF NOT EXISTS admin_creds_index INTEGER",
+
         # Grants
         "GRANT SELECT, INSERT, UPDATE, DELETE ON system_settings TO smarthome_anon",
         "GRANT SELECT, INSERT, UPDATE, DELETE ON app_type_settings TO smarthome_anon",

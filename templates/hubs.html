@@ -9,15 +9,88 @@
             <a href="/" class="back-link">&larr; Dashboard</a>
             <h2 style="margin:0.5rem 0 0;">Hub Configuration</h2>
             <p style="opacity:.7;margin:.25rem 0 0;">
-                Edit Hubitat hub settings. Changes are applied to the running app immediately;
+                Edit Hubitat hub settings. Changes are applied immediately;
                 device routing caches are invalidated on save.
             </p>
         </div>
         <button class="btn btn-primary" id="btn-add-hub">+ Add hub</button>
     </div>
 
+    <!-- Maker API panel — explains the architecture + toggle.
+         Less central than before now that WS is the SOT, but kept here so
+         user can disable Maker entirely once admin-API command path is
+         verified (see docs/plans/hubitat_admin_api_and_db_as_state_truth_2026_05_17.md). -->
+    <div id="maker-api-panel"
+         style="background:var(--color-surface);border:1px solid var(--color-border);border-radius:8px;padding:1rem;margin-bottom:1rem;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;flex-wrap:wrap;">
+            <div style="flex:1;min-width:240px;">
+                <strong>Maker API: <span id="maker-api-state">…</span></strong>
+                <button type="button" id="btn-maker-api-info" class="motion-floor-help"
+                        title="Why this matters" style="vertical-align:middle;">?</button>
+                <p style="opacity:.7;font-size:.85rem;margin:.4rem 0 0;">
+                    Maker API is no longer mandatory for inbound events (the eventsocket WS
+                    provides those directly). It remains the default outbound HTTP path
+                    for command verification and the reconcile poll. Disable to test the
+                    new architecture without it.
+                </p>
+            </div>
+            <button type="button" id="btn-toggle-maker-api" class="btn btn-secondary">
+                …
+            </button>
+        </div>
+    </div>
+
     <div id="hubs-status" style="opacity:.7;font-size:.9rem;margin-bottom:.5rem;">Loading…</div>
     <div id="hubs-list"></div>
+
+    <!-- Maker API info modal — opens on ? click. Same overlay class as the
+         motion-floor modal so theme-neutral.css styling applies. -->
+    <div id="maker-api-modal" class="motion-floor-modal" style="display:none;">
+        <div class="motion-floor-modal-body">
+            <h3>Maker API — what it is and when to disable it</h3>
+            <p>
+                <strong>Old architecture (until 2026-05-16):</strong> the app
+                received all device events as HTTP POSTs from each Hubitat hub's
+                Maker API. Required per-device opt-in on the hub; brittle across
+                firmware updates; per-event HTTP latency.
+            </p>
+            <p>
+                <strong>New architecture:</strong> a persistent WebSocket
+                (<code>ws://hub/eventsocket</code>) streams every event from
+                every device, no opt-in, no HTTP. Mobius writes them all into
+                its own database (<code>event_log</code> + <code>raw_events</code>)
+                which becomes the source of truth for state.
+            </p>
+            <p>
+                <strong>What Maker API still does (for now):</strong>
+            </p>
+            <ul style="opacity:.8;font-size:.9rem;margin:0 0 .8rem 1.2rem;">
+                <li>The reconcile poll pulls <code>/devices/all</code> every 60s
+                    as a safety net for events the WS may have missed during
+                    a reconnect window.</li>
+                <li>Outbound commands (turn on, set level) go through
+                    <code>/devices/&lt;id&gt;/&lt;cmd&gt;</code>.</li>
+            </ul>
+            <p>
+                <strong>Disabling it:</strong> the toggle switches both paths to
+                Hubitat's <em>admin API</em> (what the web UI itself uses).
+                Reconcile becomes per-subscribed-device <code>/device/fullJson/&lt;id&gt;</code>
+                lookups; commands use <code>/device/&lt;id&gt;/&lt;cmd&gt;</code>
+                on the admin endpoint. The admin command path is not yet
+                production-verified — keep Maker API enabled for now unless
+                you're actively testing the cutover.
+            </p>
+            <p style="opacity:.65;font-size:.85rem;">
+                If the eventsocket fails (hub reboot, firmware update), the
+                landing page shows a warning and recommends re-enabling Maker
+                API as the fallback intake until the WS is healthy again.
+            </p>
+            <div class="motion-floor-modal-actions">
+                <button type="button" class="btn motion-floor-close"
+                        id="btn-maker-api-modal-close">Close</button>
+            </div>
+        </div>
+    </div>
 
     <!-- Hidden template for one hub card -->
     <template id="hub-card-template">
@@ -57,4 +130,56 @@
 </div>
 
 <script type="module" src="/static/js/controllers/hubs-controller.js"></script>
+<script type="module">
+    import { api, utils } from '/static/js/main.js';
+
+    // Maker API toggle wiring — reads/writes system_settings.maker_api_enabled.
+    async function refreshMakerApiPanel() {
+        const stateEl = document.getElementById('maker-api-state');
+        const btn = document.getElementById('btn-toggle-maker-api');
+        try {
+            const row = await api.get('/system_settings/maker_api_enabled');
+            const on = (row.value === true || row.value === 'true');
+            stateEl.textContent = on ? 'enabled' : 'disabled (admin API in use)';
+            stateEl.style.color = on ? 'var(--color-success)' : 'var(--color-warning)';
+            btn.textContent = on ? 'Disable Maker API' : 'Re-enable Maker API';
+            btn.dataset.currentOn = String(on);
+        } catch (err) {
+            stateEl.textContent = `error: ${err.message}`;
+        }
+    }
+
+    document.getElementById('btn-toggle-maker-api')
+        .addEventListener('click', async (e) => {
+            const cur = e.currentTarget.dataset.currentOn === 'true';
+            const next = !cur;
+            try {
+                await api.request('/system_settings/maker_api_enabled', {
+                    method: 'PATCH',
+                    body: JSON.stringify({ value: next }),
+                });
+                utils.notify(
+                    `Maker API ${next ? 're-enabled' : 'disabled'}. Reconcile/commands `
+                    + `will use ${next ? 'Maker' : 'admin'} API on the next pass.`,
+                    'success'
+                );
+                refreshMakerApiPanel();
+            } catch (err) {
+                utils.notify(`Toggle failed: ${err.message}`, 'error');
+            }
+        });
+
+    const modal = document.getElementById('maker-api-modal');
+    document.getElementById('btn-maker-api-info').addEventListener('click', () => {
+        modal.style.display = 'flex';
+    });
+    document.getElementById('btn-maker-api-modal-close').addEventListener('click', () => {
+        modal.style.display = 'none';
+    });
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) modal.style.display = 'none';
+    });
+
+    refreshMakerApiPanel();
+</script>
 {% endblock %}

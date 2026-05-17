@@ -58,9 +58,44 @@ class AMLLifecycleMixin:
         # master() arms the recurring chain at the full timeout cadence.
         try:
             from services.settings_resolver import get_resolver
-            init_delay = int(get_resolver().get_system(
+            resolver = get_resolver()
+            init_delay = int(resolver.get_system(
                 'aml_init_master_delay_seconds', 5
             ))
         except Exception:
             init_delay = 5
+            resolver = None
         self.schedule_timeout(max(1, init_delay))
+
+        # GUARANTEED periodic master() evaluation, independent of the
+        # event-driven self-rescheduling chain. Survives missed events,
+        # stuck timers, externally-driven switch toggles. Default 60s,
+        # tunable via system_settings.aml_periodic_eval_interval_seconds.
+        # Note: this is a SEPARATE scheduler job from the timeout chain —
+        # both fire master(); the timeout chain's self-reschedule cadence
+        # respects the configured motion timeout, while this one is a
+        # hard-coded floor cadence the user can adjust globally.
+        try:
+            eval_interval = (
+                int(resolver.get_system('aml_periodic_eval_interval_seconds', 60))
+                if resolver else 60
+            )
+        except Exception:
+            eval_interval = 60
+        eval_job_id = f"periodic_eval_{self.instance_id}"
+        try:
+            scheduler.schedule_recurring(
+                job_id=eval_job_id,
+                interval_seconds=max(10, eval_interval),
+                callback=lambda **kwargs: self.master(),
+                instance_id=self.instance_id,
+                job_type='periodic_eval'
+            )
+            self._runtime.periodic_eval_job_id = eval_job_id
+            self.logger.info(
+                f"Scheduled periodic master() every {eval_interval}s"
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to schedule periodic master(): {e}"
+            )

@@ -282,6 +282,26 @@ class FanAutomationApp(BaseApp):
         # -- Rule 5: motion --
         if self.get_setting('motionEnabled', False) and self.get_devices('motion_sensors'):
             timeout = int(self.get_setting('motionTimeoutSeconds', 300))
+            # System-level floor enforcement (cascade tier 3). PIR re-trigger
+            # cooldown is typically 10-60s; values below this cause oscillation
+            # of the fan rule. bypassTimeoutFloor=true on the instance skips it.
+            if not self.get_setting('bypassTimeoutFloor', False):
+                try:
+                    from services.settings_resolver import get_resolver
+                    floor = get_resolver().get_system(
+                        'motion_timeout_floor_seconds', 60
+                    )
+                    if isinstance(floor, (int, float)) and floor > 0 and timeout < floor:
+                        self.logger.info(
+                            f"FanAutomation motionTimeoutSeconds clamped "
+                            f"{timeout}s → {int(floor)}s (system floor)"
+                        )
+                        timeout = int(floor)
+                except Exception as e:
+                    self.logger.warning(
+                        f"FanAutomation floor lookup failed, using raw "
+                        f"{timeout}s: {e}"
+                    )
             if self._motion_active_within(timeout):
                 level = int(self.get_setting('motionActiveLevel', 30))
                 return {

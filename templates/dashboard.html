@@ -4,10 +4,29 @@
 
 {% block extra_css %}
 <link rel="stylesheet" href="/static/css/e2e-test.css">
+<style>
+.ws-health-alert {
+    margin: 0 0 1rem;
+    padding: 1rem 1.25rem;
+    background: rgba(199, 154, 90, 0.10);
+    border: 1px solid rgba(199, 154, 90, 0.40);
+    border-left-width: 4px;
+    border-radius: 6px;
+    color: var(--color-text);
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+.ws-health-alert a { color: var(--color-primary); }
+</style>
 {% endblock %}
 
 {% block content %}
 <div class="dashboard">
+    <!-- WS health alert. Hidden by default; shown if any hub's eventsocket
+         is disconnected or has recent failures. Polled every 30s.
+         Recommends re-enabling Maker API as fallback intake if user disabled it. -->
+    <div id="ws-health-alert" class="ws-health-alert" style="display:none;"></div>
+
     <section class="dashboard-header">
         <h2>Your Automations</h2>
         <p class="status-summary">
@@ -33,10 +52,61 @@
 {% block extra_js %}
 <script type="module">
     import { DashboardController } from '/static/js/controllers/dashboard-controller.js';
+    import { api } from '/static/js/main.js';
 
     $(document).ready(function() {
         const dashboard = new DashboardController('instances-container');
         dashboard.init();
+        pollWsHealth();
+        setInterval(pollWsHealth, 30_000);
     });
+
+    /**
+     * Poll hub_health every 30s. If any hub is disconnected or has had
+     * recent (last 5 min) failures, surface an alert at the top of the
+     * dashboard recommending Maker API re-enablement as fallback.
+     */
+    async function pollWsHealth() {
+        let rows;
+        try {
+            rows = await api.get('/hubs/health');
+        } catch (_) { return; }
+        const now = Date.now();
+        const RECENT_MS = 5 * 60 * 1000;
+        const offenders = (rows || []).filter(r => {
+            if (r.ws_connected === false) return true;
+            const lf = r.ws_last_failure_at;
+            if (lf && (now - new Date(lf).getTime()) < RECENT_MS) return true;
+            return false;
+        });
+        const alert = document.getElementById('ws-health-alert');
+        if (!alert) return;
+        if (offenders.length === 0) {
+            alert.style.display = 'none';
+            alert.innerHTML = '';
+            return;
+        }
+        // Also fetch maker state to tailor the recommendation
+        let makerOn = true;
+        try {
+            const r = await api.get('/system_settings/maker_api_enabled');
+            makerOn = (r.value === true || r.value === 'true');
+        } catch (_) {}
+        const lines = offenders.map(r => {
+            const conn = r.ws_connected ? 'connected' : 'DISCONNECTED';
+            const fr = r.ws_last_failure_reason || '';
+            return `Hub ${r.hub_id}: ws ${conn}` + (fr ? ` — last error: ${fr}` : '');
+        }).join('<br>');
+        const recommendation = makerOn
+            ? '<br><br>Maker API is currently enabled — it will pick up the slack until WS recovers.'
+            : '<br><br><strong>Maker API is disabled.</strong> Consider re-enabling on the Hubs page until the WS is healthy again.';
+        alert.innerHTML = `
+            <strong>⚠ Eventsocket health warning</strong><br>
+            ${lines}${recommendation}
+            <a href="/hubs" style="margin-left:.5rem;">Go to Hubs →</a>
+        `;
+        alert.style.display = 'block';
+    }
 </script>
 {% endblock %}
+

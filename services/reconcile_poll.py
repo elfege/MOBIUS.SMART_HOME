@@ -269,7 +269,8 @@ class ReconcilePoll:
 
         try:
             devices = await asyncio.to_thread(
-                self._http_get_devices_all, hub_ip, app_num, token
+                self._http_get_devices_all,
+                hub_ip, app_num, token, hub['hub_name'],
             )
         except Exception as e:
             logger.warning(
@@ -278,6 +279,15 @@ class ReconcilePoll:
             return 0
 
         canonical_by_native = self._load_canonical_by_hub_native(hub_ip)
+        # Inverse lookup: native id list for THIS hub limited to canonical
+        # ids that anyone is actually subscribed to. Used by the admin API
+        # path to skip the metadata-only bulk endpoint and pull state only
+        # for devices we care about.
+        subscribed_canonical = set(sub_map.keys())
+        self._subscribed_native_ids_for_hub = [
+            native for native, row in canonical_by_native.items()
+            if int(row['id']) in subscribed_canonical
+        ]
         cache = self._get_cache()
         router = self._get_router()
 
@@ -344,8 +354,64 @@ class ReconcilePoll:
         return diffs
 
     def _http_get_devices_all(
-        self, hub_ip: str, app_num: str, token: str
+        self, hub_ip: str, app_num: str, token: str, hub_name: str = '',
     ) -> List[Dict]:
+        """
+        Pull devices+state for one hub. Picks Maker API or admin API based
+        on the system_setting `maker_api_enabled`.
+
+        Both paths return enough info for divergence detection
+        (id, attributes / currentStates). We normalize to the shape the
+        rest of _process_hub expects: each device dict has
+        ``{'id': str, 'label': str, 'attributes': [{'name', 'currentValue'}]}``.
+        """
+        # Decide backend
+        use_admin = False
+        try:
+            from services.settings_resolver import get_resolver
+            maker_on = get_resolver().get_system('maker_api_enabled', True)
+            use_admin = (maker_on is False)
+        except Exception:
+            pass  # fall through to Maker API on resolver error
+
+        if use_admin:
+            try:
+                from services.hubitat_admin_client import get_client
+                client = get_client(hub_ip, hub_name or hub_ip)
+                # Admin API's /device/list/data is metadata-only (no state).
+                # Pull state per-subscribed-device via /device/fullJson/<id>.
+                # `subscribed_native_ids` is set on the instance before each
+                # _process_hub call — see _process_hub() below.
+                native_ids = getattr(self, '_subscribed_native_ids_for_hub', [])
+                if not native_ids:
+                    # Nothing subscribed on this hub — nothing to reconcile.
+                    return []
+                devices = client.get_devices_with_state(
+                    [int(i) for i in native_ids if str(i).isdigit()]
+                )
+                normalized = []
+                for d in devices:
+                    states = d.get('currentStates') or []
+                    attrs = [
+                        {'name': s.get('name'),
+                         'currentValue': s.get('value')}
+                        for s in states
+                    ]
+                    normalized.append({
+                        'id': str(d.get('id', '')),
+                        'label': d.get('label') or d.get('displayName')
+                                 or d.get('name') or '',
+                        'attributes': attrs,
+                    })
+                return normalized
+            except Exception as e:
+                logger.warning(
+                    f'reconcile_poll [{hub_name or hub_ip}]: admin API '
+                    f'failed, falling back to Maker API: {e}'
+                )
+                # fall through to Maker
+
+        # Maker API path
         r = requests.get(
             f'http://{hub_ip}/apps/api/{app_num}/devices/all',
             params={'access_token': token},

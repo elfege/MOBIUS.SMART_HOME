@@ -732,25 +732,18 @@ class DeviceCommander:
                         # was a lie — sends went admin but verify-poll
                         # still hit Maker.
                         if use_admin_for_commands:
-                            from services.hubitat_admin_client import get_client
+                            from services.hubitat_admin_client import (
+                                get_client, to_maker_shape,
+                            )
                             hub_ip = self._hub_name_to_ip(hub_name) or '<LAN_IP>'
                             admin = get_client(hub_ip, hub_name or 'default')
                             raw = admin.get_device(int(effective_device_id))
-                            # Admin returns {currentStates: [{name, value, ...}]};
-                            # extract_attribute expects Maker's
-                            # {attributes: [{name, currentValue, ...}]} shape,
-                            # so normalize before handing off.
-                            if raw:
-                                states = raw.get('currentStates') or []
-                                device_data = {
-                                    'attributes': [
-                                        {'name': s.get('name'),
-                                         'currentValue': s.get('value')}
-                                        for s in states
-                                    ],
-                                }
-                            else:
-                                device_data = None
+                            # /device/fullJson nests state under
+                            # device.currentStates (dict, not list).
+                            # to_maker_shape() handles the conversion;
+                            # the previous inline shim read the wrong
+                            # path and silently produced empty attrs.
+                            device_data = to_maker_shape(raw)
                         else:
                             device_data = effective_client.get_device(
                                 effective_device_id

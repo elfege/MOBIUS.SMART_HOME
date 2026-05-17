@@ -154,20 +154,39 @@ class TestMigrationIdempotent:
     """Re-applying the migration must not error or duplicate anything."""
 
     def test_rerunning_migration_does_not_error(self):
-        # Apply the migration file a second time — should be a no-op
+        # Apply the migration file a second time — should be a no-op.
+        # Copy from host into the container first so the test doesn't depend
+        # on previous-run state (was brittle: tmp files get wiped between
+        # container recreates).
+        import os
+        host_path = os.path.abspath(
+            os.path.join(
+                os.path.dirname(__file__), "..", "..",
+                "psql", "migrations",
+                "004_full_traceability_2026_05_16.sql",
+            )
+        )
+        if not os.path.exists(host_path):
+            pytest.skip(f"migration file not found at {host_path}")
+        # cp to container
+        cp = subprocess.run(
+            ["docker", "cp", host_path,
+             "smarthome-postgres:/tmp/004_mig.sql"],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert cp.returncode == 0, (
+            f"docker cp failed: {cp.stderr}"
+        )
         result = subprocess.run(
             [
                 "docker", "exec", "-i", "smarthome-postgres",
                 "psql", "-U", PG_USER, "-d", PG_DB,
-                "-f", "/tmp/004_mig.sql",  # already there from initial apply
+                "-f", "/tmp/004_mig.sql",
             ],
             capture_output=True,
             text=True,
             timeout=15,
         )
-        if "could not open file" in (result.stderr or ""):
-            # Migration file wasn't preserved across container restarts; skip
-            pytest.skip("Migration file not present in container")
         assert result.returncode == 0, (
             f"Re-running migration failed: {result.stderr}"
         )

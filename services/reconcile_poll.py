@@ -260,7 +260,15 @@ class ReconcilePoll:
         hub_ip = hub['hub_ip']
         app_num = hub['maker_api_app_number']
         token = os.environ.get(hub['maker_api_token_env'], '')
-        if not token:
+        # Token only required for Maker API path. If Maker is disabled,
+        # admin API doesn't need a token (cookie auth handles that case
+        # via HubitatAdminClient credentials lookup).
+        try:
+            from services.settings_resolver import get_resolver
+            maker_required = get_resolver().get_system('maker_api_enabled', True)
+        except Exception:
+            maker_required = True
+        if maker_required and not token:
             logger.warning(
                 f'reconcile_poll [{hub["hub_name"]}]: '
                 f'token env {hub["maker_api_token_env"]} not set'
@@ -376,7 +384,9 @@ class ReconcilePoll:
 
         if use_admin:
             try:
-                from services.hubitat_admin_client import get_client
+                from services.hubitat_admin_client import (
+                    get_client, to_maker_shape,
+                )
                 client = get_client(hub_ip, hub_name or hub_ip)
                 # Admin API's /device/list/data is metadata-only (no state).
                 # Pull state per-subscribed-device via /device/fullJson/<id>.
@@ -389,27 +399,28 @@ class ReconcilePoll:
                 devices = client.get_devices_with_state(
                     [int(i) for i in native_ids if str(i).isdigit()]
                 )
+                # /device/fullJson nests state under device.currentStates
+                # as a *dict*. to_maker_shape() handles that conversion;
+                # the prior inline reader treated currentStates as a list
+                # at top level, which produced empty attributes for
+                # every device — same bug as in device_commander.
                 normalized = []
                 for d in devices:
-                    states = d.get('currentStates') or []
-                    attrs = [
-                        {'name': s.get('name'),
-                         'currentValue': s.get('value')}
-                        for s in states
-                    ]
-                    normalized.append({
-                        'id': str(d.get('id', '')),
-                        'label': d.get('label') or d.get('displayName')
-                                 or d.get('name') or '',
-                        'attributes': attrs,
-                    })
+                    shaped = to_maker_shape(d)
+                    if shaped:
+                        normalized.append(shaped)
                 return normalized
             except Exception as e:
-                logger.warning(
+                # No silent fallback to Maker when Maker is explicitly
+                # disabled. User wants to test the architecture without
+                # Maker; failures need to surface, not hide.
+                logger.error(
                     f'reconcile_poll [{hub_name or hub_ip}]: admin API '
-                    f'failed, falling back to Maker API: {e}'
+                    f'failed: {e}. NOT falling back to Maker because '
+                    f'maker_api_enabled=false. Re-enable Maker on /hubs '
+                    f'page if this becomes blocking.'
                 )
-                # fall through to Maker
+                return []
 
         # Maker API path
         r = requests.get(

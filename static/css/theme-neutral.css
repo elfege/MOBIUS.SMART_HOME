@@ -1,0 +1,321 @@
+/* =============================================================================
+   Neutral Theme Overlay — 2026-05-17
+   --------------------------------------------------------------------------
+   Loaded AFTER variables.css and main.css. Overrides the saturated default
+   palette with a slate-neutral set, kills the cartoon "filled pill" look
+   for buttons + step indicators, and normalizes field sizing.
+
+   Design rule: "this is an app, not a cartoon" — pull saturation down ~30%
+   from defaults, no bright accent fills, hairline borders over heavy fills.
+   Inspiration: Linear / Vercel / Logseq dark themes.
+
+   To disable: comment out the link in templates/base.html. No layout
+   regressions — this only adjusts colors, sizing, and visual weight.
+   ============================================================================= */
+
+:root {
+    /* ---------- core palette ---------- */
+    --color-bg:            #14161c;
+    --color-card:          #1c1f27;
+    --color-surface:       #1c1f27;
+    --color-surface-2:     #232733;
+    --color-border:        #2a2e38;
+    --color-border-strong: #3a3f4d;
+
+    --color-text:          #e6e8ec;
+    --color-text-muted:    #8a8f99;
+
+    --color-header-bg:     rgba(20, 22, 28, 0.94);
+
+    /* ---------- accent (slate-blue, NOT cobalt) ---------- */
+    --color-primary:             #6b7d96;
+    --color-primary-hover:       #7e90a8;
+    --color-primary-alpha-15:    rgba(107, 125, 150, 0.15);
+    --color-primary-alpha-30:    rgba(107, 125, 150, 0.30);
+    --color-accent:              #8b7d63;        /* warm slate, not orange */
+
+    /* ---------- semantic (muted) ---------- */
+    --color-success:        #6a8a5a;             /* sage, not lime */
+    --color-success-border: #4d6845;
+    --color-success-glow:   rgba(106, 138, 90, 0.30);
+
+    --color-warning:        #c79a5a;
+    --color-danger:         #a85a5a;             /* brick, not fire-engine */
+    --color-danger-hover:   #b96a6a;
+    --color-danger-dark:    #8a4848;
+
+    --color-neutral:        #7a808c;
+
+    /* ---------- state badges, also de-saturated ---------- */
+    --color-state-green-bg:   #243426;
+    --color-state-green-text: #a9c4a0;
+    --color-state-green-border: #3a5237;
+
+    --color-state-red-bg:     #3a2424;
+    --color-state-red-text:   #d5a0a0;
+    --color-state-red-border: #5a3838;
+
+    /* ---------- radii — kill the giant pills ---------- */
+    --radius:       6px;
+    --radius-sm:    4px;
+    --radius-pill:  6px;   /* OVERRIDE: was 999px; pills are now squarish */
+}
+
+/* =============================================================================
+   Buttons — IDE-style, not iOS bubblegum
+   ============================================================================= */
+
+.btn,
+.btn-primary,
+.btn-secondary,
+.btn-danger {
+    height: 36px;
+    padding: 0 14px;
+    font-size: 0.875rem;
+    font-weight: 500;
+    line-height: 1;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: background 120ms, border-color 120ms, color 120ms;
+    box-shadow: none;            /* no glow */
+}
+
+.btn-primary {
+    background: #2a3142;
+    border-color: #38415a;
+    color: #e6e8ec;
+}
+.btn-primary:hover {
+    background: #344056;
+    border-color: #4a5572;
+}
+.btn-primary:active { background: #2a3142; }
+
+.btn-secondary {
+    background: transparent;
+    color: var(--color-text);
+    border-color: var(--color-border);
+}
+.btn-secondary:hover {
+    background: var(--color-surface-2);
+    border-color: var(--color-border-strong);
+}
+
+.btn-danger {
+    background: rgba(168, 90, 90, 0.10);
+    color: #d8a0a0;
+    border-color: #5e3a3a;
+}
+.btn-danger:hover {
+    background: rgba(168, 90, 90, 0.18);
+    border-color: #7a4a4a;
+}
+
+.btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+}
+
+/* The "Create Automation" CTA stays slightly more emphasized than .btn-primary,
+   but still neutral — no cobalt. */
+.btn-create {
+    background: #3a4762;
+    border-color: #4a5572;
+}
+.btn-create:hover {
+    background: #485670;
+    border-color: #5a6480;
+}
+
+/* =============================================================================
+   Wizard step indicators — text + hairline, NOT filled pills
+   ============================================================================= */
+
+.wizard-steps {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    flex-wrap: wrap;
+}
+
+.wizard-steps .step {
+    background: transparent !important;          /* kill the colored fill */
+    color: var(--color-text-muted);
+    font-size: 0.85rem;
+    font-weight: 500;
+    padding: 6px 12px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    position: relative;
+    transition: color 120ms;
+}
+
+/* Separator between pills */
+.wizard-steps .step + .step::before {
+    content: '›';
+    color: var(--color-border-strong);
+    margin-right: 12px;
+    margin-left: -6px;
+    font-weight: 400;
+}
+
+.wizard-steps .step.active {
+    background: transparent !important;
+    color: var(--color-text) !important;
+    border-color: var(--color-border-strong);
+}
+
+.wizard-steps .step.completed {
+    background: transparent !important;
+    color: var(--color-text-muted) !important;
+}
+
+.wizard-steps .step.completed::after {
+    content: ' ✓';
+    color: #6a8a5a;
+    margin-left: 4px;
+}
+
+.wizard-steps .step.clickable:hover {
+    background: var(--color-surface-2) !important;
+    color: var(--color-text);
+    cursor: pointer;
+}
+
+/* =============================================================================
+   Forms — uniform field sizing, labels above, narrow numbers
+   ============================================================================= */
+
+.form-group label {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    font-weight: 500;
+    margin-bottom: 6px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+}
+
+.form-group input[type="text"],
+.form-group input[type="number"],
+.form-group select,
+input[type="text"],
+input[type="number"],
+select,
+textarea {
+    height: 36px;
+    padding: 0 12px;
+    font-size: 0.9rem;
+    line-height: 36px;
+    background: var(--color-surface);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    transition: border-color 120ms;
+    text-align: left;             /* override any inherited center */
+    box-shadow: none;
+}
+
+input[type="number"] {
+    max-width: 120px;             /* numeric fields stay compact */
+    -moz-appearance: textfield;   /* hide spin buttons on FF */
+}
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: none;
+}
+
+/* Per-mode timeout grid — was rendering as full-width number fields.
+   Label sits left at fixed width, input is the compact 120px next to it. */
+.mode-timeout-row,
+.timeout-row,
+[class*="mode-timeout"] {
+    display: grid;
+    grid-template-columns: 140px 120px;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 0;
+}
+.mode-timeout-row label,
+.timeout-row label,
+[class*="mode-timeout"] label {
+    margin-bottom: 0;
+    font-size: 0.85rem;
+    color: var(--color-text);
+}
+.mode-timeout-row .current-label,
+[class*="mode-timeout"] .current-label {
+    color: var(--color-primary);
+    font-size: 0.7rem;
+    font-style: italic;
+    display: block;
+}
+
+/* =============================================================================
+   App-type cards (wizard step 1) — subtle hover, no cobalt
+   ============================================================================= */
+
+.app-type-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 1.25rem;
+    transition: border-color 120ms, background 120ms;
+}
+.app-type-card:hover {
+    border-color: var(--color-border-strong);
+    background: var(--color-surface-2);
+}
+.app-type-card.selected {
+    border-color: var(--color-primary);
+    background: var(--color-primary-alpha-15);
+}
+
+/* =============================================================================
+   Misc cleanup
+   ============================================================================= */
+
+/* Card backgrounds throughout the app */
+.card,
+.dashboard-tile,
+.instance-card {
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    box-shadow: none;
+}
+
+/* Header — subtle, not opaque */
+.app-header {
+    background: var(--color-header-bg);
+    border-bottom: 1px solid var(--color-border);
+    box-shadow: none;
+}
+
+/* Wizard container */
+.wizard {
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    box-shadow: none;
+}
+
+/* Loading placeholder text — should fade in, not glow */
+.loading-placeholder {
+    color: var(--color-text-muted);
+    font-size: 0.9rem;
+    font-style: italic;
+    text-align: center;
+    padding: 2rem 0;
+}

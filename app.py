@@ -322,6 +322,7 @@ def run_db_migrations():
           ('device_cmd_verify_retries', '3', 'int', 'Polls per command-send attempt to verify state.', TRUE, FALSE),
           ('device_cmd_verify_delay', '1.0', 'float', 'Seconds between verify polls.', TRUE, FALSE),
           ('device_cmd_operation_retries', '2', 'int', 'Full send+verify cycles before giving up.', TRUE, FALSE),
+          ('aml_init_master_delay_seconds', '5', 'int', 'AML initialize() schedules its first master() run after this many seconds. Short delay lets in-flight motion events arrive first.', TRUE, FALSE),
           ('eventsocket_enabled', 'true', 'bool', 'Master switch for Hubitat eventsocket WS intake. Requires app restart.', TRUE, TRUE),
           ('reconcile_poll_enabled', 'true', 'bool', 'Reconcile poll on/off. Requires app restart.', TRUE, TRUE),
           ('device_commands_logging', 'true', 'bool', 'Two-phase device_commands logging. Requires app restart.', TRUE, TRUE),

@@ -3,10 +3,13 @@ AML instance lifecycle — initialize().
 
 Called once when the instance is loaded (container start or new instance save).
 
-Groovy parity: initialize() does NOT call master(). Calling master() on startup
-would turn off all lights because no motion event has arrived yet, making
-_is_motion_active() return False → _control_lights('off') on every switch.
-Instead, only enforce keep-on/keep-off rules and schedule the periodic run.
+2026-05-17: removed the old "no master() on startup" rule. Reason: user
+reported externally-driven ON states (Hubitat-side automation turning a
+light on) were never reverted because AML had no event to evaluate against.
+initialize() now schedules a near-immediate master() (5s, configurable
+via system_settings.aml_init_master_delay_seconds) so AML takes ownership
+of the room state right after boot. The 5s window lets any in-flight motion
+event arrive first, avoiding "off → on" races on busy rooms.
 """
 
 
@@ -21,7 +24,10 @@ class AMLLifecycleMixin:
           1. Seed _functional_sensors so motion detection works before first event
           2. Schedule the periodic health check (every 10 minutes)
           3. Enforce keep-on/keep-off immediately (Groovy parity)
-          4. Schedule the first master() run via _schedule_next_run()
+          4. Schedule a quick FIRST master() run (~5s) — closes the gap
+             where externally-driven switch changes are never re-evaluated
+          5. _schedule_next_run() at the end of that first master() arms
+             the recurring chain
         """
         self.logger.info(f"Initializing: {self.label}")
 
@@ -43,6 +49,18 @@ class AMLLifecycleMixin:
         )
         self._runtime.health_check_job_id = health_job_id
 
-        # Enforce keep switches and schedule next run (no master() on startup)
+        # Enforce keep switches immediately. This handles startup-time
+        # divergences from manual changes during the previous restart window.
         self._enforce_keep_switches()
-        self._schedule_next_run()
+
+        # Schedule the first master() — short delay so in-flight motion
+        # events can land. After that runs, _schedule_next_run() inside
+        # master() arms the recurring chain at the full timeout cadence.
+        try:
+            from services.settings_resolver import get_resolver
+            init_delay = int(get_resolver().get_system(
+                'aml_init_master_delay_seconds', 5
+            ))
+        except Exception:
+            init_delay = 5
+        self.schedule_timeout(max(1, init_delay))

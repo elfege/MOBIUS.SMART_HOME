@@ -369,7 +369,8 @@ def run_db_migrations():
           ('eventsocket_enabled', 'true', 'bool', 'Master switch for Hubitat eventsocket WS intake. Requires app restart.', TRUE, TRUE),
           ('reconcile_poll_enabled', 'true', 'bool', 'Reconcile poll on/off. Requires app restart.', TRUE, TRUE),
           ('device_commands_logging', 'true', 'bool', 'Two-phase device_commands logging. Requires app restart.', TRUE, TRUE),
-          ('webhook_intake_enabled', 'false', 'bool', 'Legacy webhook intake — rollback escape hatch.', TRUE, TRUE)
+          ('webhook_intake_enabled', 'false', 'bool', 'Legacy webhook intake — rollback escape hatch.', TRUE, TRUE),
+          ('maker_api_enabled', 'false', 'bool', 'When TRUE: reconcile poll + commands + verify use Maker API (legacy path). When FALSE (default 2026-05-17): all three use the Hubitat admin API directly — bypasses Maker entirely. Toggle on /hubs page. Eventsocket WS handles inbound events regardless.', TRUE, FALSE)
         ON CONFLICT (key) DO NOTHING""",
 
         # instance_setting_exceptions — per-FIELD bypass of system-enforced

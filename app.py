@@ -365,6 +365,7 @@ def run_db_migrations():
           ('aml_init_master_delay_seconds', '5', 'int', 'AML initialize() schedules its first master() run after this many seconds. Short delay lets in-flight motion events arrive first.', TRUE, FALSE),
           ('aml_periodic_eval_interval_seconds', '60', 'int', 'Defensive: every AML instance runs master() at this cadence regardless of events. Minimum 10s.', TRUE, FALSE),
           ('timezone', 'America/New_York', 'string', 'IANA timezone name. Applied to the app container at boot for log timestamps. DB stays in UTC.', TRUE, TRUE),
+          ('colorblind_mode', 'false', 'bool', 'Use a colorblind-safe (Okabe-Ito) palette in charts and accent colors. Designed for protanopia / deuteranopia / tritanopia.', TRUE, FALSE),
           ('eventsocket_enabled', 'true', 'bool', 'Master switch for Hubitat eventsocket WS intake. Requires app restart.', TRUE, TRUE),
           ('reconcile_poll_enabled', 'true', 'bool', 'Reconcile poll on/off. Requires app restart.', TRUE, TRUE),
           ('device_commands_logging', 'true', 'bool', 'Two-phase device_commands logging. Requires app restart.', TRUE, TRUE),

@@ -61,6 +61,13 @@
         <p>MOBIUS.HOME</p>
     </footer>
 
+    <!-- Apply colorblind mode ASAP. Reads localStorage cache for first-paint,
+         then refreshes from /api/system_settings in the background. -->
+    <script type="module">
+        import { initColorblindMode } from '/static/js/services/colorblind.js';
+        initColorblindMode();
+    </script>
+
     <!-- Main JS -->
     <script type="module" src="/static/js/main.js"></script>
 

@@ -43,6 +43,46 @@
     <div id="hubs-status" style="opacity:.7;font-size:.9rem;margin-bottom:.5rem;">Loading…</div>
     <div id="hubs-list"></div>
 
+    <!-- Admin credentials info modal — explains the field and the AWS slot path. -->
+    <div id="admin-creds-modal" class="motion-floor-modal" style="display:none;">
+        <div class="motion-floor-modal-body">
+            <h3>Admin API credentials — when and how</h3>
+            <p>
+                If this hub's <strong>Settings → Hub Login Security</strong> is OFF
+                (Hubitat default), leave these fields blank — the admin API is
+                open on the LAN and Mobius connects without auth.
+            </p>
+            <p>
+                If you enable Hub Login Security, Mobius needs the username/password
+                to call <code>POST /login</code>, persist the session cookie, and
+                use it for every subsequent <code>/device/...</code> call.
+            </p>
+            <p>
+                <strong>Two ways to supply them, in priority order:</strong>
+            </p>
+            <ol style="opacity:.85;font-size:.9rem;line-height:1.5;margin:.4rem 0 .8rem 1.2rem;">
+                <li><strong>Inline below</strong> — type them into the Username
+                    + Password fields. Stored in the DB (plain for now; a
+                    KEK-encryption layer is on the roadmap).</li>
+                <li><strong>AWS Secrets Manager</strong> — set the eight placeholders
+                    <code>HUBITAT_ADMIN_USER_1..4</code> and
+                    <code>HUBITAT_ADMIN_PASSWORD_1..4</code> in your HUBITAT
+                    secret (already provisioned). Then put the matching slot
+                    number (1, 2, 3 or 4) into <em>AWS slot</em> for this hub.
+                    Values flow: AWS Secrets Manager → <code>pull_aws_secrets HUBITAT</code>
+                    in <code>start.sh</code> → env vars → admin client.</li>
+            </ol>
+            <p style="opacity:.7;font-size:.85rem;">
+                The inline fields win if both are populated. To switch from
+                inline to AWS, clear the inline fields and set the slot.
+            </p>
+            <div class="motion-floor-modal-actions">
+                <button type="button" class="btn motion-floor-close"
+                        id="btn-admin-creds-modal-close">Close</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Maker API info modal — opens on ? click. Same overlay class as the
          motion-floor modal so theme-neutral.css styling applies. -->
     <div id="maker-api-modal" class="motion-floor-modal" style="display:none;">
@@ -120,6 +160,34 @@
                     <input name="is_enabled" type="checkbox"/> Enabled
                 </label>
             </div>
+
+            <!-- Admin API credentials. Only needed when this hub has
+                 Hubitat Hub Login Security enabled. Click ? for details. -->
+            <div style="margin-top:.75rem;padding:.5rem .75rem;background:rgba(255,255,255,0.02);border:1px solid var(--color-border);border-radius:6px;">
+                <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;">
+                    <strong style="font-size:.9rem;">Admin API credentials</strong>
+                    <button type="button" class="motion-floor-help btn-admin-creds-help">?</button>
+                    <span style="opacity:.6;font-size:.8rem;">Optional — only if Hub Login Security is on</span>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr 120px;gap:.5rem;">
+                    <label>Username
+                        <input name="admin_username" type="text"
+                               placeholder="(unauthenticated)"
+                               autocomplete="off"/>
+                    </label>
+                    <label>Password
+                        <input name="admin_password" type="password"
+                               placeholder="(unauthenticated)"
+                               autocomplete="new-password"/>
+                    </label>
+                    <label>AWS slot
+                        <input name="admin_creds_index" type="number"
+                               min="1" max="8"
+                               placeholder="e.g. 2"
+                               title="Index into HUBITAT_ADMIN_USER_<n> / HUBITAT_ADMIN_PASSWORD_<n> env vars. Used if Username + Password above are blank."/>
+                    </label>
+                </div>
+            </div>
             <div style="margin-top:.75rem;display:flex;gap:.5rem;justify-content:flex-end;">
                 <span class="hub-card-status" style="margin-right:auto;font-size:.85rem;opacity:.7;"></span>
                 <button type="button" class="btn btn-danger btn-delete">Delete</button>
@@ -178,6 +246,22 @@
     });
     modal.addEventListener('click', (e) => {
         if (e.target === modal) modal.style.display = 'none';
+    });
+
+    // Admin-creds ? modal — buttons live inside the per-hub cards which
+    // are rendered dynamically by hubs-controller.js, so we delegate clicks
+    // from the document body.
+    const adminCredsModal = document.getElementById('admin-creds-modal');
+    document.addEventListener('click', (e) => {
+        if (e.target.classList?.contains('btn-admin-creds-help')) {
+            adminCredsModal.style.display = 'flex';
+        }
+    });
+    document.getElementById('btn-admin-creds-modal-close').addEventListener('click', () => {
+        adminCredsModal.style.display = 'none';
+    });
+    adminCredsModal.addEventListener('click', (e) => {
+        if (e.target === adminCredsModal) adminCredsModal.style.display = 'none';
     });
 
     refreshMakerApiPanel();

@@ -131,7 +131,17 @@ class HubitatAdminClient:
         return r.json()
 
     def get_device(self, device_id: int) -> Optional[Dict[str, Any]]:
-        """GET /device/fullJson/<id> → single device with current state."""
+        """GET /device/fullJson/<id> → single device with current state.
+
+        Response shape (top-level keys we care about):
+          device.id, device.label, device.displayName, device.name
+          device.currentStates  →  dict keyed by attribute name, each value
+                                   has {value, stringValue, dataType, ...}
+
+        Callers needing Maker-API-shape `{id, label, attributes: [...]}`
+        should pass the result through `to_maker_shape()` rather than
+        reading these paths inline.
+        """
         r = self._request("GET", f"/device/fullJson/{device_id}")
         if r.status_code == 404:
             return None
@@ -211,6 +221,45 @@ class HubitatAdminClient:
                 f"({device_id}/{command}) failed: {e}"
             )
             return False
+
+
+def to_maker_shape(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Normalize a `/device/fullJson/<id>` response to the Maker-API shape
+    the rest of the codebase consumes (`attributes` list of
+    `{name, currentValue}` plus `id`/`label`).
+
+    The admin endpoint nests state at `raw['device']['currentStates']`
+    as a *dict* keyed by attribute name; Maker returns a *list*. Without
+    this conversion, downstream `extract_attribute()` sees no attributes
+    and returns None — which is what was breaking command verification.
+    """
+    if not raw or not isinstance(raw, dict):
+        return None
+    device = raw.get("device") or {}
+    states = device.get("currentStates") or {}
+    attrs: List[Dict[str, Any]] = []
+    if isinstance(states, dict):
+        # Admin nested-dict shape.
+        for name, payload in states.items():
+            if isinstance(payload, dict):
+                attrs.append({
+                    "name": payload.get("name") or name,
+                    "currentValue": payload.get("value"),
+                })
+    elif isinstance(states, list):
+        # Defensive: some firmware versions may return a list.
+        for s in states:
+            if isinstance(s, dict):
+                attrs.append({
+                    "name": s.get("name"),
+                    "currentValue": s.get("value"),
+                })
+    return {
+        "id": str(device.get("id", "")),
+        "label": (device.get("label") or device.get("displayName")
+                  or device.get("name") or ""),
+        "attributes": attrs,
+    }
 
 
 # -------------------------------------------------------------------------

@@ -408,6 +408,64 @@ input[type="number"].floor-exception-active,
     flex-wrap: wrap;
 }
 
+/* =============================================================================
+   KPI chart header — title + cycle-diagram button on one line
+   ============================================================================= */
+
+.kpi-chart-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.kpi-chart-header h3 {
+    margin: 0;
+    font-size: 0.95rem;
+}
+.kpi-chart-cycle-btn {
+    height: 28px;
+    padding: 0 10px;
+    font-size: 0.75rem;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+    border-radius: 4px;
+    cursor: pointer;
+    line-height: 1;
+}
+.kpi-chart-cycle-btn:hover {
+    color: var(--color-text);
+    border-color: var(--color-border-strong);
+}
+
+/* =============================================================================
+   Colorblind mode (Okabe-Ito) — body.colorblind class
+   Charts pull their palette from js/services/colorblind.js; this section
+   handles non-chart UI surfaces (status badges, button accents) that use
+   CSS color values.
+   ============================================================================= */
+
+body.colorblind {
+    --color-primary: #0072B2;       /* Okabe-Ito blue */
+    --color-primary-hover: #1F8DC8;
+    --color-primary-alpha-15: rgba(0, 114, 178, 0.15);
+    --color-primary-alpha-30: rgba(0, 114, 178, 0.30);
+    --color-success: #009E73;       /* Okabe-Ito bluish green */
+    --color-danger:  #D55E00;       /* Okabe-Ito vermilion (NOT pure red — distinguishable from blue under CVD) */
+    --color-warning: #E69F00;       /* Okabe-Ito orange */
+}
+
+/* In CVD mode, dashed-success border on "exception granted" inputs is
+   easier to distinguish than a color swap alone. */
+body.colorblind input[type="number"].floor-exception-active,
+body.colorblind .mode-timeout-input.floor-exception-active {
+    border-color: var(--color-success);
+    border-style: dashed;
+    border-width: 2px;  /* extra emphasis */
+}
+
 /* Loading placeholder text — should fade in, not glow */
 .loading-placeholder {
     color: var(--color-text-muted);

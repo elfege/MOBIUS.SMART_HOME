@@ -180,6 +180,15 @@
             });
             status.textContent = '✓ Saved';
             status.style.color = 'var(--color-success)';
+            // Live-apply settings that don't require restart so the user
+            // sees the change immediately without an ./start.sh.
+            if (key === 'colorblind_mode' && type === 'bool') {
+                document.body.classList.toggle('colorblind', parsed === true);
+                try { localStorage.setItem('colorblind_mode', String(parsed)); } catch (_) {}
+                document.dispatchEvent(new CustomEvent('colorblind:changed', {
+                    detail: { enabled: parsed === true },
+                }));
+            }
             setTimeout(() => { status.textContent = ''; }, 2500);
         } catch (err) {
             status.textContent = `⚠ ${err.message}`;

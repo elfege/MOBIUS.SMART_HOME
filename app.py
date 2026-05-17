@@ -329,6 +329,21 @@ def run_db_migrations():
           ('webhook_intake_enabled', 'false', 'bool', 'Legacy webhook intake — rollback escape hatch.', TRUE, TRUE)
         ON CONFLICT (key) DO NOTHING""",
 
+        # instance_setting_exceptions — per-FIELD bypass of system-enforced
+        # validation (e.g., motion_timeout_floor_seconds). Per the DB-SOT
+        # policy, each exception is its own row (audit-friendly) rather
+        # than a JSONB flag on app_instances.settings.
+        """CREATE TABLE IF NOT EXISTS instance_setting_exceptions (
+            id           BIGSERIAL PRIMARY KEY,
+            instance_id  BIGINT NOT NULL REFERENCES app_instances(id) ON DELETE CASCADE,
+            setting_path VARCHAR(120) NOT NULL,
+            reason       TEXT,
+            granted_at   TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (instance_id, setting_path)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_ise_instance ON instance_setting_exceptions(instance_id)",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON instance_setting_exceptions TO smarthome_anon",
+
         # Grants
         "GRANT SELECT, INSERT, UPDATE, DELETE ON system_settings TO smarthome_anon",
         "GRANT SELECT, INSERT, UPDATE, DELETE ON app_type_settings TO smarthome_anon",
@@ -1067,6 +1082,83 @@ async def list_app_type_settings(type_name: str):
 class AppTypeSettingPatch(BaseModel):
     """Body for PATCH /api/app_types/{type_name}/settings/{key}."""
     value: Any
+
+
+@app.get("/api/instances/{instance_id}/setting-exceptions", tags=["settings"])
+async def list_instance_setting_exceptions(instance_id: int):
+    """List all per-field exceptions granted to this instance."""
+    import requests as _requests
+    pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    r = _requests.get(
+        f"{pg}/instance_setting_exceptions",
+        params={
+            "instance_id": f"eq.{instance_id}",
+            "select": "id,setting_path,reason,granted_at",
+        },
+        timeout=5,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+class SettingExceptionGrant(BaseModel):
+    """Body for POST /api/instances/{id}/setting-exceptions."""
+    setting_path: str
+    reason: Optional[str] = None
+
+
+@app.post("/api/instances/{instance_id}/setting-exceptions", tags=["settings"])
+async def grant_instance_setting_exception(
+    instance_id: int, body: SettingExceptionGrant,
+):
+    """
+    Grant this instance an exception for `setting_path` — bypasses
+    system-enforced validation (e.g., motion_timeout_floor_seconds) for that
+    field only. Audit record kept (granted_at).
+    """
+    import requests as _requests
+    pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    r = _requests.post(
+        f"{pg}/instance_setting_exceptions",
+        json={
+            "instance_id": instance_id,
+            "setting_path": body.setting_path,
+            "reason": body.reason,
+        },
+        headers={
+            "Content-Type": "application/json",
+            "Prefer": "return=representation,resolution=merge-duplicates",
+        },
+        timeout=5,
+    )
+    if r.status_code in (200, 201):
+        body_json = r.json()
+        return body_json[0] if isinstance(body_json, list) and body_json else body_json
+    raise HTTPException(status_code=r.status_code, detail=r.text)
+
+
+@app.delete(
+    "/api/instances/{instance_id}/setting-exceptions/{setting_path:path}",
+    tags=["settings"],
+)
+async def revoke_instance_setting_exception(
+    instance_id: int, setting_path: str,
+):
+    """Revoke a per-field exception. setting_path uses path-style routing so
+    nested keys like `modeTimeouts.Night` work without URL encoding."""
+    import requests as _requests
+    pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    r = _requests.delete(
+        f"{pg}/instance_setting_exceptions",
+        params={
+            "instance_id": f"eq.{instance_id}",
+            "setting_path": f"eq.{setting_path}",
+        },
+        timeout=5,
+    )
+    if r.status_code not in (200, 204):
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    return {"ok": True, "setting_path": setting_path}
 
 
 @app.patch(

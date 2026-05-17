@@ -311,6 +311,103 @@ textarea:focus {
     box-shadow: none;
 }
 
+/* =============================================================================
+   Motion-floor enforcement UI (per-field exceptions)
+   ============================================================================= */
+
+/* The "?" icon next to each numeric timeout input */
+.motion-floor-help {
+    margin-left: 8px;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--color-border);
+    background: var(--color-surface);
+    color: var(--color-text-muted);
+    border-radius: 50%;
+    font-size: 0.8rem;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+    vertical-align: middle;
+    transition: color 120ms, border-color 120ms;
+}
+.motion-floor-help:hover {
+    color: var(--color-text);
+    border-color: var(--color-border-strong);
+}
+
+/* Inline hint text after a problem field */
+.motion-floor-hint {
+    display: inline-block;
+    margin-left: 10px;
+    font-size: 0.75rem;
+    color: var(--color-warning);
+    vertical-align: middle;
+}
+.motion-floor-hint.granted {
+    color: var(--color-success);
+}
+
+/* Field highlight when below floor / when exception is active */
+input[type="number"].below-floor,
+.mode-timeout-input.below-floor {
+    border-color: var(--color-warning);
+}
+input[type="number"].floor-exception-active,
+.mode-timeout-input.floor-exception-active {
+    border-color: var(--color-success);
+    border-style: dashed;
+}
+
+/* The modal — neutral, in keeping with the theme */
+.motion-floor-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.55);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    backdrop-filter: blur(2px);
+}
+.motion-floor-modal-body {
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 24px;
+    max-width: 560px;
+    width: 100%;
+    color: var(--color-text);
+    box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+}
+.motion-floor-modal-body h3 {
+    margin: 0 0 12px;
+    font-size: 1.05rem;
+    font-weight: 600;
+}
+.motion-floor-modal-body p {
+    margin: 0 0 10px;
+    color: var(--color-text-muted);
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+.motion-floor-modal-body code {
+    background: var(--color-surface-2);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 0.85em;
+    color: var(--color-text);
+}
+.motion-floor-modal-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+}
+
 /* Loading placeholder text — should fade in, not glow */
 .loading-placeholder {
     color: var(--color-text-muted);

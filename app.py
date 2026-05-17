@@ -23,6 +23,46 @@ from pydantic import BaseModel
 # Logging
 # ---------------------------------------------------------------------------
 
+# =============================================================================
+# Apply user-configured timezone BEFORE logging is configured, so every log
+# line uses the user's local time. Reads system_settings.timezone via a
+# direct psycopg2 connection (the resolver isn't initialized yet at this
+# point in module load). Falls back to UTC silently if anything fails.
+# =============================================================================
+def _apply_user_timezone():
+    try:
+        import time as _t
+        import psycopg2  # noqa: WPS433
+        conn = psycopg2.connect(
+            host=os.environ.get('POSTGRES_HOST', 'postgres'),
+            port=os.environ.get('POSTGRES_PORT', '5432'),
+            dbname=os.environ.get('POSTGRES_DB', 'smarthome'),
+            user=os.environ.get('POSTGRES_USER', 'smarthome_api'),
+            password=os.environ.get('POSTGRES_PASSWORD', ''),
+            connect_timeout=3,
+        )
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT value FROM system_settings WHERE key = %s",
+                ('timezone',),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                os.environ['TZ'] = row[0]
+                _t.tzset()
+            cur.close()
+        finally:
+            conn.close()
+    except Exception:
+        # Boot-time best-effort. If DB isn't reachable yet, app continues
+        # in UTC and run_db_migrations will create the row on first run.
+        pass
+
+
+_apply_user_timezone()
+
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -323,6 +363,8 @@ def run_db_migrations():
           ('device_cmd_verify_delay', '1.0', 'float', 'Seconds between verify polls.', TRUE, FALSE),
           ('device_cmd_operation_retries', '2', 'int', 'Full send+verify cycles before giving up.', TRUE, FALSE),
           ('aml_init_master_delay_seconds', '5', 'int', 'AML initialize() schedules its first master() run after this many seconds. Short delay lets in-flight motion events arrive first.', TRUE, FALSE),
+          ('aml_periodic_eval_interval_seconds', '60', 'int', 'Defensive: every AML instance runs master() at this cadence regardless of events. Minimum 10s.', TRUE, FALSE),
+          ('timezone', 'America/New_York', 'string', 'IANA timezone name. Applied to the app container at boot for log timestamps. DB stays in UTC.', TRUE, TRUE),
           ('eventsocket_enabled', 'true', 'bool', 'Master switch for Hubitat eventsocket WS intake. Requires app restart.', TRUE, TRUE),
           ('reconcile_poll_enabled', 'true', 'bool', 'Reconcile poll on/off. Requires app restart.', TRUE, TRUE),
           ('device_commands_logging', 'true', 'bool', 'Two-phase device_commands logging. Requires app restart.', TRUE, TRUE),
@@ -2241,6 +2283,13 @@ async def matter_page(request: Request):
 async def hubs_page(request: Request):
     """Hub configuration page — edit hub_config rows."""
     return templates.TemplateResponse(request, "hubs.html")
+
+
+@app.get("/admin/settings", response_class=HTMLResponse, include_in_schema=False)
+async def admin_settings_page(request: Request):
+    """System settings page — edit rows in system_settings table.
+    Reached via the gear icon in the navbar."""
+    return templates.TemplateResponse(request, "admin_settings.html")
 
 
 # =============================================================================

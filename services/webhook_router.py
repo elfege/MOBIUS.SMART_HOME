@@ -249,49 +249,52 @@ class WebhookRouter:
 
     async def route_event(self, webhook_payload: Dict[str, Any]) -> int:
         """
-        Route incoming webhook to relevant instances.
+        Route incoming event to relevant instances.
 
         Args:
-            webhook_payload: Raw webhook payload from Hubitat
+            webhook_payload: Event payload, shaped identically whether it
+                came from the (deprecated) Maker API webhook dispatcher or
+                from the eventsocket client. Must include ``_hub_ip`` for
+                mesh-mirror filtering and (optionally) ``_intake`` and
+                ``_received_at_monotonic_ms`` for traceability.
 
         Returns:
             Number of instances that received the event
         """
-        # Parse webhook
+        # Parse payload
         device_id = str(webhook_payload.get('deviceId', ''))
         event_name = webhook_payload.get('name', '')
         event_value = webhook_payload.get('value', '')
         display_name = webhook_payload.get('displayName', '')
-        # Hub IP is injected by webhook_dispatcher.py from request.remote_addr.
-        # Empty for direct-Hubitat or test callers; that's fine, callers that
-        # need hub-disambiguated lookup must send through the dispatcher.
         hub_ip = str(webhook_payload.get('_hub_ip', ''))
+        intake_path = str(webhook_payload.get('_intake', 'eventsocket'))
+        # Monotonic-ms timestamp captured at intake (eventsocket client sets
+        # this). Used to compute processing_ms before event_log insert.
+        recv_ms = webhook_payload.get('_received_at_monotonic_ms')
 
         if not device_id or not event_name:
-            self.logger.warning(f"Invalid webhook payload: {webhook_payload}")
+            self.logger.warning(f"Invalid payload: {webhook_payload}")
             return 0
 
         # Resolve to canonical devices.id. Three possible paths, in order:
         #   1. Label match in `devices` table (real Hubitat events with
         #      meaningful displayNames).
         #   2. (mesh-mirror filter — only when both hub_ip + label hit)
-        #   3. deviceId itself IS a canonical PK (e2e test injection
-        #      bypasses the dispatcher and sends synthesized displayNames
-        #      like "E2E Test Motion 241", so the label path always misses;
-        #      after Phase 5, device_selections store canonical PKs, so
-        #      tests author scenarios with deviceId = canonical id).
+        #   3. deviceId itself IS a canonical PK (e2e test injection sends
+        #      synthesized displayNames; device_selections store canonical
+        #      PKs, so tests author scenarios with deviceId = canonical id).
         canonical_row = self._lookup_canonical_by_label(display_name)
 
-        # Mesh-mirror filter: only meaningful when we know the source hub
-        # AND the canonical row was found by label. If the canonical row's
-        # native hub differs from the event's source hub, this is a Hub
-        # Mesh mirror — drop it so we don't double-process.
+        # Mesh-mirror filter at ingest: silently drop mirrors before any
+        # event_log write happens. The eventsocket fans out the same event
+        # across every hub that has the device shared — only the origin
+        # hub's frame survives this filter.
         if (
             hub_ip
             and canonical_row is not None
             and canonical_row.get("hub_ip") != hub_ip
         ):
-            self.logger.info(
+            self.logger.debug(
                 f"  {_DIM}drop mesh mirror: {display_name!r} from {hub_ip} "
                 f"(native is {canonical_row.get('hub_ip')}){_R}"
             )
@@ -367,7 +370,13 @@ class WebhookRouter:
         # immediately; workers process events in background threads so a slow
         # Hubitat command (verify retries up to 30s) cannot stall the event
         # loop or other instances.
-        routed_to = []
+        #
+        # `routings` collects every dispatch decision for the M:N event_routings
+        # table: each subscribed instance gets either an 'routed' or
+        # 'failed_enqueue' entry. Drops at higher level (mesh, orphan, unsub)
+        # are recorded separately below.
+        routed_to: List[int] = []
+        routings: List[Dict[str, Any]] = []
         for instance_id in subscribed_ids:
             try:
                 app = instance_manager.get_running_instance(instance_id)
@@ -375,18 +384,63 @@ class WebhookRouter:
                     self.logger.warning(
                         f"Instance {instance_id} subscribed but not running"
                     )
+                    routings.append({
+                        'instance_id': instance_id,
+                        'outcome': 'dropped_unsub',
+                        'drop_reason': 'instance subscribed but not running',
+                    })
                     continue
                 queue = self._get_or_create_queue(instance_id)
                 await queue.put(event)
                 routed_to.append(instance_id)
+                routings.append({
+                    'instance_id': instance_id,
+                    'outcome': 'routed',
+                })
             except Exception as e:
                 self.logger.error(
                     f"Failed to enqueue event for instance {instance_id}: {e}",
                     exc_info=True
                 )
+                routings.append({
+                    'instance_id': instance_id,
+                    'outcome': 'failed_enqueue',
+                    'drop_reason': f'{type(e).__name__}: {e}',
+                })
 
-        # Log event
-        self._log_event(event, routed_to, webhook_payload)
+        # Record "no canonical row" as orphan-routing so the event_log row
+        # has at least one entry explaining why nobody received it.
+        if canonical_id is None:
+            routings.append({
+                'instance_id': None,
+                'outcome': 'dropped_orphan',
+                'drop_reason': (
+                    f'no canonical row for displayName={display_name!r} '
+                    f'hubitat_id={device_id} hub_ip={hub_ip or "?"}'
+                ),
+            })
+
+        # Compute processing latency (ms) from intake to here, then write
+        # event_log with all the new columns + the event_routings rows.
+        processing_ms: Optional[int] = None
+        if recv_ms is not None:
+            try:
+                import time as _t
+                processing_ms = max(0, int(_t.monotonic() * 1000 - float(recv_ms)))
+            except Exception:
+                processing_ms = None
+
+        event_log_id = self._log_event_v2(
+            event=event,
+            hub_ip=hub_ip,
+            canonical_id=canonical_id,
+            intake_path=intake_path,
+            processing_ms=processing_ms,
+            routed_to=routed_to,
+            raw_payload=webhook_payload,
+        )
+        if event_log_id is not None and routings:
+            self._log_routings(event_log_id, routings)
 
         # Broadcast to E2E test SSE subscribers (if any are listening).
         # This lets the E2E terminal log show live webhook traffic.
@@ -504,15 +558,28 @@ class WebhookRouter:
 
         return notified
 
-    def _log_event(
+    def _log_event_v2(
         self,
         event: DeviceEvent,
+        hub_ip: str,
+        canonical_id: Optional[int],
+        intake_path: str,
+        processing_ms: Optional[int],
         routed_to: List[int],
-        raw_payload: Dict[str, Any]
-    ) -> None:
-        """Log event to database for audit/debugging."""
+        raw_payload: Dict[str, Any],
+    ) -> Optional[int]:
+        """
+        Log event to ``event_log`` with full provenance.
+
+        Returns the inserted row's id so ``_log_routings`` can FK to it.
+        Returns ``None`` on failure — caller must skip the routings write.
+
+        ``routed_to`` is kept in the legacy ``routed_to_instances`` JSONB
+        column for backwards-compat with any UI that hasn't been migrated
+        yet; the canonical source is the ``event_routings`` join table.
+        """
         try:
-            requests.post(
+            r = requests.post(
                 f"{self.postgrest_url}/event_log",
                 json={
                     'hubitat_device_id': event.device_id,
@@ -520,15 +587,73 @@ class WebhookRouter:
                     'event_type': event.event_type,
                     'event_value': event.value,
                     'event_unit': event.unit,
+                    'hub_ip': hub_ip or None,
+                    'canonical_device_id': canonical_id,
+                    'intake_path': intake_path,
+                    'processing_ms': processing_ms,
                     'routed_to_instances': routed_to,
                     'raw_payload': raw_payload,
-                    'received_at': datetime.now().isoformat()
+                    'received_at': datetime.now().isoformat(),
                 },
-                headers={"Content-Type": "application/json"},
-                timeout=5
+                headers={
+                    "Content-Type": "application/json",
+                    "Prefer": "return=representation",
+                },
+                timeout=5,
+            )
+            if r.status_code in (200, 201):
+                body = r.json()
+                if isinstance(body, list) and body:
+                    return body[0].get('id')
+                if isinstance(body, dict):
+                    return body.get('id')
+            self.logger.warning(
+                f"event_log insert non-2xx: {r.status_code} {r.text[:200]}"
             )
         except Exception as e:
             self.logger.warning(f"Failed to log event: {e}", exc_info=True)
+        return None
+
+    def _log_routings(
+        self,
+        event_id: int,
+        routings: List[Dict[str, Any]],
+    ) -> None:
+        """
+        Bulk-insert ``event_routings`` rows for one event.
+
+        Each routing dict must have at least 'outcome'; 'instance_id' may
+        be None for orphan drops, 'drop_reason' is optional. Failures here
+        never raise — routing metadata is best-effort.
+        """
+        try:
+            rows = [
+                {
+                    'event_id': event_id,
+                    'instance_id': r.get('instance_id'),
+                    'outcome': r['outcome'],
+                    'drop_reason': r.get('drop_reason'),
+                }
+                for r in routings
+            ]
+            if not rows:
+                return
+            resp = requests.post(
+                f"{self.postgrest_url}/event_routings",
+                json=rows,
+                headers={
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+                timeout=5,
+            )
+            if resp.status_code not in (200, 201, 204):
+                self.logger.debug(
+                    f"event_routings insert non-2xx: "
+                    f"{resp.status_code} {resp.text[:200]}"
+                )
+        except Exception as e:
+            self.logger.debug(f"Failed to log routings: {e}", exc_info=True)
 
     def _update_mode(self, mode_name: str) -> None:
         """Update location_modes table with new active mode."""

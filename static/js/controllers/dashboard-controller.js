@@ -448,8 +448,14 @@ export class DashboardController {
             if (isPaused) {
                 await api.post(`/instances/${instanceId}/resume`);
             } else {
+                // Explicit reason — flags this pause as user-initiated.
+                // AML's on_mode_change only auto-resumes when the reason is
+                // 'mode_exclusion', so 'ui_button' (and any other manually
+                // assigned reason) is safe from accidental auto-resume on
+                // mode flips.
                 await api.post(`/instances/${instanceId}/pause`, {
-                    duration_minutes: 60
+                    duration_minutes: 60,
+                    reason: 'ui_button'
                 });
             }
             await this.loadInstances();

@@ -42,12 +42,24 @@ class ModeChangeMixin:
                 self._patch_pause_state(is_paused=True, reason='mode_exclusion')
             return  # Do not run master() while excluded
 
-        # Leaving an exclusion mode — auto-resume if we were paused for that reason
+        # Leaving an exclusion mode — auto-resume ONLY if THIS specific pause
+        # was caused by entering an exclusion mode. Any other pause reason
+        # (Button press, ui_button, scheduled, manual, anything user-driven)
+        # is LEFT PAUSED. Mode changes must NEVER undo a user-initiated pause —
+        # the policy is: only user input can resume a user pause. See user
+        # mandate 2026-05-17.
         if self._is_paused and self._pause_reason == 'mode_exclusion':
             self.logger.info(f"Mode '{new_mode}' not in exclusion list → resuming")
             self._is_paused = False
             self._pause_reason = None
             self._patch_pause_state(is_paused=False, reason=None)
+        elif self._is_paused:
+            # Paused for some OTHER reason — explicitly do NOT touch it.
+            self.logger.debug(
+                f"Mode '{new_mode}' changed but instance is paused with "
+                f"reason={self._pause_reason!r}; leaving paused"
+            )
+            return  # Do not run master() — pause means pause.
 
         # Normal mode change: reset memoization, cancel timeouts, re-evaluate
         self._reset_memoization()

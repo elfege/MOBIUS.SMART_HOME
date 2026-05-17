@@ -255,15 +255,42 @@ class HubitatEventsocketClient:
                 logger.debug(f'[eventsocket {name}] non-JSON frame ignored: {raw[:80]!r}')
                 continue
 
-            # Hubitat eventsocket emits multiple 'source' types (DEVICE,
-            # LOCATION, APP_STATUS, etc). For now we only consume DEVICE
-            # events; LOCATION (mode changes) will be handled separately
-            # by a future mode_change_log writer.
+            # Hubitat eventsocket emits multiple 'source' types. We consume:
+            #   DEVICE   — device-state events (motion, switch, etc.)
+            #   LOCATION — hub-level events including mode changes
+            # Everything else (APP_STATUS, HUB_INFO, etc) is ignored.
             src = ev.get('source')
-            if src != 'DEVICE':
+            if src not in ('DEVICE', 'LOCATION'):
                 continue
 
             self._mark_event(hub_id)
+
+            # LOCATION → mode change goes through a dedicated router method.
+            # Same shape (name='mode', value='Night') from the eventsocket
+            # as the legacy Maker API webhook used to deliver. Re-using
+            # route_mode_change keeps AML's on_mode_change → master()
+            # path working — the failure mode user diagnosed 2026-05-17:
+            # mode-driven overrides were silently broken since the webhook
+            # intake was deprecated for DEVICE events.
+            #
+            # LOCATION events with other names (sunset, sunrise, etc.) are
+            # skipped entirely — we don't currently consume them.
+            if src == 'LOCATION':
+                if ev.get('name') == 'mode':
+                    try:
+                        await self._get_router().route_mode_change({
+                            'value': ev.get('value', ''),
+                            'displayName': ev.get('displayName', 'Mode Changed'),
+                            '_hub_ip': ip,
+                            '_intake': 'eventsocket',
+                        })
+                    except Exception as e:
+                        logger.error(
+                            f'[eventsocket {name}] route_mode_change: '
+                            f'{type(e).__name__}: {e}',
+                            exc_info=True,
+                        )
+                continue  # all LOCATION events skip the DEVICE route_event path
 
             # Build the canonical webhook-payload dict that WebhookRouter
             # already knows how to consume. _hub_ip is what enables the

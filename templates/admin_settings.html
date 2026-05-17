@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+
+{% block title %}System Settings{% endblock %}
+
+{% block content %}
+<div class="admin-settings">
+    <header class="admin-settings-header">
+        <a href="/" class="wizard-exit">← Dashboard</a>
+        <h2>System Settings</h2>
+        <p class="admin-settings-desc">
+            Cross-cutting platform configuration. Per-instance settings live in each
+            automation's edit page. Per-app-type defaults will live under each
+            app's own settings page (coming).
+        </p>
+    </header>
+
+    <section class="admin-settings-body">
+        <div id="settings-list" class="settings-list">
+            <p class="loading-placeholder">Loading settings...</p>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.admin-settings {
+    max-width: 720px;
+    margin: 1.5rem auto;
+    padding: 1.5rem 2rem;
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+}
+.admin-settings-header h2 {
+    margin: 0.5rem 0 0.25rem;
+}
+.admin-settings-desc {
+    color: var(--color-text-muted);
+    font-size: 0.9rem;
+    margin: 0 0 1.5rem;
+}
+.settings-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+.setting-row {
+    display: grid;
+    grid-template-columns: 240px 1fr auto;
+    align-items: start;
+    gap: 1rem;
+    padding: 0.9rem 0;
+    border-bottom: 1px solid var(--color-border);
+}
+.setting-row:last-child {
+    border-bottom: none;
+}
+.setting-key {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 0.85rem;
+    color: var(--color-text);
+    word-break: break-word;
+}
+.setting-key .req-restart {
+    display: inline-block;
+    margin-top: 4px;
+    font-size: 0.7rem;
+    font-family: inherit;
+    color: var(--color-warning);
+    background: rgba(199, 154, 90, 0.10);
+    border: 1px solid rgba(199, 154, 90, 0.30);
+    border-radius: 4px;
+    padding: 1px 6px;
+}
+.setting-desc {
+    color: var(--color-text-muted);
+    font-size: 0.8rem;
+    line-height: 1.4;
+    margin-top: 4px;
+}
+.setting-input {
+    min-width: 160px;
+}
+.setting-input input,
+.setting-input select {
+    width: 100%;
+    max-width: 240px;
+}
+.setting-save {
+    display: flex;
+    align-items: flex-start;
+}
+.setting-save-status {
+    font-size: 0.75rem;
+    color: var(--color-success);
+    margin-left: 6px;
+    align-self: center;
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script type="module">
+    import { api, utils } from '/static/js/main.js';
+
+    async function load() {
+        const container = document.getElementById('settings-list');
+        let rows;
+        try {
+            rows = await api.get('/system_settings');
+        } catch (err) {
+            container.innerHTML = `<p class="error">Failed to load settings: ${err.message}</p>`;
+            return;
+        }
+        if (!rows || rows.length === 0) {
+            container.innerHTML = '<p>No settings.</p>';
+            return;
+        }
+        container.innerHTML = rows.map(row => {
+            const inputHtml = renderInput(row);
+            const restartBadge = row.requires_restart
+                ? '<span class="req-restart">requires restart</span>' : '';
+            return `
+                <div class="setting-row" data-key="${utils.escapeHtml(row.key)}" data-type="${row.value_type}">
+                    <div class="setting-label">
+                        <div class="setting-key">
+                            ${utils.escapeHtml(row.key)}<br>${restartBadge}
+                        </div>
+                        <div class="setting-desc">${utils.escapeHtml(row.description || '')}</div>
+                    </div>
+                    <div class="setting-input">${inputHtml}</div>
+                    <div class="setting-save">
+                        <button class="btn btn-secondary setting-save-btn">Save</button>
+                        <span class="setting-save-status" data-key="${utils.escapeHtml(row.key)}"></span>
+                    </div>
+                </div>`;
+        }).join('');
+
+        container.querySelectorAll('.setting-save-btn').forEach(btn => {
+            btn.addEventListener('click', save);
+        });
+    }
+
+    function renderInput(row) {
+        const v = row.value;
+        if (row.value_type === 'bool') {
+            const t = v === 'true' ? 'selected' : '';
+            const f = v === 'false' ? 'selected' : '';
+            return `<select data-input>
+                <option value="true" ${t}>true</option>
+                <option value="false" ${f}>false</option>
+            </select>`;
+        }
+        if (row.value_type === 'int' || row.value_type === 'float') {
+            const step = row.value_type === 'int' ? '1' : 'any';
+            return `<input type="number" step="${step}" value="${utils.escapeHtml(v)}" data-input>`;
+        }
+        return `<input type="text" value="${utils.escapeHtml(v)}" data-input>`;
+    }
+
+    async function save(e) {
+        const row = e.target.closest('.setting-row');
+        const key = row.dataset.key;
+        const type = row.dataset.type;
+        const input = row.querySelector('[data-input]');
+        let raw = input.value;
+        let parsed = raw;
+        if (type === 'int') parsed = parseInt(raw, 10);
+        else if (type === 'float') parsed = parseFloat(raw);
+        else if (type === 'bool') parsed = (raw === 'true');
+        // string + json pass as-is
+        const status = row.querySelector('.setting-save-status');
+        status.textContent = 'Saving...';
+        status.style.color = 'var(--color-text-muted)';
+        try {
+            await api.request(`/system_settings/${encodeURIComponent(key)}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ value: parsed }),
+            });
+            status.textContent = '✓ Saved';
+            status.style.color = 'var(--color-success)';
+            // Live-apply settings that don't require restart so the user
+            // sees the change immediately without an ./start.sh.
+            if (key === 'colorblind_mode' && type === 'bool') {
+                document.body.classList.toggle('colorblind', parsed === true);
+                try { localStorage.setItem('colorblind_mode', String(parsed)); } catch (_) {}
+                document.dispatchEvent(new CustomEvent('colorblind:changed', {
+                    detail: { enabled: parsed === true },
+                }));
+            }
+            setTimeout(() => { status.textContent = ''; }, 2500);
+        } catch (err) {
+            status.textContent = `⚠ ${err.message}`;
+            status.style.color = 'var(--color-danger)';
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', load);
+    load();
+</script>
+{% endblock %}

@@ -1,24 +1,28 @@
 {% extends "base.html" %}
 
-{% block title %}Create Automation{% endblock %}
+{% block title %}Automation Wizard{% endblock %}
 
 {% block content %}
 <div class="wizard">
     <header class="wizard-header">
-        <h2>Create New Automation</h2>
-        <div class="wizard-steps">
-            <span class="step active" data-step="1">1. Choose Type</span>
-            <span class="step" data-step="2">2. Select Devices</span>
-            <span class="step" data-step="3">3. Configure</span>
-            <span class="step" data-step="4">4. Name & Create</span>
+        {# Persistent escape hatch. Visible at every step, not just step 1. #}
+        <a href="/" class="wizard-exit" aria-label="Back to dashboard">← Dashboard</a>
+        <h2 id="wizard-title">New Automation</h2>
+        {# Step pills are now buttons — clickable for non-linear nav once
+           the user has progressed past step 1. The controller hides step 1
+           in edit mode (where the type is fixed). #}
+        <div class="wizard-steps" role="tablist">
+            <button type="button" class="step active" data-step="1" role="tab">1. Choose Type</button>
+            <button type="button" class="step" data-step="2" role="tab">2. Select Devices</button>
+            <button type="button" class="step" data-step="3" role="tab">3. Configure</button>
+            <button type="button" class="step" data-step="4" role="tab">4. Name &amp; Save</button>
         </div>
     </header>
 
-    <!-- Step 1: Choose App Type -->
+    <!-- Step 1: Choose App Type (hidden in edit mode) -->
     <section class="wizard-step" id="step-1">
         <h3>Choose Automation Type</h3>
         <div class="app-types-grid" id="app-types-container">
-            <!-- App type cards populated by JavaScript -->
             <div class="loading-placeholder">Loading available types...</div>
         </div>
     </section>
@@ -26,41 +30,35 @@
     <!-- Step 2: Select Devices -->
     <section class="wizard-step" id="step-2" style="display: none;">
         <h3>Select Devices</h3>
-        <div id="device-categories-container">
-            <!-- Device pickers populated by JavaScript -->
-        </div>
+        <div id="device-categories-container"></div>
         <div class="wizard-nav">
-            <button class="btn btn-secondary" onclick="wizard.prevStep()">Back</button>
-            <button class="btn btn-primary" onclick="wizard.nextStep()">Next</button>
+            <button class="btn btn-secondary" data-action="prev">Back</button>
+            <button class="btn btn-primary" data-action="next">Next</button>
         </div>
     </section>
 
     <!-- Step 3: Configure Settings -->
     <section class="wizard-step" id="step-3" style="display: none;">
         <h3>Configure Settings</h3>
-        <div id="settings-form-container">
-            <!-- Settings form populated from JSON Schema -->
-        </div>
+        <div id="settings-form-container"></div>
         <div class="wizard-nav">
-            <button class="btn btn-secondary" onclick="wizard.prevStep()">Back</button>
-            <button class="btn btn-primary" onclick="wizard.nextStep()">Next</button>
+            <button class="btn btn-secondary" data-action="prev">Back</button>
+            <button class="btn btn-primary" data-action="next">Next</button>
         </div>
     </section>
 
-    <!-- Step 4: Name & Create -->
+    <!-- Step 4: Name & Save -->
     <section class="wizard-step" id="step-4" style="display: none;">
-        <h3>Name Your Automation</h3>
+        <h3 id="step-4-title">Name Your Automation</h3>
         <div class="form-group">
             <label for="instance-label">Automation Name</label>
             <input type="text" id="instance-label" placeholder="e.g., Office Motion Lights" required>
             <p class="help-text">Choose a descriptive name to identify this automation.</p>
         </div>
-        <div class="wizard-summary" id="wizard-summary">
-            <!-- Summary populated by JavaScript -->
-        </div>
+        <div class="wizard-summary" id="wizard-summary"></div>
         <div class="wizard-nav">
-            <button class="btn btn-secondary" onclick="wizard.prevStep()">Back</button>
-            <button class="btn btn-primary btn-create" onclick="wizard.create()">Create Automation</button>
+            <button class="btn btn-secondary" data-action="prev">Back</button>
+            <button class="btn btn-primary btn-create" data-action="save" id="wizard-save-btn">Create Automation</button>
         </div>
     </section>
 </div>
@@ -68,6 +66,47 @@
 
 {% block extra_css %}
 <link rel="stylesheet" href="/static/css/device-tile-modal.css">
+<style>
+/* Wizard exit link — always visible in header (2026-05-17 UX fix).
+   Sits to the left of the title so user can bail mid-flow without
+   having to finish or hit browser back. */
+.wizard-header { position: relative; }
+.wizard-exit {
+    display: inline-block;
+    margin-right: 1rem;
+    color: #9aa0a8;
+    text-decoration: none;
+    font-size: 0.9rem;
+    padding: 0.35rem 0.7rem;
+    border-radius: 6px;
+    transition: background 120ms;
+}
+.wizard-exit:hover { background: rgba(255,255,255,0.05); color: #e8eaed; }
+
+/* Make step pills clickable-looking. .clickable class added by controller
+   when user has progressed past the step. */
+.wizard-steps .step {
+    cursor: default;
+    font-family: inherit;
+    background: transparent;
+    border: 1px solid transparent;
+}
+.wizard-steps .step.clickable {
+    cursor: pointer;
+}
+.wizard-steps .step.clickable:hover {
+    background: rgba(91,157,217,0.08);
+}
+.wizard-steps .step:focus-visible {
+    outline: 2px solid #5b9dd9;
+    outline-offset: 2px;
+}
+
+/* Hide step-1 pill entirely in edit mode (set by controller). */
+.wizard-steps.edit-mode .step[data-step="1"] {
+    display: none;
+}
+</style>
 {% endblock %}
 
 {% block extra_js %}
@@ -76,8 +115,30 @@
 
     window.wizard = new InstanceWizardController();
 
-    $(document).ready(function() {
+    $(document).ready(function () {
         wizard.init();
+
+        // Step-pill click-to-navigate. Controller decides which pills are
+        // clickable based on validation state.
+        document.querySelectorAll('.wizard-steps .step').forEach(el => {
+            el.addEventListener('click', (e) => {
+                const target = parseInt(e.currentTarget.dataset.step, 10);
+                if (el.classList.contains('clickable')) {
+                    wizard.goToStep(target);
+                }
+            });
+        });
+
+        // Step-content button handlers (replaces inline onclick=).
+        document.querySelectorAll('[data-action="prev"]').forEach(b => {
+            b.addEventListener('click', () => wizard.prevStep());
+        });
+        document.querySelectorAll('[data-action="next"]').forEach(b => {
+            b.addEventListener('click', () => wizard.nextStep());
+        });
+        document.querySelectorAll('[data-action="save"]').forEach(b => {
+            b.addEventListener('click', () => wizard.create());
+        });
     });
 </script>
 {% endblock %}

@@ -23,6 +23,46 @@ from pydantic import BaseModel
 # Logging
 # ---------------------------------------------------------------------------
 
+# =============================================================================
+# Apply user-configured timezone BEFORE logging is configured, so every log
+# line uses the user's local time. Reads system_settings.timezone via a
+# direct psycopg2 connection (the resolver isn't initialized yet at this
+# point in module load). Falls back to UTC silently if anything fails.
+# =============================================================================
+def _apply_user_timezone():
+    try:
+        import time as _t
+        import psycopg2  # noqa: WPS433
+        conn = psycopg2.connect(
+            host=os.environ.get('POSTGRES_HOST', 'postgres'),
+            port=os.environ.get('POSTGRES_PORT', '5432'),
+            dbname=os.environ.get('POSTGRES_DB', 'smarthome'),
+            user=os.environ.get('POSTGRES_USER', 'smarthome_api'),
+            password=os.environ.get('POSTGRES_PASSWORD', ''),
+            connect_timeout=3,
+        )
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT value FROM system_settings WHERE key = %s",
+                ('timezone',),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                os.environ['TZ'] = row[0]
+                _t.tzset()
+            cur.close()
+        finally:
+            conn.close()
+    except Exception:
+        # Boot-time best-effort. If DB isn't reachable yet, app continues
+        # in UTC and run_db_migrations will create the row on first run.
+        pass
+
+
+_apply_user_timezone()
+
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -156,6 +196,209 @@ def run_db_migrations():
 
         # Grant PostgREST access to new table
         "GRANT SELECT, INSERT, UPDATE, DELETE ON device_hub_mapping TO smarthome_anon",
+
+        # ====================================================================
+        # 2026-05-16 — Full data-oriented traceability (eventsocket SOT)
+        # Canonical source: psql/migrations/004_full_traceability_2026_05_16.sql
+        # ====================================================================
+
+        # event_log gets proper provenance columns.
+        "ALTER TABLE event_log ADD COLUMN IF NOT EXISTS hub_ip VARCHAR(50)",
+        "ALTER TABLE event_log ADD COLUMN IF NOT EXISTS canonical_device_id BIGINT REFERENCES devices(id)",
+        "ALTER TABLE event_log ADD COLUMN IF NOT EXISTS intake_path VARCHAR(20)",
+        "ALTER TABLE event_log ADD COLUMN IF NOT EXISTS processing_ms INTEGER",
+        "CREATE INDEX IF NOT EXISTS idx_event_log_canonical ON event_log(canonical_device_id, received_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_event_log_intake_time ON event_log(intake_path, received_at DESC)",
+
+        # event_routings: M:N join replacing event_log.routed_to_instances JSONB.
+        """CREATE TABLE IF NOT EXISTS event_routings (
+            id           BIGSERIAL PRIMARY KEY,
+            event_id     BIGINT NOT NULL REFERENCES event_log(id) ON DELETE CASCADE,
+            instance_id  BIGINT REFERENCES app_instances(id) ON DELETE SET NULL,
+            enqueued_at  TIMESTAMPTZ DEFAULT NOW(),
+            processed_at TIMESTAMPTZ,
+            outcome      VARCHAR(30) NOT NULL,
+            drop_reason  TEXT
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_event_routings_event ON event_routings(event_id)",
+        "CREATE INDEX IF NOT EXISTS idx_event_routings_instance ON event_routings(instance_id, enqueued_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_event_routings_outcome ON event_routings(outcome, enqueued_at DESC)",
+
+        # device_commands: every outbound command, two-phase (issue + completion).
+        """CREATE TABLE IF NOT EXISTS device_commands (
+            id                       BIGSERIAL PRIMARY KEY,
+            instance_id              BIGINT REFERENCES app_instances(id) ON DELETE SET NULL,
+            canonical_device_id      BIGINT REFERENCES devices(id) ON DELETE SET NULL,
+            hubitat_device_id        VARCHAR(50),
+            hub_ip                   VARCHAR(50),
+            command                  VARCHAR(50) NOT NULL,
+            arguments                JSONB DEFAULT '[]'::jsonb,
+            desired_attribute        VARCHAR(50),
+            desired_value            VARCHAR(200),
+            triggered_by_event_id    BIGINT REFERENCES event_log(id) ON DELETE SET NULL,
+            parent_command_id        BIGINT REFERENCES device_commands(id) ON DELETE SET NULL,
+            attempt                  INTEGER DEFAULT 1,
+            max_attempts             INTEGER DEFAULT 1,
+            issued_at                TIMESTAMPTZ DEFAULT NOW(),
+            completed_at             TIMESTAMPTZ,
+            outcome                  VARCHAR(30) DEFAULT 'pending',
+            final_observed_value     VARCHAR(200),
+            verify_retries_used      INTEGER,
+            latency_ms               INTEGER,
+            error                    TEXT
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_device_commands_device ON device_commands(canonical_device_id, issued_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_device_commands_instance ON device_commands(instance_id, issued_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_device_commands_outcome ON device_commands(outcome, issued_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_device_commands_trig ON device_commands(triggered_by_event_id)",
+        "CREATE INDEX IF NOT EXISTS idx_device_commands_parent ON device_commands(parent_command_id)",
+
+        # instance_state_log: pause/resume/mode/settings transitions.
+        """CREATE TABLE IF NOT EXISTS instance_state_log (
+            id          BIGSERIAL PRIMARY KEY,
+            instance_id BIGINT NOT NULL REFERENCES app_instances(id) ON DELETE CASCADE,
+            transition  VARCHAR(40) NOT NULL,
+            details     JSONB DEFAULT '{}'::jsonb,
+            actor       VARCHAR(60),
+            occurred_at TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_instance_state_log_instance ON instance_state_log(instance_id, occurred_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_instance_state_log_transition ON instance_state_log(transition, occurred_at DESC)",
+
+        # mode_change_log: hub location-mode timeline.
+        """CREATE TABLE IF NOT EXISTS mode_change_log (
+            id                 BIGSERIAL PRIMARY KEY,
+            mode_name          VARCHAR(60) NOT NULL,
+            became_active_at   TIMESTAMPTZ DEFAULT NOW(),
+            became_inactive_at TIMESTAMPTZ,
+            source             VARCHAR(40)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_mode_change_log_active ON mode_change_log(became_active_at DESC)",
+
+        # hub_health: per-hub WS connection + traffic + reconcile heartbeat.
+        """CREATE TABLE IF NOT EXISTS hub_health (
+            hub_id                  INTEGER PRIMARY KEY REFERENCES hub_config(id) ON DELETE CASCADE,
+            ws_connected            BOOLEAN DEFAULT FALSE,
+            ws_connected_since      TIMESTAMPTZ,
+            ws_last_event_at        TIMESTAMPTZ,
+            ws_last_failure_at      TIMESTAMPTZ,
+            ws_last_failure_reason  TEXT,
+            ws_consecutive_failures INTEGER DEFAULT 0,
+            ws_reconnects_24h       INTEGER DEFAULT 0,
+            ws_events_received_24h  BIGINT DEFAULT 0,
+            last_reconcile_at       TIMESTAMPTZ,
+            last_reconcile_diffs    INTEGER DEFAULT 0,
+            updated_at              TIMESTAMPTZ DEFAULT NOW()
+        )""",
+
+        # Grant PostgREST access to all new tables + their sequences.
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON event_routings TO smarthome_anon",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON device_commands TO smarthome_anon",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON instance_state_log TO smarthome_anon",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON mode_change_log TO smarthome_anon",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON hub_health TO smarthome_anon",
+        "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO smarthome_anon",
+
+        # Seed hub_health rows for every enabled hub so the eventsocket client
+        # and reconcile-poll have somewhere to UPDATE from boot.
+        "INSERT INTO hub_health (hub_id) SELECT id FROM hub_config WHERE is_enabled = TRUE "
+        "ON CONFLICT (hub_id) DO NOTHING",
+
+        # ====================================================================
+        # 2026-05-17 — Settings cascade (system + app-type) + encrypted secrets
+        # Canonical source: psql/migrations/005_settings_cascade_and_secrets_2026_05_17.sql
+        # See docs/plans/comprehensive_settings_and_ui_overhaul_2026_05_17.md
+        # POLICY: a setting key MUST live at exactly one configurable layer.
+        # ====================================================================
+        """CREATE TABLE IF NOT EXISTS system_settings (
+            key              VARCHAR(80) PRIMARY KEY,
+            value            TEXT NOT NULL,
+            value_type       VARCHAR(20) NOT NULL,
+            description      TEXT,
+            ui_exposed       BOOLEAN DEFAULT TRUE,
+            requires_restart BOOLEAN DEFAULT FALSE,
+            updated_at       TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        """CREATE TABLE IF NOT EXISTS app_type_settings (
+            id               BIGSERIAL PRIMARY KEY,
+            app_type_id      INTEGER NOT NULL REFERENCES app_types(id) ON DELETE CASCADE,
+            key              VARCHAR(80) NOT NULL,
+            value            TEXT NOT NULL,
+            value_type       VARCHAR(20) NOT NULL,
+            description      TEXT,
+            ui_exposed       BOOLEAN DEFAULT TRUE,
+            requires_restart BOOLEAN DEFAULT FALSE,
+            updated_at       TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (app_type_id, key)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_app_type_settings_type ON app_type_settings(app_type_id)",
+        """CREATE TABLE IF NOT EXISTS encrypted_secrets (
+            key          VARCHAR(80) PRIMARY KEY,
+            ciphertext   BYTEA NOT NULL,
+            kek_version  INTEGER NOT NULL DEFAULT 1,
+            description  TEXT,
+            rotated_at   TIMESTAMPTZ,
+            created_at   TIMESTAMPTZ DEFAULT NOW(),
+            updated_at   TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        """CREATE TABLE IF NOT EXISTS system_boot_log (
+            id             BIGSERIAL PRIMARY KEY,
+            boot_at        TIMESTAMPTZ DEFAULT NOW(),
+            secrets_source VARCHAR(40),
+            kek_version    INTEGER,
+            notes          TEXT
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_system_boot_log_at ON system_boot_log(boot_at DESC)",
+
+        # Seed system_settings (idempotent via ON CONFLICT DO NOTHING).
+        """INSERT INTO system_settings (key, value, value_type, description, ui_exposed, requires_restart) VALUES
+          ('motion_timeout_floor_seconds', '60', 'int',
+           'Minimum no-motion timeout in seconds. AML/Fan clamp computed timeouts to this floor unless the instance has bypassTimeoutFloor=true.',
+           TRUE, FALSE),
+          ('reconcile_interval_secs', '60', 'int', 'Normal reconcile-poll cadence.', TRUE, FALSE),
+          ('reconcile_aggressive_secs', '10', 'int', 'Aggressive reconcile cadence after recent hub WS failure.', TRUE, FALSE),
+          ('reconcile_aggressive_window_secs', '300', 'int', 'How recently a hub WS failure must have occurred to engage aggressive reconcile.', TRUE, FALSE),
+          ('eventsocket_watchdog_secs', '120', 'int', 'Recycle WS connection if no events arrive within this window.', TRUE, FALSE),
+          ('device_cmd_verify_retries', '3', 'int', 'Polls per command-send attempt to verify state.', TRUE, FALSE),
+          ('device_cmd_verify_delay', '1.0', 'float', 'Seconds between verify polls.', TRUE, FALSE),
+          ('device_cmd_operation_retries', '2', 'int', 'Full send+verify cycles before giving up.', TRUE, FALSE),
+          ('aml_init_master_delay_seconds', '5', 'int', 'AML initialize() schedules its first master() run after this many seconds. Short delay lets in-flight motion events arrive first.', TRUE, FALSE),
+          ('aml_periodic_eval_interval_seconds', '60', 'int', 'Defensive: every AML instance runs master() at this cadence regardless of events. Minimum 10s.', TRUE, FALSE),
+          ('timezone', 'America/New_York', 'string', 'IANA timezone name. Applied to the app container at boot for log timestamps. DB stays in UTC.', TRUE, TRUE),
+          ('colorblind_mode', 'false', 'bool', 'Use a colorblind-safe (Okabe-Ito) palette in charts and accent colors. Designed for protanopia / deuteranopia / tritanopia.', TRUE, FALSE),
+          ('eventsocket_enabled', 'true', 'bool', 'Master switch for Hubitat eventsocket WS intake. Requires app restart.', TRUE, TRUE),
+          ('reconcile_poll_enabled', 'true', 'bool', 'Reconcile poll on/off. Requires app restart.', TRUE, TRUE),
+          ('device_commands_logging', 'true', 'bool', 'Two-phase device_commands logging. Requires app restart.', TRUE, TRUE),
+          ('webhook_intake_enabled', 'false', 'bool', 'Legacy webhook intake — rollback escape hatch.', TRUE, TRUE)
+        ON CONFLICT (key) DO NOTHING""",
+
+        # instance_setting_exceptions — per-FIELD bypass of system-enforced
+        # validation (e.g., motion_timeout_floor_seconds). Per the DB-SOT
+        # policy, each exception is its own row (audit-friendly) rather
+        # than a JSONB flag on app_instances.settings.
+        """CREATE TABLE IF NOT EXISTS instance_setting_exceptions (
+            id           BIGSERIAL PRIMARY KEY,
+            instance_id  BIGINT NOT NULL REFERENCES app_instances(id) ON DELETE CASCADE,
+            setting_path VARCHAR(120) NOT NULL,
+            reason       TEXT,
+            granted_at   TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (instance_id, setting_path)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_ise_instance ON instance_setting_exceptions(instance_id)",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON instance_setting_exceptions TO smarthome_anon",
+
+        # Grants
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON system_settings TO smarthome_anon",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON app_type_settings TO smarthome_anon",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON encrypted_secrets TO smarthome_anon",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON system_boot_log TO smarthome_anon",
+        "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO smarthome_anon",
+
+        # Tell PostgREST to reload its schema cache. Without this, columns
+        # added by ALTER TABLE above are invisible to PostgREST's OpenAPI
+        # and POST/PATCH requests fail with PGRST204 "column does not exist".
+        # Surfaced by tests/integration/test_live_crud_and_cascades.py on 2026-05-16.
+        "NOTIFY pgrst, 'reload schema'",
     ]
 
     try:
@@ -191,6 +434,23 @@ async def lifespan(app: FastAPI):
     from services.device_cache_refresh import start_cache_refresh, stop_cache_refresh
     refresh_interval = int(os.environ.get('DEVICE_CACHE_REFRESH_INTERVAL', '120'))
     start_cache_refresh(refresh_interval=refresh_interval)
+
+    # Start Hubitat eventsocket client (raw WS event stream per hub).
+    # Default mode is 'shadow' — connect and log events without routing them,
+    # so cutover can compare against the Maker API webhook path before flipping.
+    # Set EVENTSOCKET_INTAKE_MODE=primary in env to dispatch through WebhookRouter.
+    from services.hubitat_eventsocket_client import (
+        start_eventsocket, stop_eventsocket
+    )
+    await start_eventsocket()
+
+    # Reconcile poll — safety net for the WS-only intake. Polls /devices/all
+    # per hub every 60s (10s in aggressive mode after a recent WS failure),
+    # synthesizes events for cache↔hub divergences through WebhookRouter.
+    from services.reconcile_poll import (
+        start_reconcile_poll, stop_reconcile_poll
+    )
+    await start_reconcile_poll()
 
     # Run hub classification on startup (populates device_hub_mapping table).
     # Runs in background thread so it doesn't block app readiness.
@@ -246,6 +506,8 @@ async def lifespan(app: FastAPI):
 
     stop_cache_refresh()
     stop_matter_discovery()
+    await stop_eventsocket()
+    await stop_reconcile_poll()
 
     # Stop Samsung TV client cleanly
     await _tv_client.stop()
@@ -544,36 +806,105 @@ async def get_devices(capability: Optional[str] = Query(None)):
     """
     List devices, optionally filtered by capability.
 
+    Reads from the canonical `devices` table (DB-cached) — NOT a live Maker
+    API call. The canonical table is kept fresh by hub_classifier on startup
+    and by the reconcile poll. This eliminates the multi-second "Loading
+    devices..." wait in the wizard that the per-category live-Maker pattern
+    used to cause (one HTTP roundtrip to Hubitat per category × 6 categories).
+
+    For a forced live refresh from Hubitat, see /api/devices/refresh.
+
     Args:
-        capability: Filter by capability (e.g., 'motionSensor', 'switch')
+        capability: Filter by capability (e.g., 'motionSensor', 'switch').
+                    PostgREST JSONB containment: capabilities ? capability.
     """
-    from services.hubitat_client import get_default_client
-    from services.device_cache import get_default_cache
-
+    import requests as _requests
     try:
-        client = get_default_client()
-        cache = get_default_cache()
-
+        pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+        params = {
+            'select': 'id,hub_ip,hubitat_id,label,name,device_type,'
+                      'protocol,capabilities,attributes',
+            'order': 'label',
+        }
         if capability:
-            devices = client.get_devices_by_capability(capability)
-        else:
-            devices = client.get_all_devices()
-
-        # update_all needs to know which hub these devices came from so
-        # it can resolve the per-hub Hubitat ids to canonical PKs (the
-        # cache's primary key post-Phase-5). client.config.hub_ip is set
-        # at HubitatClient construction time.
-        try:
-            hub_ip = getattr(client, 'config', None) and client.config.hub_ip
-        except Exception:
-            hub_ip = None
-        if hub_ip:
-            cache.update_all(devices, hub_ip=hub_ip)
-
-        return devices
-
+            # PostgREST JSONB array-contains: cs.["value"] for JSONB array
+            # of strings. NOT cs.{"value"} — that's PG-array literal syntax
+            # and PostgREST rejects it on JSONB columns (PGRST 22P02).
+            params['capabilities'] = f'cs.["{capability}"]'
+        r = _requests.get(f"{pg}/devices", params=params, timeout=5)
+        r.raise_for_status()
+        rows = r.json()
+        # Shape compatibility: legacy callers expect each device to have
+        # `id` (the integer canonical PK is fine) and a `label`. Already do.
+        return rows
     except Exception as e:
-        logger.error(f"Failed to get devices: {e}")
+        logger.error(f"Failed to get devices: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/devices/by-categories", tags=["devices"])
+async def get_devices_by_categories(categories: str = Query(...)):
+    """
+    Bulk endpoint: returns devices grouped by capability in ONE roundtrip.
+
+    `categories` is a comma-separated list of capability names matching
+    what the wizard's device_categories return. Example:
+        GET /api/devices/by-categories?categories=motionSensor,switch,contact
+        →  {
+              "motionSensor": [...],
+              "switch":       [...],
+              "contact":      [...]
+           }
+
+    Internally one PostgREST call fetches all devices, then we group in
+    memory. Faster than N round-trips and trivial to add new categories.
+    """
+    import requests as _requests
+    cats = [c.strip() for c in categories.split(',') if c.strip()]
+    if not cats:
+        return {}
+    try:
+        pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+        r = _requests.get(
+            f"{pg}/devices",
+            params={
+                'select': 'id,hub_ip,hubitat_id,label,name,device_type,'
+                          'protocol,capabilities,attributes',
+                'order': 'label',
+            },
+            timeout=5,
+        )
+        r.raise_for_status()
+        all_devices = r.json()
+        out = {c: [] for c in cats}
+        for d in all_devices:
+            caps = d.get('capabilities') or []
+            for c in cats:
+                if c in caps:
+                    out[c].append(d)
+        return out
+    except Exception as e:
+        logger.error(f"get_devices_by_categories: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/devices/refresh", tags=["devices"])
+async def refresh_devices_from_hubitat():
+    """
+    Force a fresh pull of all devices from Hubitat via Maker API → canonical
+    `devices` table. Use sparingly — the reconcile poll already keeps this
+    fresh in the background. Returns the count of devices refreshed.
+    """
+    from services.hub_classifier import run_classification, invalidate_cache
+    try:
+        result = run_classification()
+        invalidate_cache()
+        return {
+            "ok": True,
+            "total_native": (result or {}).get("total_native", 0),
+        }
+    except Exception as e:
+        logger.error(f"refresh_devices_from_hubitat: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -647,24 +978,38 @@ async def send_device_command(device_id: str, body: DeviceCommandRequest):
 @app.post("/api/webhook/event", tags=["webhooks"])
 async def handle_event_webhook(request: Request):
     """
-    Handle device event webhook from Hubitat.
+    Deprecated — device event intake moved to the Hubitat eventsocket.
 
-    Hubitat Maker API sends events here (via webhook-dispatcher)
-    when devices change state.
+    Reason: the Maker API webhook path was fragile — firmware updates and
+    re-saving the Maker API app silently de-armed per-device event forwarding,
+    producing the 2026-05-16 Living-room failure (canons 55/56 stopped
+    delivering events while the hub itself kept firing them). The eventsocket
+    bypasses per-device opt-in entirely. See services/hubitat_eventsocket_client.py.
+
+    Set WEBHOOK_INTAKE_ENABLED=true to re-open this endpoint as a temporary
+    rollback during a problem with the WS intake.
     """
-    from services.webhook_router import get_webhook_router
+    if os.environ.get('WEBHOOK_INTAKE_ENABLED', 'false').strip().lower() == 'true':
+        from services.webhook_router import get_webhook_router
+        try:
+            payload = await request.json()
+            router = get_webhook_router()
+            routed_count = await router.route_event(payload)
+            return {"routed_to": routed_count}
+        except Exception as e:
+            logger.error(f"Webhook event processing failed: {e}", exc_info=True)
+            return {"routed_to": 0, "error": str(e)}
 
-    try:
-        payload = await request.json()
-        logger.debug(f"Webhook received: {payload}")
-
-        router = get_webhook_router()
-        routed_count = await router.route_event(payload)
-
-        return {"routed_to": routed_count}
-    except Exception as e:
-        logger.error(f"Webhook event processing failed: {e}", exc_info=True)
-        return {"routed_to": 0, "error": str(e)}
+    # Closed path — explicit 410 so the dispatcher's failed-POST logs are
+    # not misread as a transient error.
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "Webhook event intake is deprecated; events now arrive via the "
+            "Hubitat eventsocket. Set WEBHOOK_INTAKE_ENABLED=true to "
+            "temporarily re-open this endpoint."
+        ),
+    )
 
 
 @app.post("/api/webhook/mode", tags=["webhooks"])
@@ -688,6 +1033,202 @@ async def handle_mode_webhook(request: Request):
 # =============================================================================
 # Modes
 # =============================================================================
+
+
+# =============================================================================
+# Settings (cascade: system → app-type → instance)
+# =============================================================================
+
+
+@app.get("/api/system_settings", tags=["settings"])
+async def list_system_settings(ui_only: bool = Query(True)):
+    """
+    List system-wide settings. Default: only UI-exposed ones.
+    Set ui_only=false to include internal knobs.
+    """
+    import requests as _requests
+    params = {"order": "key"}
+    if ui_only:
+        params["ui_exposed"] = "eq.true"
+    try:
+        r = _requests.get(
+            f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/system_settings",
+            params=params,
+            timeout=5,
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        logger.error(f"list_system_settings: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/system_settings/{key}", tags=["settings"])
+async def get_system_setting(key: str):
+    """Get a single system setting by key. Returns coerced value."""
+    from services.settings_resolver import get_resolver, _coerce
+    resolver = get_resolver()
+    # Force a fresh fetch so the caller sees the latest value
+    resolver._sys_cache.pop(key, None)
+    row = resolver._fetch_system_row(key)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"setting {key!r} not found")
+    return {
+        "key": row["key"],
+        "value": _coerce(row["value"], row["value_type"]),
+        "value_type": row["value_type"],
+    }
+
+
+class SystemSettingPatch(BaseModel):
+    """Body for PATCH /api/system_settings/{key}."""
+    value: Any
+
+
+@app.patch("/api/system_settings/{key}", tags=["settings"])
+async def patch_system_setting(key: str, body: SystemSettingPatch):
+    """Update a system setting. Type-coerces against the stored value_type."""
+    from services.settings_resolver import get_resolver
+    resolver = get_resolver()
+    ok = resolver.set_system(key, body.value)
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"could not set {key!r}")
+    return {"key": key, "value": body.value}
+
+
+@app.get("/api/app_types/{type_name}/settings", tags=["settings"])
+async def list_app_type_settings(type_name: str):
+    """
+    List per-app-type global settings for the named app type.
+    """
+    import requests as _requests
+    pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    # Look up app_type id from name
+    r = _requests.get(f"{pg}/app_types",
+                      params={"type_name": f"eq.{type_name}",
+                              "select": "id"},
+                      timeout=5)
+    rows = r.json() if r.status_code == 200 else []
+    if not rows:
+        raise HTTPException(status_code=404,
+                            detail=f"app_type {type_name!r} not found")
+    app_type_id = rows[0]["id"]
+    r = _requests.get(f"{pg}/app_type_settings",
+                      params={"app_type_id": f"eq.{app_type_id}",
+                              "ui_exposed": "eq.true",
+                              "order": "key"},
+                      timeout=5)
+    r.raise_for_status()
+    return r.json()
+
+
+class AppTypeSettingPatch(BaseModel):
+    """Body for PATCH /api/app_types/{type_name}/settings/{key}."""
+    value: Any
+
+
+@app.get("/api/instances/{instance_id}/setting-exceptions", tags=["settings"])
+async def list_instance_setting_exceptions(instance_id: int):
+    """List all per-field exceptions granted to this instance."""
+    import requests as _requests
+    pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    r = _requests.get(
+        f"{pg}/instance_setting_exceptions",
+        params={
+            "instance_id": f"eq.{instance_id}",
+            "select": "id,setting_path,reason,granted_at",
+        },
+        timeout=5,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+class SettingExceptionGrant(BaseModel):
+    """Body for POST /api/instances/{id}/setting-exceptions."""
+    setting_path: str
+    reason: Optional[str] = None
+
+
+@app.post("/api/instances/{instance_id}/setting-exceptions", tags=["settings"])
+async def grant_instance_setting_exception(
+    instance_id: int, body: SettingExceptionGrant,
+):
+    """
+    Grant this instance an exception for `setting_path` — bypasses
+    system-enforced validation (e.g., motion_timeout_floor_seconds) for that
+    field only. Audit record kept (granted_at).
+    """
+    import requests as _requests
+    pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    r = _requests.post(
+        f"{pg}/instance_setting_exceptions",
+        json={
+            "instance_id": instance_id,
+            "setting_path": body.setting_path,
+            "reason": body.reason,
+        },
+        headers={
+            "Content-Type": "application/json",
+            "Prefer": "return=representation,resolution=merge-duplicates",
+        },
+        timeout=5,
+    )
+    if r.status_code in (200, 201):
+        body_json = r.json()
+        return body_json[0] if isinstance(body_json, list) and body_json else body_json
+    raise HTTPException(status_code=r.status_code, detail=r.text)
+
+
+@app.delete(
+    "/api/instances/{instance_id}/setting-exceptions/{setting_path:path}",
+    tags=["settings"],
+)
+async def revoke_instance_setting_exception(
+    instance_id: int, setting_path: str,
+):
+    """Revoke a per-field exception. setting_path uses path-style routing so
+    nested keys like `modeTimeouts.Night` work without URL encoding."""
+    import requests as _requests
+    pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    r = _requests.delete(
+        f"{pg}/instance_setting_exceptions",
+        params={
+            "instance_id": f"eq.{instance_id}",
+            "setting_path": f"eq.{setting_path}",
+        },
+        timeout=5,
+    )
+    if r.status_code not in (200, 204):
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    return {"ok": True, "setting_path": setting_path}
+
+
+@app.patch(
+    "/api/app_types/{type_name}/settings/{key}",
+    tags=["settings"],
+)
+async def patch_app_type_setting(
+    type_name: str, key: str, body: AppTypeSettingPatch,
+):
+    """Update a per-app-type setting."""
+    import requests as _requests
+    pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    r = _requests.get(f"{pg}/app_types",
+                      params={"type_name": f"eq.{type_name}",
+                              "select": "id"},
+                      timeout=5)
+    rows = r.json() if r.status_code == 200 else []
+    if not rows:
+        raise HTTPException(status_code=404,
+                            detail=f"app_type {type_name!r} not found")
+    app_type_id = rows[0]["id"]
+    from services.settings_resolver import get_resolver
+    ok = get_resolver().set_app_type(app_type_id, key, body.value)
+    if not ok:
+        raise HTTPException(status_code=400,
+                            detail=f"could not set ({type_name}, {key})")
+    return {"app_type": type_name, "key": key, "value": body.value}
 
 
 # =============================================================================
@@ -1743,6 +2284,13 @@ async def matter_page(request: Request):
 async def hubs_page(request: Request):
     """Hub configuration page — edit hub_config rows."""
     return templates.TemplateResponse(request, "hubs.html")
+
+
+@app.get("/admin/settings", response_class=HTMLResponse, include_in_schema=False)
+async def admin_settings_page(request: Request):
+    """System settings page — edit rows in system_settings table.
+    Reached via the gear icon in the navbar."""
+    return templates.TemplateResponse(request, "admin_settings.html")
 
 
 # =============================================================================

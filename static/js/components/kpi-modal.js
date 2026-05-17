@@ -16,6 +16,26 @@
  */
 
 import { api, utils } from '../main.js';
+import { getPalette } from '../services/colorblind.js';
+
+/**
+ * Diagram types the Event Breakdown chart can cycle through. One button
+ * advances the index in this array and re-renders. User's choice is
+ * persisted in localStorage so it sticks across sessions.
+ */
+const TYPE_CHART_DIAGRAMS = ['doughnut', 'pie', 'bar', 'polarArea'];
+
+function _loadTypeChartDiagram() {
+    const v = localStorage.getItem('kpi_type_chart_diagram');
+    return TYPE_CHART_DIAGRAMS.includes(v) ? v : 'doughnut';
+}
+
+function _saveTypeChartDiagram(name) {
+    localStorage.setItem('kpi_type_chart_diagram', name);
+}
+
+/** Last-rendered metrics — kept so the cycle button can re-render. */
+let _lastTypeMetrics = null;
 
 /* =============================================================================
    State
@@ -379,7 +399,14 @@ async function _loadAndRender($modal, instanceId, instanceLabel, isRefresh = fal
                     <canvas id="kpi-hourly-chart"></canvas>
                 </div>
                 <div class="kpi-chart-container kpi-chart-narrow">
-                    <h3>Event Types</h3>
+                    <div class="kpi-chart-header">
+                        <h3>Event Types</h3>
+                        <button id="kpi-type-chart-cycle"
+                                class="btn btn-secondary kpi-chart-cycle-btn"
+                                title="Cycle to next diagram type">
+                            → ...
+                        </button>
+                    </div>
                     <canvas id="kpi-type-chart"></canvas>
                 </div>
             </div>
@@ -620,43 +647,130 @@ function _renderTypeChart(metrics) {
     const entries = Object.entries(metrics.type_counts || {});
     if (entries.length === 0) return;
 
+    // Cache metrics so the type-cycle button can re-render without a refetch.
+    _lastTypeMetrics = metrics;
+
     // Sort by count descending
     entries.sort((a, b) => b[1] - a[1]);
 
-    const palette = [
-        '#4A9FD8', '#E89B3C', '#22c55e', '#ef4444',
-        '#a855f7', '#ec4899', '#14b8a6', '#f59e0b',
-        '#6366f1', '#84cc16'
-    ];
+    // Colorblind-aware palette — see static/js/services/colorblind.js.
+    const palette = getPalette(entries.length);
 
-    const chart = new Chart(canvas, {
-        type: 'doughnut',
+    const diagram = _loadTypeChartDiagram();
+
+    // If a chart already exists for this canvas AND its type matches, do
+    // an in-place data update — Chart.js animates the interpolation. When
+    // data is unchanged the animation is visually a no-op (no flicker on
+    // periodic refetches). Only destroy+recreate when the diagram type
+    // changes (cycle button click).
+    const existingIdx = _charts.findIndex(c => c.canvas === canvas);
+    if (existingIdx >= 0) {
+        const existing = _charts[existingIdx];
+        if (existing.config.type === diagram) {
+            // Data unchanged? Skip the update entirely so there's no
+            // animation flicker on the periodic refetch. User explicitly
+            // requested: "the transition I require is no transition, in
+            // a way" — i.e., when nothing changed, do nothing.
+            const newLabels = entries.map(e => e[0]);
+            const newData = entries.map(e => e[1]);
+            const oldLabels = existing.data.labels || [];
+            const oldData = (existing.data.datasets?.[0]?.data) || [];
+            const labelsSame = newLabels.length === oldLabels.length
+                && newLabels.every((v, i) => v === oldLabels[i]);
+            const dataSame = newData.length === oldData.length
+                && newData.every((v, i) => v === oldData[i]);
+            if (labelsSame && dataSame) {
+                _updateCycleButton(diagram);
+                return;  // genuinely nothing to do
+            }
+            // Real change — update in place with Chart.js animation.
+            existing.data.labels = newLabels;
+            const isBar = diagram === 'bar';
+            existing.data.datasets[0].data = newData;
+            existing.data.datasets[0].backgroundColor = isBar
+                ? palette[0]
+                : entries.map((_, i) => palette[i % palette.length]);
+            existing.update();
+            _updateCycleButton(diagram);
+            return;
+        }
+        // Type changed — fall through to destroy + recreate
+        try { existing.destroy(); } catch (_) {}
+        _charts.splice(existingIdx, 1);
+    }
+
+    // Bar charts use one dataset spanning all categories on the x-axis;
+    // doughnut/pie/polarArea use one dataset where each slice is a category.
+    // Shape the data accordingly.
+    const isBar = diagram === 'bar';
+    const config = {
+        type: diagram,
         data: {
             labels: entries.map(e => e[0]),
             datasets: [{
+                label: 'Event count',
                 data: entries.map(e => e[1]),
-                backgroundColor: entries.map((_, i) => palette[i % palette.length]),
-                borderWidth: 0
-            }]
+                backgroundColor: isBar
+                    ? palette[0]
+                    : entries.map((_, i) => palette[i % palette.length]),
+                borderWidth: 0,
+            }],
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
-            cutout: '55%',
+            ...(diagram === 'doughnut' ? { cutout: '55%' } : {}),
             plugins: {
                 legend: {
+                    display: !isBar,  // bars show their own x-axis labels
                     position: 'bottom',
                     labels: {
                         color: 'rgba(255,255,255,0.7)',
                         padding: 12,
                         usePointStyle: true,
-                        pointStyleWidth: 10
-                    }
-                }
-            }
-        }
-    });
+                        pointStyleWidth: 10,
+                    },
+                },
+            },
+            ...(isBar ? {
+                scales: {
+                    x: { ticks: { color: 'rgba(255,255,255,0.7)' },
+                         grid: { color: 'rgba(255,255,255,0.05)' } },
+                    y: { ticks: { color: 'rgba(255,255,255,0.7)' },
+                         grid: { color: 'rgba(255,255,255,0.05)' },
+                         beginAtZero: true },
+                },
+            } : {}),
+        },
+    };
+    const chart = new Chart(canvas, config);
     _charts.push(chart);
+
+    _updateCycleButton(diagram);
+}
+
+/**
+ * Wire (idempotent) and label the cycle-diagram button. Pulled out so both
+ * the update-in-place path and the recreate path can refresh the label.
+ *
+ * Label shows the NEXT diagram in the loop, not the current one — affordance
+ * over status. User glances at the button and knows what clicking will do.
+ */
+function _updateCycleButton(currentDiagram) {
+    const btn = document.getElementById('kpi-type-chart-cycle');
+    if (!btn) return;
+    const nextOf = (cur) => TYPE_CHART_DIAGRAMS[
+        (TYPE_CHART_DIAGRAMS.indexOf(cur) + 1) % TYPE_CHART_DIAGRAMS.length
+    ];
+    if (!btn.dataset.cycleWired) {
+        btn.dataset.cycleWired = '1';
+        btn.addEventListener('click', () => {
+            const cur = _loadTypeChartDiagram();
+            _saveTypeChartDiagram(nextOf(cur));
+            if (_lastTypeMetrics) _renderTypeChart(_lastTypeMetrics);
+        });
+    }
+    btn.textContent = `→ ${nextOf(currentDiagram)}`;
 }
 
 /**

@@ -364,7 +364,9 @@ def run_db_migrations():
           ('device_cmd_operation_retries', '2', 'int', 'Full send+verify cycles before giving up.', TRUE, FALSE),
           ('aml_init_master_delay_seconds', '5', 'int', 'AML initialize() schedules its first master() run after this many seconds. Short delay lets in-flight motion events arrive first.', TRUE, FALSE),
           ('aml_periodic_eval_interval_seconds', '60', 'int', 'Defensive: every AML instance runs master() at this cadence regardless of events. Minimum 10s.', TRUE, FALSE),
-          ('timezone', 'America/New_York', 'string', 'IANA timezone name. Applied to the app container at boot for log timestamps. DB stays in UTC.', TRUE, TRUE),
+          ('timezone', 'America/New_York', 'string', 'IANA timezone name. Hub-derived: refreshed hourly from /location/list/data on every enabled hub. UI editing is advisory — the next refresh cycle overrides. DB stays in UTC; this is applied to the app container at boot for log timestamps.', TRUE, FALSE),
+          ('hub_tz_inconsistency', 'false', 'bool', 'Set to TRUE by the hub-TZ refresher when enabled hubs report disagreeing time zones. Dashboard surfaces this as a warning so the user can fix the outlier from the Hubitat UI.', TRUE, FALSE),
+          ('hub_tz_breakdown', '{}', 'string', 'JSON object {hub_name: tz_or_status} from the most recent hub-TZ refresh. Populated by services.hub_tz_resolver. Values are Windows-style TZ strings, "unreachable", or "unmapped:<tz>".', TRUE, FALSE),
           ('colorblind_mode', 'false', 'bool', 'Use a colorblind-safe (Okabe-Ito) palette in charts and accent colors. Designed for protanopia / deuteranopia / tritanopia.', TRUE, FALSE),
           ('eventsocket_enabled', 'true', 'bool', 'Master switch for Hubitat eventsocket WS intake. Requires app restart.', TRUE, TRUE),
           ('reconcile_poll_enabled', 'true', 'bool', 'Reconcile poll on/off. Requires app restart.', TRUE, TRUE),
@@ -490,6 +492,65 @@ async def lifespan(app: FastAPI):
             logger.warning(f"Startup hub classification failed (will retry on next POST /api/hub/classify): {e}")
 
     threading.Thread(target=_startup_classification, name="startup-hub-classify", daemon=True).start()
+
+    # Hub-derived timezone refresh (2026-05-17 user directive).
+    # Each hub carries its own location TZ; Mobius queries every enabled
+    # hub on a schedule and caches the agreed-upon TZ to system_settings.
+    # On disagreement, picks majority, warns, and persists the breakdown
+    # so the dashboard can surface which hub to reconfigure.
+    #
+    # First refresh runs in a background thread so it doesn't block app
+    # readiness (network query × N hubs would). Subsequent refreshes run
+    # hourly via APScheduler.
+    def _refresh_hub_timezone():
+        try:
+            from services.hub_tz_resolver import (
+                resolve_hub_timezone,
+                apply_resolved_timezone_to_environment,
+                persist_resolved_timezone,
+            )
+            iana_tz, consistent, per_hub = resolve_hub_timezone()
+            persist_resolved_timezone(iana_tz, consistent, per_hub)
+            if iana_tz:
+                apply_resolved_timezone_to_environment(iana_tz)
+                if consistent:
+                    logger.info(
+                        f"Hub-derived TZ resolved: {iana_tz} (all hubs agree)"
+                    )
+                else:
+                    logger.warning(
+                        f"Hub-derived TZ resolved to {iana_tz} but hubs "
+                        f"disagree. Breakdown: {per_hub}. Fix the outlier "
+                        f"from its Hubitat UI → Settings → Location → "
+                        f"Hub Time Zone."
+                    )
+            else:
+                logger.info(
+                    "Hub-derived TZ unavailable (no hubs reachable or "
+                    "unmapped Windows TZ). Falling back to whatever's in "
+                    "system_settings.timezone."
+                )
+        except Exception as e:
+            logger.warning(
+                f"Hub TZ refresh failed (non-fatal): {e}", exc_info=True
+            )
+
+    threading.Thread(
+        target=_refresh_hub_timezone,
+        name="startup-hub-tz-refresh",
+        daemon=True,
+    ).start()
+    try:
+        from services.scheduler_service import get_scheduler
+        get_scheduler()._scheduler.add_job(
+            func=_refresh_hub_timezone,
+            trigger='interval',
+            seconds=3600,
+            id='hub_tz_refresh',
+            replace_existing=True,
+        )
+    except Exception as e:
+        logger.warning(f"Hub TZ periodic refresh schedule failed: {e}")
 
     # Start Samsung TV client (WS + HTTP power-poll background tasks).
     # Config is read from env vars (set in docker-compose or start.sh).

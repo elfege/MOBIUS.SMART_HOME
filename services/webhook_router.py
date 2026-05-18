@@ -15,7 +15,7 @@ import re
 import asyncio
 import logging
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 import requests
 
@@ -343,7 +343,7 @@ class WebhookRouter:
             unit=webhook_payload.get('unit'),
             description=webhook_payload.get('descriptionText'),
             source='hubitat_webhook',
-            timestamp=datetime.now(),
+            timestamp=datetime.now(timezone.utc),
             raw_payload=webhook_payload,
         )
         # Stash the per-hub Hubitat id for debugging / legacy lookups.

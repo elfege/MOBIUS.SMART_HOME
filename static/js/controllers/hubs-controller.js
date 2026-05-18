@@ -31,8 +31,26 @@ function readForm($form) {
         if (!name) return;
         if ($i.attr('type') === 'checkbox') {
             data[name] = $i.is(':checked');
+        } else if ($i.attr('type') === 'number') {
+            const v = $i.val();
+            // Empty number input → null (not 0, not '') so PostgREST leaves
+            // the column as NULL.
+            data[name] = (v === '' || v === null) ? null : parseInt(v, 10);
+        } else if ($i.attr('type') === 'password') {
+            const v = $i.val();
+            // Empty password field → don't submit at all (preserves existing
+            // value in DB). User who wants to CLEAR password sends NULL via
+            // a small UX affordance later; for now leaving blank is no-op.
+            if (v !== '') data[name] = v;
         } else {
-            data[name] = $i.val();
+            const v = $i.val();
+            // Empty string → null for optional plaintext fields so we don't
+            // overwrite a valid value with empty.
+            if (v !== '' || name === 'hub_name' || name === 'hub_ip'
+                || name === 'maker_api_app_number'
+                || name === 'maker_api_token_env') {
+                data[name] = v;
+            }
         }
     });
     return data;
@@ -46,6 +64,14 @@ function fillForm($form, hub) {
     $form.find('input[name=maker_api_token_env]').val(hub.maker_api_token_env ?? '');
     $form.find('input[name=is_primary]').prop('checked', !!hub.is_primary);
     $form.find('input[name=is_enabled]').prop('checked', hub.is_enabled !== false);
+    $form.find('input[name=admin_username]').val(hub.admin_username ?? '');
+    // NEVER prefill password — keep server-side value hidden. Blank field
+    // means "no change" (per readForm logic above).
+    $form.find('input[name=admin_password]').val('').attr(
+        'placeholder',
+        hub.admin_password ? '(unchanged — type to update)' : '(unauthenticated)'
+    );
+    $form.find('input[name=admin_creds_index]').val(hub.admin_creds_index ?? '');
 }
 
 function setStatus($form, msg, isError) {

@@ -255,6 +255,24 @@ class HubitatEventsocketClient:
                 logger.debug(f'[eventsocket {name}] non-JSON frame ignored: {raw[:80]!r}')
                 continue
 
+            # 2026-05-17 — capture every frame regardless of source/mesh into
+            # raw_events for forensic replay. Fire-and-forget; if the DB is
+            # slow we don't block the event loop. Errors swallowed.
+            try:
+                self._http().post(
+                    f'{POSTGREST_URL}/raw_events',
+                    json={
+                        'hub_ip': ip,
+                        'source': ev.get('source', 'unknown')[:30],
+                        'frame': ev,
+                    },
+                    headers={'Prefer': 'return=minimal'},
+                    timeout=2,
+                )
+            except Exception:
+                # Best-effort capture — never block the WS loop.
+                pass
+
             # Hubitat eventsocket emits multiple 'source' types. We consume:
             #   DEVICE   — device-state events (motion, switch, etc.)
             #   LOCATION — hub-level events including mode changes

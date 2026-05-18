@@ -364,12 +364,15 @@ def run_db_migrations():
           ('device_cmd_operation_retries', '2', 'int', 'Full send+verify cycles before giving up.', TRUE, FALSE),
           ('aml_init_master_delay_seconds', '5', 'int', 'AML initialize() schedules its first master() run after this many seconds. Short delay lets in-flight motion events arrive first.', TRUE, FALSE),
           ('aml_periodic_eval_interval_seconds', '60', 'int', 'Defensive: every AML instance runs master() at this cadence regardless of events. Minimum 10s.', TRUE, FALSE),
-          ('timezone', 'America/New_York', 'string', 'IANA timezone name. Applied to the app container at boot for log timestamps. DB stays in UTC.', TRUE, TRUE),
+          ('timezone', 'America/New_York', 'string', 'IANA timezone name. Hub-derived: refreshed hourly from /location/list/data on every enabled hub. UI editing is advisory — the next refresh cycle overrides. DB stays in UTC; this is applied to the app container at boot for log timestamps.', TRUE, FALSE),
+          ('hub_tz_inconsistency', 'false', 'bool', 'Set to TRUE by the hub-TZ refresher when enabled hubs report disagreeing time zones. Dashboard surfaces this as a warning so the user can fix the outlier from the Hubitat UI.', TRUE, FALSE),
+          ('hub_tz_breakdown', '{}', 'string', 'JSON object {hub_name: tz_or_status} from the most recent hub-TZ refresh. Populated by services.hub_tz_resolver. Values are Windows-style TZ strings, "unreachable", or "unmapped:<tz>".', TRUE, FALSE),
           ('colorblind_mode', 'false', 'bool', 'Use a colorblind-safe (Okabe-Ito) palette in charts and accent colors. Designed for protanopia / deuteranopia / tritanopia.', TRUE, FALSE),
           ('eventsocket_enabled', 'true', 'bool', 'Master switch for Hubitat eventsocket WS intake. Requires app restart.', TRUE, TRUE),
           ('reconcile_poll_enabled', 'true', 'bool', 'Reconcile poll on/off. Requires app restart.', TRUE, TRUE),
           ('device_commands_logging', 'true', 'bool', 'Two-phase device_commands logging. Requires app restart.', TRUE, TRUE),
-          ('webhook_intake_enabled', 'false', 'bool', 'Legacy webhook intake — rollback escape hatch.', TRUE, TRUE)
+          ('webhook_intake_enabled', 'false', 'bool', 'Legacy webhook intake — rollback escape hatch.', TRUE, TRUE),
+          ('maker_api_enabled', 'false', 'bool', 'When TRUE: reconcile poll + commands + verify use Maker API (legacy path). When FALSE (default 2026-05-17): all three use the Hubitat admin API directly — bypasses Maker entirely. Toggle on /hubs page. Eventsocket WS handles inbound events regardless.', TRUE, FALSE)
         ON CONFLICT (key) DO NOTHING""",
 
         # instance_setting_exceptions — per-FIELD bypass of system-enforced
@@ -386,6 +389,14 @@ def run_db_migrations():
         )""",
         "CREATE INDEX IF NOT EXISTS idx_ise_instance ON instance_setting_exceptions(instance_id)",
         "GRANT SELECT, INSERT, UPDATE, DELETE ON instance_setting_exceptions TO smarthome_anon",
+
+        # Per-hub admin credentials (2026-05-17). Optional — populated only
+        # when the user enables Hubitat Hub Login Security. Plaintext for
+        # now; KEK-encryption layer coming. AWS Secrets Manager fallback
+        # via admin_creds_index → HUBITAT_ADMIN_USER_<n>/PASSWORD_<n>.
+        "ALTER TABLE hub_config ADD COLUMN IF NOT EXISTS admin_username VARCHAR(80)",
+        "ALTER TABLE hub_config ADD COLUMN IF NOT EXISTS admin_password VARCHAR(200)",
+        "ALTER TABLE hub_config ADD COLUMN IF NOT EXISTS admin_creds_index INTEGER",
 
         # Grants
         "GRANT SELECT, INSERT, UPDATE, DELETE ON system_settings TO smarthome_anon",
@@ -452,6 +463,19 @@ async def lifespan(app: FastAPI):
     )
     await start_reconcile_poll()
 
+    # DB size-cap auto-prune (2026-05-17). Per-table max bytes; oldest rows
+    # dropped + VACUUM ANALYZE every hour. Targets ~100MB total budget across
+    # event_log / raw_events / event_routings / device_commands / etc.
+    # See services/db_size_cap.py for the policy.
+    try:
+        from services.db_size_cap import schedule_prune_job, run_prune_pass
+        from services.scheduler_service import get_scheduler
+        schedule_prune_job(get_scheduler(), interval_seconds=3600)
+        # Also run one pass synchronously at boot so we never start over budget.
+        await asyncio.to_thread(run_prune_pass)
+    except Exception as e:
+        logger.warning(f"db_size_cap startup failed (non-fatal): {e}")
+
     # Run hub classification on startup (populates device_hub_mapping table).
     # Runs in background thread so it doesn't block app readiness.
     # TILES and DeviceCommander depend on this data for native-hub routing.
@@ -468,6 +492,65 @@ async def lifespan(app: FastAPI):
             logger.warning(f"Startup hub classification failed (will retry on next POST /api/hub/classify): {e}")
 
     threading.Thread(target=_startup_classification, name="startup-hub-classify", daemon=True).start()
+
+    # Hub-derived timezone refresh (2026-05-17 user directive).
+    # Each hub carries its own location TZ; Mobius queries every enabled
+    # hub on a schedule and caches the agreed-upon TZ to system_settings.
+    # On disagreement, picks majority, warns, and persists the breakdown
+    # so the dashboard can surface which hub to reconfigure.
+    #
+    # First refresh runs in a background thread so it doesn't block app
+    # readiness (network query × N hubs would). Subsequent refreshes run
+    # hourly via APScheduler.
+    def _refresh_hub_timezone():
+        try:
+            from services.hub_tz_resolver import (
+                resolve_hub_timezone,
+                apply_resolved_timezone_to_environment,
+                persist_resolved_timezone,
+            )
+            iana_tz, consistent, per_hub = resolve_hub_timezone()
+            persist_resolved_timezone(iana_tz, consistent, per_hub)
+            if iana_tz:
+                apply_resolved_timezone_to_environment(iana_tz)
+                if consistent:
+                    logger.info(
+                        f"Hub-derived TZ resolved: {iana_tz} (all hubs agree)"
+                    )
+                else:
+                    logger.warning(
+                        f"Hub-derived TZ resolved to {iana_tz} but hubs "
+                        f"disagree. Breakdown: {per_hub}. Fix the outlier "
+                        f"from its Hubitat UI → Settings → Location → "
+                        f"Hub Time Zone."
+                    )
+            else:
+                logger.info(
+                    "Hub-derived TZ unavailable (no hubs reachable or "
+                    "unmapped Windows TZ). Falling back to whatever's in "
+                    "system_settings.timezone."
+                )
+        except Exception as e:
+            logger.warning(
+                f"Hub TZ refresh failed (non-fatal): {e}", exc_info=True
+            )
+
+    threading.Thread(
+        target=_refresh_hub_timezone,
+        name="startup-hub-tz-refresh",
+        daemon=True,
+    ).start()
+    try:
+        from services.scheduler_service import get_scheduler
+        get_scheduler()._scheduler.add_job(
+            func=_refresh_hub_timezone,
+            trigger='interval',
+            seconds=3600,
+            id='hub_tz_refresh',
+            replace_existing=True,
+        )
+    except Exception as e:
+        logger.warning(f"Hub TZ periodic refresh schedule failed: {e}")
 
     # Start Samsung TV client (WS + HTTP power-poll background tasks).
     # Config is read from env vars (set in docker-compose or start.sh).
@@ -2369,6 +2452,23 @@ async def list_canonical_devices():
     except Exception as e:
         logger.error(f"list_canonical_devices failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/hubs/health", tags=["hubs"])
+async def list_hub_health():
+    """
+    Per-hub WS + reconcile health. Used by the dashboard alert banner to
+    decide whether to surface a 'recommend Maker API as fallback' warning.
+    """
+    import requests as _requests
+    r = _requests.get(
+        f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/hub_health",
+        params={"order": "hub_id"},
+        timeout=5,
+    )
+    if r.status_code == 200:
+        return r.json()
+    raise HTTPException(status_code=r.status_code, detail=r.text)
 
 
 @app.get("/api/hubs", tags=["hubs"])

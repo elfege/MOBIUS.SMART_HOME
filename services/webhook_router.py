@@ -593,7 +593,12 @@ class WebhookRouter:
                     'processing_ms': processing_ms,
                     'routed_to_instances': routed_to,
                     'raw_payload': raw_payload,
-                    'received_at': datetime.now().isoformat(),
+                    # No `received_at`: postgres `now()` default fires
+                    # as a correct UTC instant. Passing naive datetime.now()
+                    # here previously stamped every row 4h off because
+                    # PostgREST session TZ is UTC and the string had no
+                    # timezone marker. Display is via `AT TIME ZONE
+                    # <user_tz>` at read time — TZ is a user setting.
                 },
                 headers={
                     "Content-Type": "application/json",
@@ -666,13 +671,15 @@ class WebhookRouter:
                 timeout=5
             )
 
-            # Set new mode to active (upsert)
+            # Set new mode to active (upsert).
+            # `updated_at` intentionally omitted — postgres default fires
+            # the correct UTC instant; naive datetime.now() would store
+            # 4h off because PostgREST session is UTC.
             requests.post(
                 f"{self.postgrest_url}/location_modes",
                 json={
                     'mode_name': mode_name,
                     'is_active': True,
-                    'updated_at': datetime.now().isoformat()
                 },
                 headers={
                     "Content-Type": "application/json",

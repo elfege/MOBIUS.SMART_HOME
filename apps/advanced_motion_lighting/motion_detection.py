@@ -53,7 +53,10 @@ class MotionDetectionMixin:
 
         # --- Tier 1: in-memory timestamp (fast path for normal runtime) ---
         if self._runtime.last_motion_time:
-            age = (datetime.now() - self._runtime.last_motion_time).total_seconds()
+            # Tz-aware comparison: motion.py stores last_motion_time as
+            # datetime.now(timezone.utc). Mixing naive here would raise.
+            age = (datetime.now(timezone.utc)
+                   - self._runtime.last_motion_time).total_seconds()
             if age < timeout_seconds:
                 return True
 

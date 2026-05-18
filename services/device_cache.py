@@ -95,7 +95,7 @@ class DeviceCache:
         devices = self._load_from_database()
         if devices:
             self._memory_cache = {str(d['device_id']): d for d in devices}
-            self._last_full_sync = datetime.now()
+            self._last_full_sync = datetime.now(timezone.utc)
             return devices
 
         return []
@@ -246,7 +246,7 @@ class DeviceCache:
             )
 
             if response.status_code in (200, 201):
-                self._last_full_sync = datetime.now()
+                self._last_full_sync = datetime.now(timezone.utc)
                 self.logger.info(
                     f"Updated cache with {len(cache_entries)} devices from {hub_ip}"
                 )
@@ -406,7 +406,9 @@ class DeviceCache:
         if not self._last_full_sync:
             return False
 
-        age = datetime.now() - self._last_full_sync
+        # Tz-aware: matches the tz-aware value stored in _last_full_sync.
+        # Mixing naive and aware here would raise TypeError.
+        age = datetime.now(timezone.utc) - self._last_full_sync
         return age.total_seconds() < self.ttl_seconds
 
     def _load_from_database(self) -> List[Dict[str, Any]]:

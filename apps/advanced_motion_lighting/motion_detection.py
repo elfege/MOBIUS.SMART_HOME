@@ -1,32 +1,39 @@
 """
-Motion activity detection — three-tier check.
+Motion activity detection — DB-backed, no Hubitat HTTP.
 
-Groovy parity: mirrors the Active() function from the original Groovy source.
+Groovy parity: mirrors the Active() function from the original Groovy source,
+but uses our own event_log (populated by the eventsocket WS client) as the
+source of truth instead of polling Hubitat over HTTP.
 
-Tier 1 (fastest): in-memory timestamp from the last motion event.
-Tier 2 (startup/reload): live device state query via Hubitat API.
-Tier 3 (gap detection): recent event history query via Hubitat API.
+Two-tier check:
+  Tier 1 — in-memory last_motion_time timestamp (sub-microsecond)
+  Tier 2 — event_log query for active events within timeout window
+           (single PostgREST GET, ~5-15ms)
 
-Tiers 2 and 3 are critical on startup when the in-memory timestamp is None,
-preventing the app from falsely assuming "no motion" and turning off lights
-the moment the container restarts.
+The previous Tier 2 (Hubitat live API) and Tier 3 (Hubitat event history)
+were removed 2026-05-17. They added 200-1000ms of HTTP latency per call,
+and they queried the same data we already mirror into event_log via the
+eventsocket. With the WS as sole intake (eventsocket-SOT migration on
+2026-05-16), event_log IS the authoritative recent-events store.
 """
 
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from typing import Optional
+
+import requests
 
 
 class MotionDetectionMixin:
-    """Mixin: three-tier motion activity check for reliable startup and runtime behavior."""
+    """Mixin: motion activity check via in-memory cache + event_log SQL."""
 
     def _is_motion_active(self) -> bool:
         """
         Check if any configured motion sensor is currently reporting active.
 
-        Three-tier check (fastest to slowest):
-          Tier 1 — in-memory last_motion_time timestamp (normal runtime)
-          Tier 2 — live Hubitat API currentValue check (startup/reload)
-          Tier 3 — Hubitat event history within the timeout window (gap detection)
+        Two-tier check (fastest to slowest):
+          Tier 1 — in-memory last_motion_time timestamp
+          Tier 2 — event_log: motion=active for any sensor within timeout
 
         Returns:
             True if motion is considered active, False otherwise
@@ -46,57 +53,73 @@ class MotionDetectionMixin:
 
         # --- Tier 1: in-memory timestamp (fast path for normal runtime) ---
         if self._runtime.last_motion_time:
-            age = (datetime.now() - self._runtime.last_motion_time).total_seconds()
+            # Tz-aware comparison: motion.py stores last_motion_time as
+            # datetime.now(timezone.utc). Mixing naive here would raise.
+            age = (datetime.now(timezone.utc)
+                   - self._runtime.last_motion_time).total_seconds()
             if age < timeout_seconds:
                 return True
 
-        # --- Tier 2: live device state from Hubitat (Groovy: currentValue) ---
+        # --- Tier 2: event_log query (DB-as-truth, no Hubitat HTTP) ---
+        # ONE query that asks "is there any motion=active event for ANY of
+        # these sensors within the last <timeout> seconds?" PostgREST handles
+        # the FROM clause, we just filter via the in-list operator + a time
+        # window. Returns at most 1 row — we only need a yes/no.
         try:
-            for sensor_id in functional:
-                # Sensor ids are canonical devices.id PKs. Helper translates
-                # to (hub, hubitat_id) and queries the right hub.
-                device = self.get_device_state_live(sensor_id)
-                if device and 'attributes' in device:
-                    for attr in device['attributes']:
-                        if (attr.get('name') == 'motion'
-                                and attr.get('currentValue') == 'active'):
-                            self.logger.debug(
-                                f"Sensor {sensor_id} reports motion=active (live API)"
-                            )
-                            return True
+            pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+            # PostgREST in.() takes a comma-separated list inside parens
+            sensor_list = '(' + ','.join(str(s) for s in functional) + ')'
+            # Compute cutoff as ISO. Use UTC explicitly; event_log.received_at
+            # is TIMESTAMPTZ stored in UTC.
+            from datetime import timedelta
+            cutoff = (datetime.now(timezone.utc)
+                      - timedelta(seconds=timeout_seconds)).isoformat()
+            r = requests.get(
+                f"{pg}/event_log",
+                params={
+                    'canonical_device_id': f'in.{sensor_list}',
+                    'event_type': 'eq.motion',
+                    'event_value': 'eq.active',
+                    'received_at': f'gte.{cutoff}',
+                    'select': 'received_at,canonical_device_id',
+                    'order': 'received_at.desc',
+                    'limit': '1',
+                },
+                timeout=3,
+            )
+            if r.status_code == 200:
+                rows = r.json()
+                if rows:
+                    row = rows[0]
+                    self.logger.debug(
+                        f"Sensor canon={row['canonical_device_id']} "
+                        f"motion=active recorded at {row['received_at']} "
+                        f"(within {timeout_seconds}s timeout) — Tier 2 hit"
+                    )
+                    return True
+            else:
+                self.logger.warning(
+                    f"Tier 2 event_log query non-200: {r.status_code}"
+                )
         except Exception as e:
+            # Network/DB error → fail closed (no motion). Don't fail open
+            # because that would leave lights on indefinitely if the DB is
+            # the thing that's broken.
             self.logger.warning(f"Tier 2 motion check failed: {e}")
 
-        # --- Tier 3: event history within timeout window (Groovy: eventsSince) ---
-        try:
-            for sensor_id in functional:
-                events = self.get_device_events_live(sensor_id, max_events=20)
-                for event in events:
-                    if event.get('name') == 'motion' and event.get('value') == 'active':
-                        event_date_str = event.get('date', '')
-                        if not event_date_str:
-                            continue
-                        try:
-                            # Hubitat event dates: "2026-02-23T04:15:30+0000"
-                            event_time = datetime.fromisoformat(
-                                event_date_str.replace('+0000', '+00:00')
-                            )
-                            now = (
-                                datetime.now(event_time.tzinfo)
-                                if event_time.tzinfo else datetime.now()
-                            )
-                            age = (now - event_time).total_seconds()
-                            if age < timeout_seconds:
-                                self.logger.debug(
-                                    f"Sensor {sensor_id} had motion=active "
-                                    f"{age:.0f}s ago (within {timeout_seconds}s timeout)"
-                                )
-                                return True
-                        except (ValueError, TypeError) as parse_err:
-                            self.logger.debug(
-                                f"Could not parse event date '{event_date_str}': {parse_err}"
-                            )
-        except Exception as e:
-            self.logger.warning(f"Tier 3 motion check failed: {e}")
+        # Post-restart safety: if Tier 1 has nothing (no in-memory motion
+        # observed yet this process lifetime) AND Tier 2 returned no rows,
+        # we have *no information* — that's not the same as "no motion".
+        # Returning False here would cause master() to turn lights off
+        # 5s after every restart while the user is still in the room.
+        # Real motion-inactive transitions go through the event handler
+        # which calls schedule_timeout(); that path remains the
+        # authoritative "no motion" signal. Until then, defer.
+        if self._runtime.last_motion_time is None:
+            self.logger.info(
+                "No motion data yet (in-memory empty + event_log empty in "
+                "window). Deferring; not turning lights off without evidence."
+            )
+            return True
 
         return False

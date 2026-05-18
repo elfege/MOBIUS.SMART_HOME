@@ -16,7 +16,7 @@ import asyncio
 import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ class E2EEventBroadcaster:
             instance_id: Target instance ID
             event_data: Event payload dict (will be JSON-serialized)
         """
-        event_data['timestamp'] = datetime.now().isoformat()
+        event_data['timestamp'] = datetime.now(timezone.utc).isoformat()
         event_data['instance_id'] = instance_id
 
         async with self._lock:

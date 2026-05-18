@@ -14,7 +14,7 @@ pending jobs are restored from the database.
 import os
 import logging
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Any, Optional, List
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.memory import MemoryJobStore
@@ -158,7 +158,7 @@ class SchedulerService:
         Returns:
             True if job was scheduled successfully
         """
-        execute_at = datetime.now() + timedelta(seconds=delay_seconds)
+        execute_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
 
         # Cancel existing job with same ID
         self.cancel(job_id)
@@ -268,7 +268,7 @@ class SchedulerService:
         Returns:
             True if rescheduled successfully
         """
-        execute_at = datetime.now() + timedelta(seconds=delay_seconds)
+        execute_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
 
         try:
             job = self._scheduler.get_job(job_id)
@@ -435,7 +435,7 @@ class SchedulerService:
                 params={"job_id": f"eq.{job_id}"},
                 json={
                     "status": "completed",
-                    "completed_at": datetime.now().isoformat()
+                    "completed_at": datetime.now(timezone.utc).isoformat()
                 },
                 headers={"Content-Type": "application/json"},
                 timeout=5
@@ -491,17 +491,18 @@ class SchedulerService:
                 return
 
             jobs = response.json()
-            now = datetime.now()
+            # Tz-aware UTC. The previous code did `datetime.now()` (naive
+            # container-local EDT) and then stripped tzinfo off execute_at
+            # to "make them comparable" — which silently produced a
+            # comparison off by the local UTC offset (4h on EDT).
+            now = datetime.now(timezone.utc)
 
             for job in jobs:
                 execute_at = datetime.fromisoformat(
                     job['execute_at'].replace('Z', '+00:00')
                 )
-
-                # Remove timezone for comparison
-                if execute_at.tzinfo:
-                    execute_at = execute_at.replace(tzinfo=None)
-
+                # execute_at is tz-aware from the +00:00 suffix; compare
+                # against tz-aware `now` directly.
                 if execute_at < now:
                     # Job missed — mark as failed in bulk later; warn and skip.
                     self.logger.warning(
@@ -542,7 +543,7 @@ class SchedulerService:
         """
         try:
             cutoff = (
-                datetime.now() - timedelta(hours=max_age_hours)
+                datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
             ).isoformat()
             resp = requests.delete(
                 f"{self.postgrest_url}/scheduled_jobs",

@@ -23,7 +23,7 @@ import os
 import logging
 import traceback
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional
 
 
@@ -95,7 +95,7 @@ class DeviceCache:
         devices = self._load_from_database()
         if devices:
             self._memory_cache = {str(d['device_id']): d for d in devices}
-            self._last_full_sync = datetime.now()
+            self._last_full_sync = datetime.now(timezone.utc)
             return devices
 
         return []
@@ -223,7 +223,7 @@ class DeviceCache:
                 "device_type": device.get('type'),
                 "capabilities": device.get('capabilities', []),
                 "attributes": self._extract_attributes(device),
-                "last_synced_at": datetime.now().isoformat(),
+                "last_synced_at": datetime.now(timezone.utc).isoformat(),
                 "sync_source": "api"
             }
             cache_entries.append(entry)
@@ -246,7 +246,7 @@ class DeviceCache:
             )
 
             if response.status_code in (200, 201):
-                self._last_full_sync = datetime.now()
+                self._last_full_sync = datetime.now(timezone.utc)
                 self.logger.info(
                     f"Updated cache with {len(cache_entries)} devices from {hub_ip}"
                 )
@@ -281,7 +281,7 @@ class DeviceCache:
             "device_type": device_data.get('type'),
             "capabilities": device_data.get('capabilities', []),
             "attributes": self._extract_attributes(device_data),
-            "last_synced_at": datetime.now().isoformat(),
+            "last_synced_at": datetime.now(timezone.utc).isoformat(),
             "sync_source": "api"
         }
 
@@ -329,7 +329,9 @@ class DeviceCache:
             attrs = self._memory_cache[key].get('attributes', {})
             attrs[attribute_name] = attribute_value
             self._memory_cache[key]['attributes'] = attrs
-            self._memory_cache[key]['last_synced_at'] = datetime.now().isoformat()
+            self._memory_cache[key]['last_synced_at'] = (
+                datetime.now(timezone.utc).isoformat()
+            )
             self._memory_cache[key]['sync_source'] = 'webhook'
 
         # Update database using PATCH
@@ -345,7 +347,7 @@ class DeviceCache:
                     params={"device_id": f"eq.{key}"},
                     json={
                         "attributes": attrs,
-                        "last_synced_at": datetime.now().isoformat(),
+                        "last_synced_at": datetime.now(timezone.utc).isoformat(),
                         "sync_source": "webhook"
                     },
                     headers={"Content-Type": "application/json"},
@@ -404,7 +406,9 @@ class DeviceCache:
         if not self._last_full_sync:
             return False
 
-        age = datetime.now() - self._last_full_sync
+        # Tz-aware: matches the tz-aware value stored in _last_full_sync.
+        # Mixing naive and aware here would raise TypeError.
+        age = datetime.now(timezone.utc) - self._last_full_sync
         return age.total_seconds() < self.ttl_seconds
 
     def _load_from_database(self) -> List[Dict[str, Any]]:

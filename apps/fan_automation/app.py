@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from apps.base_app import BaseApp
@@ -159,7 +159,7 @@ class FanAutomationApp(BaseApp):
     def _on_motion(self, event: DeviceEvent) -> None:
         """Cache last-active time + reschedule timeout on inactive."""
         if event.is_motion_active:
-            self._runtime.last_motion_time = datetime.now()
+            self._runtime.last_motion_time = datetime.now(timezone.utc)
             self.logger.debug(f"Motion active: {_C}{event.device_name}{_R}")
         else:
             timeout = int(self.get_setting('motionTimeoutSeconds', 300))
@@ -364,7 +364,9 @@ class FanAutomationApp(BaseApp):
     def _motion_active_within(self, seconds: int) -> bool:
         """True if any motion sensor reports / has reported active recently."""
         last = self._runtime.last_motion_time
-        if last and (datetime.now() - last).total_seconds() < seconds:
+        # last_motion_time is tz-aware (set via datetime.now(timezone.utc)
+        # in _on_motion). Mixing naive datetime.now() here would TypeError.
+        if last and (datetime.now(timezone.utc) - last).total_seconds() < seconds:
             return True
         # Live fallback: any sensor currently reporting active?
         for did in self.get_devices('motion_sensors'):

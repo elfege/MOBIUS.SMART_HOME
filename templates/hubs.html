@@ -9,15 +9,118 @@
             <a href="/" class="back-link">&larr; Dashboard</a>
             <h2 style="margin:0.5rem 0 0;">Hub Configuration</h2>
             <p style="opacity:.7;margin:.25rem 0 0;">
-                Edit Hubitat hub settings. Changes are applied to the running app immediately;
+                Edit Hubitat hub settings. Changes are applied immediately;
                 device routing caches are invalidated on save.
             </p>
         </div>
         <button class="btn btn-primary" id="btn-add-hub">+ Add hub</button>
     </div>
 
+    <!-- Maker API panel — explains the architecture + toggle.
+         Less central than before now that WS is the SOT, but kept here so
+         user can disable Maker entirely once admin-API command path is
+         verified (see docs/plans/hubitat_admin_api_and_db_as_state_truth_2026_05_17.md). -->
+    <div id="maker-api-panel"
+         style="background:var(--color-surface);border:1px solid var(--color-border);border-radius:8px;padding:1rem;margin-bottom:1rem;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;flex-wrap:wrap;">
+            <div style="flex:1;min-width:240px;">
+                <strong>Maker API: <span id="maker-api-state">…</span></strong>
+                <button type="button" id="btn-maker-api-info" class="motion-floor-help"
+                        title="Why this matters" style="vertical-align:middle;">?</button>
+                <p style="opacity:.7;font-size:.85rem;margin:.4rem 0 0;">
+                    Default OFF. Outbound HTTP (reconcile, commands, verify) goes
+                    through the Hubitat admin API. Enable as a fallback if the
+                    admin path has issues on your firmware. The eventsocket WS
+                    handles all inbound events either way.
+                </p>
+            </div>
+            <button type="button" id="btn-toggle-maker-api" class="btn btn-secondary">
+                …
+            </button>
+        </div>
+    </div>
+
     <div id="hubs-status" style="opacity:.7;font-size:.9rem;margin-bottom:.5rem;">Loading…</div>
     <div id="hubs-list"></div>
+
+    <!-- Admin credentials info modal — explains the field and the AWS slot path. -->
+    <div id="admin-creds-modal" class="motion-floor-modal" style="display:none;">
+        <div class="motion-floor-modal-body">
+            <h3>Admin API credentials — when and how</h3>
+            <p>
+                If this hub's <strong>Settings → Hub Login Security</strong> is OFF
+                (Hubitat default), leave these fields blank — the admin API is
+                open on the LAN and Mobius connects without auth.
+            </p>
+            <p>
+                If you enable Hub Login Security, Mobius needs the username/password
+                to call <code>POST /login</code>, persist the session cookie, and
+                use it for every subsequent <code>/device/...</code> call.
+            </p>
+            <p>
+                <strong>Two ways to supply them, in priority order:</strong>
+            </p>
+            <ol style="opacity:.85;font-size:.9rem;line-height:1.5;margin:.4rem 0 .8rem 1.2rem;">
+                <li><strong>Inline below</strong> — type them into the Username
+                    + Password fields. Stored in the DB (plain for now; a
+                    KEK-encryption layer is on the roadmap).</li>
+                <li><strong>AWS Secrets Manager</strong> — set the eight placeholders
+                    <code>HUBITAT_ADMIN_USER_1..4</code> and
+                    <code>HUBITAT_ADMIN_PASSWORD_1..4</code> in your HUBITAT
+                    secret (already provisioned). Then put the matching slot
+                    number (1, 2, 3 or 4) into <em>AWS slot</em> for this hub.
+                    Values flow: AWS Secrets Manager → <code>pull_aws_secrets HUBITAT</code>
+                    in <code>start.sh</code> → env vars → admin client.</li>
+            </ol>
+            <p style="opacity:.7;font-size:.85rem;">
+                The inline fields win if both are populated. To switch from
+                inline to AWS, clear the inline fields and set the slot.
+            </p>
+            <div class="motion-floor-modal-actions">
+                <button type="button" class="btn motion-floor-close"
+                        id="btn-admin-creds-modal-close">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Maker API info modal — opens on ? click. Same overlay class as the
+         motion-floor modal so theme-neutral.css styling applies. -->
+    <div id="maker-api-modal" class="motion-floor-modal" style="display:none;">
+        <div class="motion-floor-modal-body">
+            <h3>Maker API — legacy fallback (default OFF)</h3>
+            <p>
+                <strong>The primary intake is the eventsocket WS</strong>
+                (<code>ws://hub/eventsocket</code>). Every event from every
+                device streams through it, no per-device opt-in. Mobius
+                writes everything to <code>event_log</code> + <code>raw_events</code>;
+                the database is the source of truth for state.
+            </p>
+            <p>
+                <strong>Outbound HTTP (reconcile poll + commands + command
+                verify) uses Hubitat's admin API by default</strong> —
+                <code>POST /device/runmethod</code> for commands,
+                <code>GET /device/fullJson/&lt;id&gt;</code> for verify and
+                reconcile. Faster than Maker (skips the Groovy app layer)
+                and doesn't need per-device opt-in.
+            </p>
+            <p>
+                <strong>The toggle below re-enables Maker API</strong> for
+                outbound HTTP only — a fallback if the admin API has issues
+                on your firmware version. The WS intake is unaffected
+                either way.
+            </p>
+            <p style="opacity:.65;font-size:.85rem;">
+                If the eventsocket itself fails (hub reboot, firmware update),
+                the dashboard surfaces a warning. WS will reconnect on its
+                own; nothing to do unless the failure persists, in which case
+                the warning suggests escalating.
+            </p>
+            <div class="motion-floor-modal-actions">
+                <button type="button" class="btn motion-floor-close"
+                        id="btn-maker-api-modal-close">Close</button>
+            </div>
+        </div>
+    </div>
 
     <!-- Hidden template for one hub card -->
     <template id="hub-card-template">
@@ -47,6 +150,34 @@
                     <input name="is_enabled" type="checkbox"/> Enabled
                 </label>
             </div>
+
+            <!-- Admin API credentials. Only needed when this hub has
+                 Hubitat Hub Login Security enabled. Click ? for details. -->
+            <div style="margin-top:.75rem;padding:.5rem .75rem;background:rgba(255,255,255,0.02);border:1px solid var(--color-border);border-radius:6px;">
+                <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;">
+                    <strong style="font-size:.9rem;">Admin API credentials</strong>
+                    <button type="button" class="motion-floor-help btn-admin-creds-help">?</button>
+                    <span style="opacity:.6;font-size:.8rem;">Optional — only if Hub Login Security is on</span>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr 120px;gap:.5rem;">
+                    <label>Username
+                        <input name="admin_username" type="text"
+                               placeholder="(unauthenticated)"
+                               autocomplete="off"/>
+                    </label>
+                    <label>Password
+                        <input name="admin_password" type="password"
+                               placeholder="(unauthenticated)"
+                               autocomplete="new-password"/>
+                    </label>
+                    <label>AWS slot
+                        <input name="admin_creds_index" type="number"
+                               min="1" max="8"
+                               placeholder="e.g. 2"
+                               title="Index into HUBITAT_ADMIN_USER_<n> / HUBITAT_ADMIN_PASSWORD_<n> env vars. Used if Username + Password above are blank."/>
+                    </label>
+                </div>
+            </div>
             <div style="margin-top:.75rem;display:flex;gap:.5rem;justify-content:flex-end;">
                 <span class="hub-card-status" style="margin-right:auto;font-size:.85rem;opacity:.7;"></span>
                 <button type="button" class="btn btn-danger btn-delete">Delete</button>
@@ -57,4 +188,72 @@
 </div>
 
 <script type="module" src="/static/js/controllers/hubs-controller.js"></script>
+<script type="module">
+    import { api, utils } from '/static/js/main.js';
+
+    // Maker API toggle wiring — reads/writes system_settings.maker_api_enabled.
+    async function refreshMakerApiPanel() {
+        const stateEl = document.getElementById('maker-api-state');
+        const btn = document.getElementById('btn-toggle-maker-api');
+        try {
+            const row = await api.get('/system_settings/maker_api_enabled');
+            const on = (row.value === true || row.value === 'true');
+            stateEl.textContent = on ? 'fallback ENABLED' : 'OFF (admin API in use, default)';
+            stateEl.style.color = on ? 'var(--color-warning)' : 'var(--color-success)';
+            btn.textContent = on ? 'Disable Maker API' : 'Enable Maker API as fallback';
+            btn.dataset.currentOn = String(on);
+        } catch (err) {
+            stateEl.textContent = `error: ${err.message}`;
+        }
+    }
+
+    document.getElementById('btn-toggle-maker-api')
+        .addEventListener('click', async (e) => {
+            const cur = e.currentTarget.dataset.currentOn === 'true';
+            const next = !cur;
+            try {
+                await api.request('/system_settings/maker_api_enabled', {
+                    method: 'PATCH',
+                    body: JSON.stringify({ value: next }),
+                });
+                utils.notify(
+                    `Maker API ${next ? 're-enabled' : 'disabled'}. Reconcile/commands `
+                    + `will use ${next ? 'Maker' : 'admin'} API on the next pass.`,
+                    'success'
+                );
+                refreshMakerApiPanel();
+            } catch (err) {
+                utils.notify(`Toggle failed: ${err.message}`, 'error');
+            }
+        });
+
+    const modal = document.getElementById('maker-api-modal');
+    document.getElementById('btn-maker-api-info').addEventListener('click', () => {
+        modal.style.display = 'flex';
+    });
+    document.getElementById('btn-maker-api-modal-close').addEventListener('click', () => {
+        modal.style.display = 'none';
+    });
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) modal.style.display = 'none';
+    });
+
+    // Admin-creds ? modal — buttons live inside the per-hub cards which
+    // are rendered dynamically by hubs-controller.js, so we delegate clicks
+    // from the document body.
+    const adminCredsModal = document.getElementById('admin-creds-modal');
+    document.addEventListener('click', (e) => {
+        if (e.target.classList?.contains('btn-admin-creds-help')) {
+            adminCredsModal.style.display = 'flex';
+        }
+    });
+    document.getElementById('btn-admin-creds-modal-close').addEventListener('click', () => {
+        adminCredsModal.style.display = 'none';
+    });
+    adminCredsModal.addEventListener('click', (e) => {
+        if (e.target === adminCredsModal) adminCredsModal.style.display = 'none';
+    });
+
+    refreshMakerApiPanel();
+</script>
 {% endblock %}

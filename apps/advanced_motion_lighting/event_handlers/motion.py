@@ -5,7 +5,7 @@ Updates the in-memory last_motion_time on active events and triggers
 the main logic loop. On inactive events, schedules the no-motion timeout.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from apps.advanced_motion_lighting.constants import _C, _R
 
@@ -28,7 +28,9 @@ class MotionEventMixin:
 
         if event.is_motion_active:
             self.logger.debug(f"Motion active: {_C}{event.device_name}{_R}")
-            self._runtime.last_motion_time = datetime.now()
+            # Tz-aware UTC: motion_detection.py compares this against
+            # datetime.now(timezone.utc); naive would TypeError.
+            self._runtime.last_motion_time = datetime.now(timezone.utc)
             self.master(motion_active_event=True)
         else:
             self.logger.debug(f"Motion inactive: {_C}{event.device_name}{_R}")

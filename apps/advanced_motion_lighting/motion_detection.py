@@ -107,4 +107,19 @@ class MotionDetectionMixin:
             # the thing that's broken.
             self.logger.warning(f"Tier 2 motion check failed: {e}")
 
+        # Post-restart safety: if Tier 1 has nothing (no in-memory motion
+        # observed yet this process lifetime) AND Tier 2 returned no rows,
+        # we have *no information* — that's not the same as "no motion".
+        # Returning False here would cause master() to turn lights off
+        # 5s after every restart while the user is still in the room.
+        # Real motion-inactive transitions go through the event handler
+        # which calls schedule_timeout(); that path remains the
+        # authoritative "no motion" signal. Until then, defer.
+        if self._runtime.last_motion_time is None:
+            self.logger.info(
+                "No motion data yet (in-memory empty + event_log empty in "
+                "window). Deferring; not turning lights off without evidence."
+            )
+            return True
+
         return False

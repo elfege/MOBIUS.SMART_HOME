@@ -14,7 +14,7 @@ represents a user-created automation (e.g., "Advanced Lights - Office").
 import os
 import logging
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional, Type
 import requests
 
@@ -422,7 +422,10 @@ class InstanceManager:
         }
 
         if duration_minutes:
-            expires = datetime.now() + timedelta(minutes=duration_minutes)
+            # Tz-aware UTC so the stored pause_expires_at compares
+            # correctly against now(timezone.utc) when checking expiry.
+            expires = (datetime.now(timezone.utc)
+                       + timedelta(minutes=duration_minutes))
             update_data['pause_expires_at'] = expires.isoformat()
 
         try:

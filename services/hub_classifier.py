@@ -25,7 +25,7 @@ import logging
 import requests
 from typing import Dict, List, Any, Optional, Tuple
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -469,7 +469,7 @@ def run_classification() -> Dict[str, Any]:
             "device_type": native_info["type"],
             "mirrors": mirrors,
             "is_mesh_linked": False,
-            "last_classified_at": datetime.now().isoformat(),
+            "last_classified_at": datetime.now(timezone.utc).isoformat(),
         })
 
     # Step 4: Write to database via PostgREST
@@ -493,7 +493,7 @@ def run_classification() -> Dict[str, Any]:
             }
             for hub_name, r in hub_results.items()
         },
-        "classified_at": datetime.now().isoformat(),
+        "classified_at": datetime.now(timezone.utc).isoformat(),
     }
 
     logger.info(

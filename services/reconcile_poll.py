@@ -260,7 +260,15 @@ class ReconcilePoll:
         hub_ip = hub['hub_ip']
         app_num = hub['maker_api_app_number']
         token = os.environ.get(hub['maker_api_token_env'], '')
-        if not token:
+        # Token only required for Maker API path. If Maker is disabled,
+        # admin API doesn't need a token (cookie auth handles that case
+        # via HubitatAdminClient credentials lookup).
+        try:
+            from services.settings_resolver import get_resolver
+            maker_required = get_resolver().get_system('maker_api_enabled', True)
+        except Exception:
+            maker_required = True
+        if maker_required and not token:
             logger.warning(
                 f'reconcile_poll [{hub["hub_name"]}]: '
                 f'token env {hub["maker_api_token_env"]} not set'
@@ -269,7 +277,8 @@ class ReconcilePoll:
 
         try:
             devices = await asyncio.to_thread(
-                self._http_get_devices_all, hub_ip, app_num, token
+                self._http_get_devices_all,
+                hub_ip, app_num, token, hub['hub_name'],
             )
         except Exception as e:
             logger.warning(
@@ -278,6 +287,15 @@ class ReconcilePoll:
             return 0
 
         canonical_by_native = self._load_canonical_by_hub_native(hub_ip)
+        # Inverse lookup: native id list for THIS hub limited to canonical
+        # ids that anyone is actually subscribed to. Used by the admin API
+        # path to skip the metadata-only bulk endpoint and pull state only
+        # for devices we care about.
+        subscribed_canonical = set(sub_map.keys())
+        self._subscribed_native_ids_for_hub = [
+            native for native, row in canonical_by_native.items()
+            if int(row['id']) in subscribed_canonical
+        ]
         cache = self._get_cache()
         router = self._get_router()
 
@@ -344,8 +362,67 @@ class ReconcilePoll:
         return diffs
 
     def _http_get_devices_all(
-        self, hub_ip: str, app_num: str, token: str
+        self, hub_ip: str, app_num: str, token: str, hub_name: str = '',
     ) -> List[Dict]:
+        """
+        Pull devices+state for one hub. Picks Maker API or admin API based
+        on the system_setting `maker_api_enabled`.
+
+        Both paths return enough info for divergence detection
+        (id, attributes / currentStates). We normalize to the shape the
+        rest of _process_hub expects: each device dict has
+        ``{'id': str, 'label': str, 'attributes': [{'name', 'currentValue'}]}``.
+        """
+        # Decide backend
+        use_admin = False
+        try:
+            from services.settings_resolver import get_resolver
+            maker_on = get_resolver().get_system('maker_api_enabled', True)
+            use_admin = (maker_on is False)
+        except Exception:
+            pass  # fall through to Maker API on resolver error
+
+        if use_admin:
+            try:
+                from services.hubitat_admin_client import (
+                    get_client, to_maker_shape,
+                )
+                client = get_client(hub_ip, hub_name or hub_ip)
+                # Admin API's /device/list/data is metadata-only (no state).
+                # Pull state per-subscribed-device via /device/fullJson/<id>.
+                # `subscribed_native_ids` is set on the instance before each
+                # _process_hub call — see _process_hub() below.
+                native_ids = getattr(self, '_subscribed_native_ids_for_hub', [])
+                if not native_ids:
+                    # Nothing subscribed on this hub — nothing to reconcile.
+                    return []
+                devices = client.get_devices_with_state(
+                    [int(i) for i in native_ids if str(i).isdigit()]
+                )
+                # /device/fullJson nests state under device.currentStates
+                # as a *dict*. to_maker_shape() handles that conversion;
+                # the prior inline reader treated currentStates as a list
+                # at top level, which produced empty attributes for
+                # every device — same bug as in device_commander.
+                normalized = []
+                for d in devices:
+                    shaped = to_maker_shape(d)
+                    if shaped:
+                        normalized.append(shaped)
+                return normalized
+            except Exception as e:
+                # No silent fallback to Maker when Maker is explicitly
+                # disabled. User wants to test the architecture without
+                # Maker; failures need to surface, not hide.
+                logger.error(
+                    f'reconcile_poll [{hub_name or hub_ip}]: admin API '
+                    f'failed: {e}. NOT falling back to Maker because '
+                    f'maker_api_enabled=false. Re-enable Maker on /hubs '
+                    f'page if this becomes blocking.'
+                )
+                return []
+
+        # Maker API path
         r = requests.get(
             f'http://{hub_ip}/apps/api/{app_num}/devices/all',
             params={'access_token': token},

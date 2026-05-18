@@ -7,7 +7,7 @@ a meaningful device event. Used by the dashboard to display
 """
 
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class ActivityMixin:
@@ -19,12 +19,16 @@ class ActivityMixin:
 
         Fires a PATCH to PostgREST. Failure is non-fatal — logged as
         a warning, never raised.
+
+        Uses tz-aware UTC explicitly; PostgREST session TZ is UTC so a
+        naive .isoformat() would silently mis-stamp by the local offset.
         """
         try:
             requests.patch(
                 f"{self.instance_manager.postgrest_url}/app_instances",
                 params={"id": f"eq.{self.instance_id}"},
-                json={"last_activity_at": datetime.now().isoformat()},
+                json={"last_activity_at":
+                      datetime.now(timezone.utc).isoformat()},
                 headers={"Content-Type": "application/json"},
                 timeout=5
             )

@@ -6,7 +6,7 @@ Only one timeout job runs at a time per instance — scheduling a new one
 cancels any existing one to prevent scheduling leaks.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class SchedulingMixin:
@@ -36,7 +36,7 @@ class SchedulingMixin:
         if self._runtime.timeout_job_id:
             scheduler.cancel(self._runtime.timeout_job_id)
 
-        job_id = f"timeout_{self.instance_id}_{datetime.now().timestamp()}"
+        job_id = f"timeout_{self.instance_id}_{datetime.now(timezone.utc).timestamp()}"
         callback = getattr(self, callback_name, self.master)
 
         scheduler.schedule_once(

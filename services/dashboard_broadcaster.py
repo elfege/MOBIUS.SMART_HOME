@@ -20,7 +20,7 @@ import asyncio
 import json
 import logging
 from typing import Any, Dict, List, Optional, Set
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,7 @@ class DashboardBroadcaster:
         if not self._queues:
             return
 
-        event['_ts'] = datetime.now().isoformat()
+        event['_ts'] = datetime.now(timezone.utc).isoformat()
 
         async with self._lock:
             dead: List[int] = []

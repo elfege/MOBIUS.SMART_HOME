@@ -14,7 +14,7 @@ pending jobs are restored from the database.
 import os
 import logging
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Any, Optional, List
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.memory import MemoryJobStore
@@ -435,7 +435,7 @@ class SchedulerService:
                 params={"job_id": f"eq.{job_id}"},
                 json={
                     "status": "completed",
-                    "completed_at": datetime.now().isoformat()
+                    "completed_at": datetime.now(timezone.utc).isoformat()
                 },
                 headers={"Content-Type": "application/json"},
                 timeout=5
@@ -542,7 +542,7 @@ class SchedulerService:
         """
         try:
             cutoff = (
-                datetime.now() - timedelta(hours=max_age_hours)
+                datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
             ).isoformat()
             resp = requests.delete(
                 f"{self.postgrest_url}/scheduled_jobs",

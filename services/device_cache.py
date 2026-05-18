@@ -23,7 +23,7 @@ import os
 import logging
 import traceback
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional
 
 
@@ -223,7 +223,7 @@ class DeviceCache:
                 "device_type": device.get('type'),
                 "capabilities": device.get('capabilities', []),
                 "attributes": self._extract_attributes(device),
-                "last_synced_at": datetime.now().isoformat(),
+                "last_synced_at": datetime.now(timezone.utc).isoformat(),
                 "sync_source": "api"
             }
             cache_entries.append(entry)
@@ -281,7 +281,7 @@ class DeviceCache:
             "device_type": device_data.get('type'),
             "capabilities": device_data.get('capabilities', []),
             "attributes": self._extract_attributes(device_data),
-            "last_synced_at": datetime.now().isoformat(),
+            "last_synced_at": datetime.now(timezone.utc).isoformat(),
             "sync_source": "api"
         }
 
@@ -329,7 +329,9 @@ class DeviceCache:
             attrs = self._memory_cache[key].get('attributes', {})
             attrs[attribute_name] = attribute_value
             self._memory_cache[key]['attributes'] = attrs
-            self._memory_cache[key]['last_synced_at'] = datetime.now().isoformat()
+            self._memory_cache[key]['last_synced_at'] = (
+                datetime.now(timezone.utc).isoformat()
+            )
             self._memory_cache[key]['sync_source'] = 'webhook'
 
         # Update database using PATCH
@@ -345,7 +347,7 @@ class DeviceCache:
                     params={"device_id": f"eq.{key}"},
                     json={
                         "attributes": attrs,
-                        "last_synced_at": datetime.now().isoformat(),
+                        "last_synced_at": datetime.now(timezone.utc).isoformat(),
                         "sync_source": "webhook"
                     },
                     headers={"Content-Type": "application/json"},

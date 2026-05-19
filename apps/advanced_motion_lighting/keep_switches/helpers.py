@@ -82,17 +82,38 @@ class KeepSwitchHelpersMixin:
 
     def _get_current_mode(self) -> Optional[str]:
         """
-        Query the Hubitat hub for the currently active location mode.
+        Return the currently-active location mode, read from the
+        `location_modes` DB table (populated by services.mode_poller
+        which pulls /location/list/data from the primary hub every 60s).
+
+        Replaced 2026-05-18: previously called `self.hubitat.get_modes()`
+        which hit the Maker API. With `maker_api_enabled=false` (admin
+        API primary), the Maker call returned None → every per-mode
+        timeout / exclusionMode / keepOffMode check silently fell through
+        and AML used the default `noMotionTime` regardless of actual mode.
+        DB-as-source-of-truth keeps reads consistent across the system.
 
         Returns:
-            Mode name string (e.g., 'Home', 'Away') or None on failure
+            Mode name string (e.g., 'Evening', 'Night', 'Away') or None
+            on DB error / no row marked active.
         """
         try:
-            modes = self.hubitat.get_modes()
-            if modes:
-                for mode in modes:
-                    if mode.get('active'):
-                        return mode.get('name')
+            import os
+            import requests
+            pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+            r = requests.get(
+                f'{pg}/location_modes',
+                params={
+                    'is_active': 'eq.true',
+                    'select': 'mode_name',
+                    'limit': '1',
+                },
+                timeout=2,
+            )
+            if r.status_code == 200 and r.json():
+                return r.json()[0].get('mode_name')
         except Exception as e:
-            self.logger.warning(f"Failed to get current mode: {e}", exc_info=True)
+            self.logger.warning(
+                f"_get_current_mode (DB read) failed: {e}", exc_info=True
+            )
         return None

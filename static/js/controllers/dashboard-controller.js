@@ -227,17 +227,35 @@ export class DashboardController {
         const time = new Date(evt._ts || Date.now()).toLocaleTimeString();
         const line = document.createElement('div');
         line.className = 'debug-line';
+        // Match refreshDebug() — link device name to Hubitat admin when
+        // hub_ip + native id are present on the live event.
+        const deviceLabel = utils.escapeHtml(evt.device_name || evt.device_id);
+        const hubIp = evt.hub_ip;
+        const nativeId = evt.device_id || evt.hubitat_device_id;
+        const deviceHtml = (hubIp && nativeId)
+            ? `<a class="debug-device" href="http://${utils.escapeHtml(hubIp)}/device/edit/${utils.escapeHtml(String(nativeId))}" target="_blank" rel="noopener" title="Open on hub ${utils.escapeHtml(hubIp)}">${deviceLabel}</a>`
+            : `<span class="debug-device">${deviceLabel}</span>`;
         line.innerHTML = `<span class="debug-time">${time}</span> `
-            + `<span class="debug-device">${utils.escapeHtml(evt.device_name || evt.device_id)}</span> `
+            + `${deviceHtml} `
             + `<span class="debug-event">${utils.escapeHtml(evt.event_name)}</span>`
             + `<span class="debug-value">= ${utils.escapeHtml(evt.event_value || '')}</span>`;
 
-        // Prepend (newest first) to match the existing convention
-        output.insertBefore(line, output.firstChild);
+        // Append: newest at the bottom, chronological top-to-bottom
+        // (terminal-scrollback convention).
+        // Sticky-scroll: keep the view pinned to the bottom only when
+        // the user was already at the bottom — preserves scrollback
+        // position if they scrolled up to read older events.
+        const wasAtBottom = (output.scrollHeight - output.scrollTop
+                             - output.clientHeight) < 4;
+        output.appendChild(line);
 
-        // Cap at 100 lines
+        // Cap at 100 lines (drop oldest from the top)
         while (output.children.length > 100) {
-            output.removeChild(output.lastChild);
+            output.removeChild(output.firstChild);
+        }
+
+        if (wasAtBottom) {
+            output.scrollTop = output.scrollHeight;
         }
     }
 
@@ -296,6 +314,12 @@ export class DashboardController {
                     output.style.height = this.debugSizes[id];
                 }
                 this.refreshDebug(id);
+                // Kick off the runtime-status poller for pre-opened
+                // panels too. toggleDebug only fires this on user-
+                // initiated open; without this line, panels restored
+                // from localStorage on page load stay stuck on the
+                // "Loading status…" placeholder forever.
+                this._startRuntimeStatusPoll(parseInt(id, 10));
             }
         }
 
@@ -380,6 +404,12 @@ export class DashboardController {
                     </button>
                 </div>
                 <div class="debug-panel" id="debug-${inst.id}" style="display:none;">
+                    <!-- Live runtime status: countdown to next AML turn-off,
+                         current mode, motion-active verdict. Polled while
+                         the debug panel is open. -->
+                    <div class="debug-status" id="debug-status-${inst.id}">
+                        <span class="debug-status-loading">Loading status…</span>
+                    </div>
                     <div class="debug-toolbar">
                         <span class="debug-title">Event Log</span>
                         <div class="debug-toolbar-actions">
@@ -519,8 +549,10 @@ export class DashboardController {
 
         if (isVisible) {
             this.openDebugPanels.delete(instanceId);
+            this._stopRuntimeStatusPoll(instanceId);
         } else {
             this.openDebugPanels.add(instanceId);
+            this._startRuntimeStatusPoll(instanceId);
             await this.refreshDebug(instanceId);
         }
         this.saveDebugState();
@@ -543,20 +575,161 @@ export class DashboardController {
                 return;
             }
 
-            output.innerHTML = events.map(evt => {
+            // API returns events newest-first (received_at.desc). Reverse
+            // so the panel reads chronologically with the most-recent
+            // event at the BOTTOM — same convention as terminal scrollback
+            // and chat logs. The auto-scroll below then lands on the
+            // newest event, not the oldest one.
+            const chronological = events.slice().reverse();
+            output.innerHTML = chronological.map(evt => {
                 const time = new Date(evt.received_at).toLocaleTimeString();
+                // Link the device name to its Hubitat admin page when we
+                // have both hub_ip and the native hubitat_device_id.
+                // Hubitat's per-device admin URL is /device/edit/<id>.
+                // target=_blank so investigation doesn't lose dashboard context.
+                const deviceLabel = utils.escapeHtml(
+                    evt.device_name || evt.hubitat_device_id
+                );
+                const hubIp = evt.hub_ip;
+                const nativeId = evt.hubitat_device_id;
+                const deviceHtml = (hubIp && nativeId)
+                    ? `<a class="debug-device" href="http://${utils.escapeHtml(hubIp)}/device/edit/${utils.escapeHtml(String(nativeId))}" target="_blank" rel="noopener" title="Open on hub ${utils.escapeHtml(hubIp)}">${deviceLabel}</a>`
+                    : `<span class="debug-device">${deviceLabel}</span>`;
                 return `<div class="debug-line">`
                     + `<span class="debug-time">${time}</span> `
-                    + `<span class="debug-device">${utils.escapeHtml(evt.device_name || evt.hubitat_device_id)}</span> `
+                    + `${deviceHtml} `
                     + `<span class="debug-event">${utils.escapeHtml(evt.event_type)}</span>`
                     + `<span class="debug-value">= ${utils.escapeHtml(evt.event_value || '')}</span>`
                     + `</div>`;
             }).join('');
 
+            // Scroll to bottom (newest) after the chronological reverse.
             output.scrollTop = output.scrollHeight;
         } catch (error) {
             output.innerHTML = `<span class="debug-error">Error: ${error.message}</span>`;
         }
+    }
+
+    /* =========================================================================
+       Live runtime status (debug panel header)
+       ========================================================================= */
+
+    /**
+     * Start polling /api/instances/{id}/runtime-status every 2s while the
+     * debug panel is open. Also runs a 1s local-tick that just decrements
+     * the displayed countdown between server polls so the timer feels live.
+     */
+    _startRuntimeStatusPoll(instanceId) {
+        this._runtimeTimers = this._runtimeTimers || {};
+        this._stopRuntimeStatusPoll(instanceId);  // idempotent
+
+        // Cached snapshot per instance, mutated by the server poll, read
+        // by the local tick.
+        const snap = { remaining: null, mode: null, isMotion: null,
+                       paused: null, label: null };
+        this._runtimeTimers[instanceId] = { snap };
+
+        const renderTick = () => this._renderRuntimeStatus(instanceId, snap);
+        const serverPoll = async () => {
+            try {
+                const data = await api.get(`/instances/${instanceId}/runtime-status`);
+                snap.remaining = data.remaining_seconds;
+                snap.mode = data.current_mode;
+                snap.isMotion = data.is_motion_active;
+                snap.paused = data.is_paused;
+                snap.label = data.label;
+                snap.lastMotionAt = data.last_motion_time
+                    ? new Date(data.last_motion_time)
+                    : null;
+                snap.timeoutSeconds = data.timeout_seconds;
+                // 'seconds' | 'minutes' — drives countdown formatting.
+                snap.timeUnit = data.time_unit || 'seconds';
+                renderTick();
+            } catch (err) {
+                const el = document.getElementById(`debug-status-${instanceId}`);
+                if (el) el.innerHTML = `<span class="debug-status-error">runtime-status: ${utils.escapeHtml(err.message)}</span>`;
+            }
+        };
+
+        // Server every 2s; local decrement every 1s.
+        serverPoll();
+        this._runtimeTimers[instanceId].server = setInterval(serverPoll, 2000);
+        this._runtimeTimers[instanceId].local = setInterval(() => {
+            if (snap.remaining !== null && snap.remaining > -3600) {
+                snap.remaining -= 1;
+                renderTick();
+            }
+        }, 1000);
+    }
+
+    _stopRuntimeStatusPoll(instanceId) {
+        const t = (this._runtimeTimers || {})[instanceId];
+        if (!t) return;
+        if (t.server) clearInterval(t.server);
+        if (t.local) clearInterval(t.local);
+        delete this._runtimeTimers[instanceId];
+    }
+
+    _renderRuntimeStatus(instanceId, snap) {
+        const el = document.getElementById(`debug-status-${instanceId}`);
+        if (!el) return;
+
+        // Format a duration in seconds using the instance's configured
+        // timeUnit. If the user picked minutes, show "5m" / "5m 23s";
+        // if seconds, show "30s". Below 1m always falls back to seconds
+        // either way — "0m 18s" reads worse than "18s".
+        const fmt = (secs) => {
+            const t = Math.max(0, Math.floor(secs));
+            if (snap.timeUnit === 'minutes') {
+                const m = Math.floor(t / 60);
+                const s = t % 60;
+                if (m === 0) return `${s}s`;
+                return s === 0 ? `${m}m` : `${m}m ${s}s`;
+            }
+            // 'seconds' (default): use compact "Xm Ys" for >60s, else "Ys"
+            if (t >= 60) {
+                const m = Math.floor(t / 60);
+                const s = t % 60;
+                return s === 0 ? `${m}m` : `${m}m ${s}s`;
+            }
+            return `${t}s`;
+        };
+
+        // Countdown rendering. Three states:
+        //   remaining > 0  → "off in N"
+        //   remaining ≤ 0  → "timeout elapsed (Nago)"
+        //   remaining null → "timeout: N (no recent motion)"
+        //                    — surfaces the configured window even when
+        //                      we have no last_motion_time to anchor to.
+        let countdownHtml;
+        if (snap.remaining === null) {
+            const tHtml = snap.timeoutSeconds
+                ? fmt(snap.timeoutSeconds)
+                : '?';
+            countdownHtml = `<span class="debug-status-muted">timeout: ${tHtml} (no recent motion)</span>`;
+        } else if (snap.remaining > 0) {
+            countdownHtml = `<span class="debug-status-countdown" title="last motion: ${snap.lastMotionAt ? snap.lastMotionAt.toLocaleTimeString() : '?'}; timeout: ${fmt(snap.timeoutSeconds || 0)}">off in ${fmt(snap.remaining)}</span>`;
+        } else {
+            const overdue = Math.abs(Math.floor(snap.remaining));
+            countdownHtml = `<span class="debug-status-overdue">timeout elapsed (${fmt(overdue)} ago)</span>`;
+        }
+
+        const modeHtml = snap.mode
+            ? `<span class="debug-status-mode">mode: <strong>${utils.escapeHtml(snap.mode)}</strong></span>`
+            : `<span class="debug-status-muted">mode: —</span>`;
+
+        const motionHtml = snap.isMotion === true
+            ? `<span class="debug-status-motion-active">motion: active</span>`
+            : snap.isMotion === false
+                ? `<span class="debug-status-motion-inactive">motion: inactive</span>`
+                : `<span class="debug-status-muted">motion: —</span>`;
+
+        const pausedHtml = snap.paused
+            ? `<span class="debug-status-paused">PAUSED</span>`
+            : '';
+
+        el.innerHTML = [countdownHtml, modeHtml, motionHtml, pausedHtml]
+            .filter(Boolean).join(' • ');
     }
 
     /**

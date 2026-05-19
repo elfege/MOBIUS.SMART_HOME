@@ -3,150 +3,604 @@
 {% block title %}System Settings{% endblock %}
 
 {% block content %}
-<div class="admin-settings">
-    <header class="admin-settings-header">
-        <a href="/" class="wizard-exit">← Dashboard</a>
+{# =============================================================================
+   System Settings — tabbed/sectioned layout.
+   2026-05-18: Restructured from a flat list of raw system_settings keys
+   into a sidebar-tabbed UI. Hubs management was migrated in from the
+   standalone /hubs page (which remains a working alias). Raw snake_case
+   keys are now rendered as human-readable labels derived from the
+   `description` column or, as a fallback, from the key itself.
+
+   Layout: tabs on the LEFT, content panel on the RIGHT — chosen over
+   top-tabs because the Hubs section is much taller than the others and
+   the eye finds vertical menus easier with 7+ sections.
+   ============================================================================= #}
+
+<div class="admin-settings settings-shell">
+    <header class="settings-page-header">
+        <a href="/" class="wizard-exit">&larr; Dashboard</a>
         <h2>System Settings</h2>
-        <p class="admin-settings-desc">
-            Cross-cutting platform configuration. Per-instance settings live in each
-            automation's edit page. Per-app-type defaults will live under each
-            app's own settings page (coming).
+        <p class="settings-page-desc">
+            Cross-cutting platform configuration. Per-instance settings live in
+            each automation's edit page; per-app-type defaults will live under
+            each app's own settings page (coming).
         </p>
     </header>
 
-    <section class="admin-settings-body">
-        <div id="settings-list" class="settings-list">
-            <p class="loading-placeholder">Loading settings...</p>
-        </div>
-    </section>
+    <div class="settings-layout">
+        {# Left rail — tab list. Populated statically; each <button> has
+           data-section matching a panel id below. #}
+        <nav class="settings-tabs" role="tablist" aria-label="Settings sections">
+            <button type="button" class="settings-tab is-active"
+                    role="tab" aria-selected="true"
+                    data-section="general">General</button>
+            <button type="button" class="settings-tab"
+                    role="tab" aria-selected="false"
+                    data-section="hubs">Hubs</button>
+            <button type="button" class="settings-tab"
+                    role="tab" aria-selected="false"
+                    data-section="reconcile">Reconcile &amp; Polling</button>
+            <button type="button" class="settings-tab"
+                    role="tab" aria-selected="false"
+                    data-section="device_commands">Device commands</button>
+            <button type="button" class="settings-tab"
+                    role="tab" aria-selected="false"
+                    data-section="aml">AML</button>
+            <button type="button" class="settings-tab"
+                    role="tab" aria-selected="false"
+                    data-section="eventsocket">Eventsocket</button>
+            <button type="button" class="settings-tab"
+                    role="tab" aria-selected="false"
+                    data-section="maker_api">Maker API</button>
+        </nav>
+
+        {# Right pane — one panel per section. system_settings rows
+           populate into the [data-rows] placeholder of their assigned
+           section at load() time. Hubs panel ships with full markup. #}
+        <section class="settings-panels">
+
+            {# ---------- General ---------- #}
+            <div class="settings-panel is-active" data-section="general"
+                 role="tabpanel" aria-labelledby="tab-general">
+                <h3 class="settings-panel-title">General</h3>
+                <p class="settings-panel-desc">
+                    Top-level platform behavior — timezone display,
+                    color palette.
+                </p>
+                <div class="settings-rows" data-rows="general">
+                    <p class="loading-placeholder">Loading...</p>
+                </div>
+            </div>
+
+            {# ---------- Hubs — embedded from former /hubs page ----------
+               Identical IDs to the standalone /hubs template so that
+               static/js/controllers/hubs-controller.js boots without
+               modification. The /hubs route still serves the old page
+               as an alias for now (navbar gear icon points here, the
+               navbar Hubs link still works too).
+            #}
+            <div class="settings-panel" data-section="hubs"
+                 role="tabpanel" aria-labelledby="tab-hubs">
+                <div class="settings-panel-header-row">
+                    <div>
+                        <h3 class="settings-panel-title">Hub Configuration</h3>
+                        <p class="settings-panel-desc">
+                            Edit Hubitat hub settings. Changes are applied
+                            immediately; device routing caches are
+                            invalidated on save.
+                        </p>
+                    </div>
+                    <button class="btn btn-primary" id="btn-add-hub">+ Add hub</button>
+                </div>
+
+                {# Maker API explanation + toggle — left here because it
+                   logically lives next to hubs. Toggle persists to
+                   system_settings.maker_api_enabled.  Note: the same
+                   key also appears in the "Maker API" tab below as a
+                   simple boolean editor; both controls write to the
+                   same row and the panel re-reads on tab switch so they
+                   stay consistent. #}
+                <div id="maker-api-panel"
+                     style="background:var(--color-surface);border:1px solid var(--color-border);border-radius:8px;padding:1rem;margin-bottom:1rem;">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;flex-wrap:wrap;">
+                        <div style="flex:1;min-width:240px;">
+                            <strong>Maker API: <span id="maker-api-state">...</span></strong>
+                            <button type="button" id="btn-maker-api-info" class="motion-floor-help"
+                                    title="Why this matters" style="vertical-align:middle;">?</button>
+                            <p style="opacity:.7;font-size:.85rem;margin:.4rem 0 0;">
+                                Default OFF. Outbound HTTP (reconcile, commands, verify) goes
+                                through the Hubitat admin API. Enable as a fallback if the
+                                admin path has issues on your firmware. The eventsocket WS
+                                handles all inbound events either way.
+                            </p>
+                        </div>
+                        <button type="button" id="btn-toggle-maker-api" class="btn btn-secondary">
+                            ...
+                        </button>
+                    </div>
+                </div>
+
+                <div id="hubs-status" style="opacity:.7;font-size:.9rem;margin-bottom:.5rem;">Loading...</div>
+                <div id="hubs-list"></div>
+            </div>
+
+            {# ---------- Reconcile & Polling ---------- #}
+            <div class="settings-panel" data-section="reconcile"
+                 role="tabpanel" aria-labelledby="tab-reconcile">
+                <h3 class="settings-panel-title">Reconcile &amp; Polling</h3>
+                <p class="settings-panel-desc">
+                    Cadence for the reconcile-poll path (fills gaps when
+                    eventsocket WS misses events), and hub timezone refresh
+                    health.
+                </p>
+                <div class="settings-rows" data-rows="reconcile">
+                    <p class="loading-placeholder">Loading...</p>
+                </div>
+            </div>
+
+            {# ---------- Device commands ---------- #}
+            <div class="settings-panel" data-section="device_commands"
+                 role="tabpanel" aria-labelledby="tab-device_commands">
+                <h3 class="settings-panel-title">Device commands</h3>
+                <p class="settings-panel-desc">
+                    Tuning for the verify-after-send logic on outbound
+                    device commands.
+                </p>
+                <div class="settings-rows" data-rows="device_commands">
+                    <p class="loading-placeholder">Loading...</p>
+                </div>
+            </div>
+
+            {# ---------- AML ---------- #}
+            <div class="settings-panel" data-section="aml"
+                 role="tabpanel" aria-labelledby="tab-aml">
+                <h3 class="settings-panel-title">Advanced Motion Lighting</h3>
+                <p class="settings-panel-desc">
+                    Defaults and floors applied to AML automations across
+                    instances.
+                </p>
+                <div class="settings-rows" data-rows="aml">
+                    <p class="loading-placeholder">Loading...</p>
+                </div>
+            </div>
+
+            {# ---------- Eventsocket ---------- #}
+            <div class="settings-panel" data-section="eventsocket"
+                 role="tabpanel" aria-labelledby="tab-eventsocket">
+                <h3 class="settings-panel-title">Eventsocket (WS intake)</h3>
+                <p class="settings-panel-desc">
+                    Master switch and watchdog for the Hubitat
+                    <code>/eventsocket</code> WebSocket — the primary
+                    inbound event path.
+                </p>
+                <div class="settings-rows" data-rows="eventsocket">
+                    <p class="loading-placeholder">Loading...</p>
+                </div>
+            </div>
+
+            {# ---------- Maker API ---------- #}
+            <div class="settings-panel" data-section="maker_api"
+                 role="tabpanel" aria-labelledby="tab-maker_api">
+                <h3 class="settings-panel-title">Maker API &amp; legacy intake</h3>
+                <p class="settings-panel-desc">
+                    Optional Hubitat Maker API path (default OFF as of
+                    2026-05-17). Outbound HTTP defaults to the admin API.
+                    Toggle here or in the Hubs tab — both write the same
+                    setting row.
+                </p>
+                <div class="settings-rows" data-rows="maker_api">
+                    <p class="loading-placeholder">Loading...</p>
+                </div>
+            </div>
+
+        </section>
+    </div>
 </div>
+
+{# Admin credentials info modal — moved out of the embedded hubs panel
+   so it lives at page level (above the tab panes). #}
+<div id="admin-creds-modal" class="motion-floor-modal" style="display:none;">
+    <div class="motion-floor-modal-body">
+        <h3>Admin API credentials &mdash; when and how</h3>
+        <p>
+            If this hub's <strong>Settings &rarr; Hub Login Security</strong> is OFF
+            (Hubitat default), leave these fields blank &mdash; the admin API is
+            open on the LAN and Mobius connects without auth.
+        </p>
+        <p>
+            If you enable Hub Login Security, Mobius needs the username/password
+            to call <code>POST /login</code>, persist the session cookie, and
+            use it for every subsequent <code>/device/...</code> call.
+        </p>
+        <p>
+            <strong>Two ways to supply them, in priority order:</strong>
+        </p>
+        <ol style="opacity:.85;font-size:.9rem;line-height:1.5;margin:.4rem 0 .8rem 1.2rem;">
+            <li><strong>Inline below</strong> &mdash; type them into the Username
+                + Password fields. Stored in the DB (plain for now; a
+                KEK-encryption layer is on the roadmap).</li>
+            <li><strong>AWS Secrets Manager</strong> &mdash; set the eight placeholders
+                <code>HUBITAT_ADMIN_USER_1..4</code> and
+                <code>HUBITAT_ADMIN_PASSWORD_1..4</code> in your HUBITAT
+                secret (already provisioned). Then put the matching slot
+                number (1, 2, 3 or 4) into <em>AWS slot</em> for this hub.
+                Values flow: AWS Secrets Manager &rarr; <code>pull_aws_secrets HUBITAT</code>
+                in <code>start.sh</code> &rarr; env vars &rarr; admin client.</li>
+        </ol>
+        <p style="opacity:.7;font-size:.85rem;">
+            The inline fields win if both are populated. To switch from
+            inline to AWS, clear the inline fields and set the slot.
+        </p>
+        <div class="motion-floor-modal-actions">
+            <button type="button" class="btn motion-floor-close"
+                    id="btn-admin-creds-modal-close">Close</button>
+        </div>
+    </div>
+</div>
+
+{# Maker API info modal — opens on ? click inside the Hubs panel. #}
+<div id="maker-api-modal" class="motion-floor-modal" style="display:none;">
+    <div class="motion-floor-modal-body">
+        <h3>Maker API &mdash; legacy fallback (default OFF)</h3>
+        <p>
+            <strong>The primary intake is the eventsocket WS</strong>
+            (<code>ws://hub/eventsocket</code>). Every event from every
+            device streams through it, no per-device opt-in. Mobius
+            writes everything to <code>event_log</code> + <code>raw_events</code>;
+            the database is the source of truth for state.
+        </p>
+        <p>
+            <strong>Outbound HTTP (reconcile poll + commands + command
+            verify) uses Hubitat's admin API by default</strong> &mdash;
+            <code>POST /device/runmethod</code> for commands,
+            <code>GET /device/fullJson/&lt;id&gt;</code> for verify and
+            reconcile. Faster than Maker (skips the Groovy app layer)
+            and doesn't need per-device opt-in.
+        </p>
+        <p>
+            <strong>The toggle below re-enables Maker API</strong> for
+            outbound HTTP only &mdash; a fallback if the admin API has
+            issues on your firmware version. The WS intake is unaffected
+            either way.
+        </p>
+        <p style="opacity:.65;font-size:.85rem;">
+            If the eventsocket itself fails (hub reboot, firmware update),
+            the dashboard surfaces a warning. WS will reconnect on its
+            own; nothing to do unless the failure persists, in which case
+            the warning suggests escalating.
+        </p>
+        <div class="motion-floor-modal-actions">
+            <button type="button" class="btn motion-floor-close"
+                    id="btn-maker-api-modal-close">Close</button>
+        </div>
+    </div>
+</div>
+
+{# Hidden template for one hub card — referenced by hubs-controller.js. #}
+<template id="hub-card-template">
+    <form class="hub-card" data-hub-id="" style="border:1px solid var(--border-color,#333);border-radius:8px;padding:1rem;margin-bottom:1rem;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem 1rem;">
+            <label>Name
+                <input name="hub_name" type="text" required pattern="^[a-zA-Z0-9_-]+$"
+                       title="Letters, digits, _ or -"/>
+            </label>
+            <label>IP
+                <input name="hub_ip" type="text" required
+                       pattern="^(\d{1,3}\.){3}\d{1,3}$" title="IPv4"/>
+            </label>
+            <label>Maker API app number
+                <input name="maker_api_app_number" type="text" required
+                       pattern="^\d+$" title="Numeric"/>
+            </label>
+            <label>Token env-var name
+                <input name="maker_api_token_env" type="text" required
+                       pattern="^[A-Z_][A-Z0-9_]*$"
+                       title="Uppercase env var name (e.g. HUBITAT_API_TOKEN_OTHER_HUB_1)"/>
+            </label>
+            <label style="display:flex;align-items:center;gap:.5rem;">
+                <input name="is_primary" type="checkbox"/> Primary (default client)
+            </label>
+            <label style="display:flex;align-items:center;gap:.5rem;">
+                <input name="is_enabled" type="checkbox"/> Enabled
+            </label>
+        </div>
+
+        <div style="margin-top:.75rem;padding:.5rem .75rem;background:rgba(255,255,255,0.02);border:1px solid var(--color-border);border-radius:6px;">
+            <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;">
+                <strong style="font-size:.9rem;">Admin API credentials</strong>
+                <button type="button" class="motion-floor-help btn-admin-creds-help">?</button>
+                <span style="opacity:.6;font-size:.8rem;">Optional &mdash; only if Hub Login Security is on</span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 120px;gap:.5rem;">
+                <label>Username
+                    <input name="admin_username" type="text"
+                           placeholder="(unauthenticated)"
+                           autocomplete="off"/>
+                </label>
+                <label>Password
+                    <input name="admin_password" type="password"
+                           placeholder="(unauthenticated)"
+                           autocomplete="new-password"/>
+                </label>
+                <label>AWS slot
+                    <input name="admin_creds_index" type="number"
+                           min="1" max="8"
+                           placeholder="e.g. 2"
+                           title="Index into HUBITAT_ADMIN_USER_<n> / HUBITAT_ADMIN_PASSWORD_<n> env vars. Used if Username + Password above are blank."/>
+                </label>
+            </div>
+        </div>
+        <div style="margin-top:.75rem;display:flex;gap:.5rem;justify-content:flex-end;">
+            <span class="hub-card-status" style="margin-right:auto;font-size:.85rem;opacity:.7;"></span>
+            <button type="button" class="btn btn-danger btn-delete">Delete</button>
+            <button type="submit" class="btn btn-primary">Save</button>
+        </div>
+    </form>
+</template>
 {% endblock %}
 
 {% block extra_css %}
 <style>
-.admin-settings {
-    max-width: 720px;
+/* =============================================================================
+   Settings page — sidebar-tabbed layout (2026-05-18).
+   Local styles only; shared neutral palette comes from theme-neutral.css.
+   ============================================================================= */
+.settings-shell {
+    max-width: 1100px;
     margin: 1.5rem auto;
-    padding: 1.5rem 2rem;
+    padding: 1.5rem 1.75rem 2rem;
     background: var(--color-card);
     border: 1px solid var(--color-border);
     border-radius: 8px;
 }
-.admin-settings-header h2 {
+.settings-page-header h2 {
     margin: 0.5rem 0 0.25rem;
 }
-.admin-settings-desc {
+.settings-page-desc {
     color: var(--color-text-muted);
     font-size: 0.9rem;
-    margin: 0 0 1.5rem;
+    margin: 0 0 1.25rem;
 }
-.settings-list {
+.settings-layout {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 1.5rem;
+    border-top: 1px solid var(--color-border);
+    padding-top: 1.25rem;
+}
+@media (max-width: 720px) {
+    .settings-layout {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ---------- tabs (left rail) ---------- */
+.settings-tabs {
     display: flex;
     flex-direction: column;
-    gap: 1.25rem;
+    gap: 2px;
+    align-self: start;
+    position: sticky;
+    top: 1rem;
+}
+.settings-tab {
+    appearance: none;
+    background: transparent;
+    color: var(--color-text-muted);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 8px 12px;
+    text-align: left;
+    font-size: 0.875rem;
+    font-weight: 500;
+    line-height: 1.2;
+    cursor: pointer;
+    transition: background 120ms, color 120ms, border-color 120ms;
+}
+.settings-tab:hover {
+    background: var(--color-surface-2, rgba(255,255,255,0.03));
+    color: var(--color-text);
+}
+.settings-tab.is-active {
+    background: var(--color-surface-2, rgba(255,255,255,0.05));
+    color: var(--color-text);
+    border-color: var(--color-border-strong, var(--color-border));
+}
+.settings-tab:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+}
+
+/* ---------- panels (right pane) ---------- */
+.settings-panels {
+    min-width: 0;
+}
+.settings-panel {
+    display: none;
+}
+.settings-panel.is-active {
+    display: block;
+}
+.settings-panel-title {
+    margin: 0 0 0.25rem;
+    font-size: 1.05rem;
+}
+.settings-panel-desc {
+    color: var(--color-text-muted);
+    font-size: 0.85rem;
+    margin: 0 0 1.25rem;
+    line-height: 1.45;
+}
+.settings-panel-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+/* ---------- setting rows ---------- */
+.settings-rows {
+    display: flex;
+    flex-direction: column;
 }
 .setting-row {
     display: grid;
-    grid-template-columns: 240px 1fr auto;
-    align-items: start;
+    grid-template-columns: minmax(240px, 1fr) minmax(180px, 280px) auto;
+    align-items: center;
     gap: 1rem;
-    padding: 0.9rem 0;
+    padding: 0.85rem 0;
     border-bottom: 1px solid var(--color-border);
 }
 .setting-row:last-child {
     border-bottom: none;
 }
-.setting-key {
-    font-family: ui-monospace, SFMono-Regular, monospace;
-    font-size: 0.85rem;
-    color: var(--color-text);
-    word-break: break-word;
+.setting-label {
+    min-width: 0;
 }
-.setting-key .req-restart {
+.setting-name {
+    color: var(--color-text);
+    font-size: 0.9rem;
+    font-weight: 500;
+    line-height: 1.3;
+}
+.setting-name .req-restart {
     display: inline-block;
-    margin-top: 4px;
-    font-size: 0.7rem;
-    font-family: inherit;
+    margin-left: 6px;
+    font-size: 0.65rem;
     color: var(--color-warning);
     background: rgba(199, 154, 90, 0.10);
     border: 1px solid rgba(199, 154, 90, 0.30);
     border-radius: 4px;
     padding: 1px 6px;
+    vertical-align: middle;
+}
+.setting-key-tag {
+    display: block;
+    margin-top: 3px;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+    opacity: 0.65;
+    word-break: break-all;
 }
 .setting-desc {
     color: var(--color-text-muted);
-    font-size: 0.8rem;
-    line-height: 1.4;
+    font-size: 0.78rem;
+    line-height: 1.45;
     margin-top: 4px;
 }
 .setting-input {
-    min-width: 160px;
+    min-width: 0;
 }
 .setting-input input,
 .setting-input select {
     width: 100%;
-    max-width: 240px;
 }
 .setting-save {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
 }
 .setting-save-status {
     font-size: 0.75rem;
     color: var(--color-success);
-    margin-left: 6px;
-    align-self: center;
+}
+.settings-rows .loading-placeholder,
+.settings-rows .empty-placeholder {
+    color: var(--color-text-muted);
+    font-size: 0.85rem;
+    font-style: italic;
+    padding: 0.5rem 0;
 }
 </style>
 {% endblock %}
 
 {% block extra_js %}
+<script type="module" src="/static/js/controllers/hubs-controller.js"></script>
 <script type="module">
+    /* =========================================================================
+       admin_settings page controller.
+       Responsibilities:
+         (1) Tab navigation — vanilla JS show/hide, no router.
+         (2) Load /api/system_settings once, route rows into their section
+             based on the SECTION_MAP key-prefix table.
+         (3) Render each row with a human-readable LABEL (description-derived
+             or snake_case→Title-Case fallback) and an input matched to
+             its value_type.
+         (4) PATCH /api/system_settings/{key} on Save.
+         (5) Hubs panel: drive the maker-api panel + modals (state is shared
+             with the Maker-API tab so both panels stay in sync).
+       ========================================================================= */
+
     import { api, utils } from '/static/js/main.js';
 
-    async function load() {
-        const container = document.getElementById('settings-list');
-        let rows;
-        try {
-            rows = await api.get('/system_settings');
-        } catch (err) {
-            container.innerHTML = `<p class="error">Failed to load settings: ${err.message}</p>`;
-            return;
-        }
-        if (!rows || rows.length === 0) {
-            container.innerHTML = '<p>No settings.</p>';
-            return;
-        }
-        container.innerHTML = rows.map(row => {
-            const inputHtml = renderInput(row);
-            const restartBadge = row.requires_restart
-                ? '<span class="req-restart">requires restart</span>' : '';
-            return `
-                <div class="setting-row" data-key="${utils.escapeHtml(row.key)}" data-type="${row.value_type}">
-                    <div class="setting-label">
-                        <div class="setting-key">
-                            ${utils.escapeHtml(row.key)}<br>${restartBadge}
-                        </div>
-                        <div class="setting-desc">${utils.escapeHtml(row.description || '')}</div>
-                    </div>
-                    <div class="setting-input">${inputHtml}</div>
-                    <div class="setting-save">
-                        <button class="btn btn-secondary setting-save-btn">Save</button>
-                        <span class="setting-save-status" data-key="${utils.escapeHtml(row.key)}"></span>
-                    </div>
-                </div>`;
-        }).join('');
+    /* -------------------------------------------------------------------
+       Section assignment. Each entry: { match, section }.
+       Order matters — first match wins. `match` is either a regex or a
+       literal string (full key equality).
+       ------------------------------------------------------------------- */
+    const SECTION_MAP = [
+        // General
+        { key: 'timezone',              section: 'general' },
+        { key: 'colorblind_mode',       section: 'general' },
+        // Reconcile & Polling (incl. hub-TZ refresher health flags)
+        { re:  /^reconcile_/,           section: 'reconcile' },
+        { re:  /^mode_poll_/,           section: 'reconcile' },
+        { re:  /^hub_tz_/,              section: 'reconcile' },
+        // Device commands
+        { re:  /^device_cmd_/,          section: 'device_commands' },
+        { key: 'device_commands_logging', section: 'device_commands' },
+        // AML — incl. motion_timeout_floor which is the AML/Fan-wide floor
+        { re:  /^aml_/,                 section: 'aml' },
+        { key: 'motion_timeout_floor_seconds', section: 'aml' },
+        // Eventsocket
+        { re:  /^eventsocket_/,         section: 'eventsocket' },
+        // Maker API + legacy intake
+        { key: 'maker_api_enabled',     section: 'maker_api' },
+        { key: 'webhook_intake_enabled', section: 'maker_api' },
+    ];
+    const FALLBACK_SECTION = 'general';
 
-        container.querySelectorAll('.setting-save-btn').forEach(btn => {
-            btn.addEventListener('click', save);
-        });
+    /* -------------------------------------------------------------------
+       Label derivation — first sentence of `description` (if short
+       enough), otherwise snake_case → Title Case from the key.
+       ------------------------------------------------------------------- */
+    function deriveLabel(row) {
+        const k = row.key || '';
+        // Snake → Title Case base name. Special-case a few acronyms so
+        // we don't render "Aml" or "Tz".
+        const acronyms = { aml: 'AML', tz: 'TZ', api: 'API', ws: 'WS', ip: 'IP' };
+        const titled = k.split('_').map(part => {
+            const lower = part.toLowerCase();
+            if (acronyms[lower]) return acronyms[lower];
+            return lower.charAt(0).toUpperCase() + lower.slice(1);
+        }).join(' ');
+
+        // Heuristic: if the key ends in _seconds / _secs, hint at units.
+        if (/_seconds?$/.test(k) || /_secs?$/.test(k)) {
+            return titled.replace(/ (Seconds?|Secs?)$/, ' (seconds)');
+        }
+        return titled;
     }
 
+    function assignSection(key) {
+        for (const rule of SECTION_MAP) {
+            if (rule.key && rule.key === key) return rule.section;
+            if (rule.re && rule.re.test(key)) return rule.section;
+        }
+        return FALLBACK_SECTION;
+    }
+
+    /* -------------------------------------------------------------------
+       Row rendering — produces the inner HTML of one .setting-row.
+       ------------------------------------------------------------------- */
     function renderInput(row) {
         const v = row.value;
         if (row.value_type === 'bool') {
-            const t = v === 'true' ? 'selected' : '';
-            const f = v === 'false' ? 'selected' : '';
+            const t = (v === 'true' || v === true) ? 'selected' : '';
+            const f = (v === 'false' || v === false) ? 'selected' : '';
             return `<select data-input>
                 <option value="true" ${t}>true</option>
                 <option value="false" ${f}>false</option>
@@ -154,22 +608,51 @@
         }
         if (row.value_type === 'int' || row.value_type === 'float') {
             const step = row.value_type === 'int' ? '1' : 'any';
-            return `<input type="number" step="${step}" value="${utils.escapeHtml(v)}" data-input>`;
+            return `<input type="number" step="${step}" value="${utils.escapeHtml(String(v))}" data-input>`;
         }
-        return `<input type="text" value="${utils.escapeHtml(v)}" data-input>`;
+        return `<input type="text" value="${utils.escapeHtml(String(v))}" data-input>`;
     }
 
+    function renderRow(row) {
+        const label = deriveLabel(row);
+        const restartBadge = row.requires_restart
+            ? '<span class="req-restart">requires restart</span>' : '';
+        const desc = row.description
+            ? `<div class="setting-desc">${utils.escapeHtml(row.description)}</div>`
+            : '';
+        return `
+            <div class="setting-row"
+                 data-key="${utils.escapeHtml(row.key)}"
+                 data-type="${row.value_type}">
+                <div class="setting-label">
+                    <div class="setting-name">
+                        ${utils.escapeHtml(label)}${restartBadge}
+                        <code class="setting-key-tag">${utils.escapeHtml(row.key)}</code>
+                    </div>
+                    ${desc}
+                </div>
+                <div class="setting-input">${renderInput(row)}</div>
+                <div class="setting-save">
+                    <button class="btn btn-secondary setting-save-btn">Save</button>
+                    <span class="setting-save-status" data-key="${utils.escapeHtml(row.key)}"></span>
+                </div>
+            </div>`;
+    }
+
+    /* -------------------------------------------------------------------
+       PATCH handler — wired by delegation from the panel container.
+       ------------------------------------------------------------------- */
     async function save(e) {
         const row = e.target.closest('.setting-row');
+        if (!row) return;
         const key = row.dataset.key;
         const type = row.dataset.type;
         const input = row.querySelector('[data-input]');
-        let raw = input.value;
+        const raw = input.value;
         let parsed = raw;
         if (type === 'int') parsed = parseInt(raw, 10);
         else if (type === 'float') parsed = parseFloat(raw);
         else if (type === 'bool') parsed = (raw === 'true');
-        // string + json pass as-is
         const status = row.querySelector('.setting-save-status');
         status.textContent = 'Saving...';
         status.style.color = 'var(--color-text-muted)';
@@ -178,10 +661,9 @@
                 method: 'PATCH',
                 body: JSON.stringify({ value: parsed }),
             });
-            status.textContent = '✓ Saved';
+            status.textContent = 'Saved';
             status.style.color = 'var(--color-success)';
-            // Live-apply settings that don't require restart so the user
-            // sees the change immediately without an ./start.sh.
+            // Live-apply settings that don't require restart.
             if (key === 'colorblind_mode' && type === 'bool') {
                 document.body.classList.toggle('colorblind', parsed === true);
                 try { localStorage.setItem('colorblind_mode', String(parsed)); } catch (_) {}
@@ -189,14 +671,190 @@
                     detail: { enabled: parsed === true },
                 }));
             }
+            // If maker_api_enabled was toggled here, mirror it into the
+            // Hubs-tab maker-api panel so the UI stays consistent.
+            if (key === 'maker_api_enabled') refreshMakerApiPanel();
             setTimeout(() => { status.textContent = ''; }, 2500);
         } catch (err) {
-            status.textContent = `⚠ ${err.message}`;
+            status.textContent = `Error: ${err.message}`;
             status.style.color = 'var(--color-danger)';
         }
     }
 
-    document.addEventListener('DOMContentLoaded', load);
-    load();
+    /* -------------------------------------------------------------------
+       Top-level loader — partition rows into per-section buckets and
+       render each bucket into its panel.
+       ------------------------------------------------------------------- */
+    async function loadSettings() {
+        let rows;
+        try {
+            rows = await api.get('/system_settings');
+        } catch (err) {
+            document.querySelectorAll('.settings-rows').forEach(el => {
+                el.innerHTML = `<p class="error">Failed to load: ${utils.escapeHtml(err.message)}</p>`;
+            });
+            return;
+        }
+        if (!Array.isArray(rows) || rows.length === 0) {
+            document.querySelectorAll('.settings-rows').forEach(el => {
+                el.innerHTML = '<p class="empty-placeholder">No settings.</p>';
+            });
+            return;
+        }
+
+        // Partition.
+        const buckets = {};
+        for (const row of rows) {
+            const sec = assignSection(row.key);
+            (buckets[sec] = buckets[sec] || []).push(row);
+        }
+
+        // Render each panel's rows; empty panels get a placeholder.
+        document.querySelectorAll('.settings-rows').forEach(container => {
+            const sec = container.dataset.rows;
+            const list = buckets[sec] || [];
+            if (list.length === 0) {
+                container.innerHTML =
+                    '<p class="empty-placeholder">No settings in this section.</p>';
+                return;
+            }
+            // Sort alphabetically within each section for predictability.
+            list.sort((a, b) => deriveLabel(a).localeCompare(deriveLabel(b)));
+            container.innerHTML = list.map(renderRow).join('');
+        });
+
+        // One delegated click listener per panel container.
+        document.querySelectorAll('.settings-rows').forEach(container => {
+            container.addEventListener('click', e => {
+                if (e.target.classList?.contains('setting-save-btn')) save(e);
+            });
+        });
+    }
+
+    /* -------------------------------------------------------------------
+       Tab navigation — simple show/hide. We do NOT lazy-init the hubs
+       controller because (a) it already runs on document-ready and
+       (b) all required DOM IDs exist in the page at parse time.
+       ------------------------------------------------------------------- */
+    function initTabs() {
+        const tabs = document.querySelectorAll('.settings-tab');
+        const panels = document.querySelectorAll('.settings-panel');
+        tabs.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const target = btn.dataset.section;
+                tabs.forEach(t => {
+                    const active = (t.dataset.section === target);
+                    t.classList.toggle('is-active', active);
+                    t.setAttribute('aria-selected', active ? 'true' : 'false');
+                });
+                panels.forEach(p => {
+                    p.classList.toggle('is-active', p.dataset.section === target);
+                });
+                // Maker API state can change from either tab; refresh the
+                // Hubs panel's state strip whenever it becomes visible.
+                if (target === 'hubs') refreshMakerApiPanel();
+            });
+        });
+    }
+
+    /* -------------------------------------------------------------------
+       Maker API panel inside the Hubs tab — mirrors the system_settings
+       row state into the visible toggle button.
+       ------------------------------------------------------------------- */
+    async function refreshMakerApiPanel() {
+        const stateEl = document.getElementById('maker-api-state');
+        const btn = document.getElementById('btn-toggle-maker-api');
+        if (!stateEl || !btn) return;
+        try {
+            const row = await api.get('/system_settings/maker_api_enabled');
+            const on = (row.value === true || row.value === 'true');
+            stateEl.textContent = on ? 'fallback ENABLED' : 'OFF (admin API in use, default)';
+            stateEl.style.color = on ? 'var(--color-warning)' : 'var(--color-success)';
+            btn.textContent = on ? 'Disable Maker API' : 'Enable Maker API as fallback';
+            btn.dataset.currentOn = String(on);
+        } catch (err) {
+            stateEl.textContent = `error: ${err.message}`;
+        }
+    }
+
+    function initMakerApiToggle() {
+        const btn = document.getElementById('btn-toggle-maker-api');
+        if (!btn) return;
+        btn.addEventListener('click', async (e) => {
+            const cur = e.currentTarget.dataset.currentOn === 'true';
+            const next = !cur;
+            try {
+                await api.request('/system_settings/maker_api_enabled', {
+                    method: 'PATCH',
+                    body: JSON.stringify({ value: next }),
+                });
+                utils.notify(
+                    `Maker API ${next ? 're-enabled' : 'disabled'}. Reconcile/commands `
+                    + `will use ${next ? 'Maker' : 'admin'} API on the next pass.`,
+                    'success'
+                );
+                refreshMakerApiPanel();
+                // Also refresh the Maker API tab row so its select reflects
+                // the new value if the user is looking at it.
+                loadSettings();
+            } catch (err) {
+                utils.notify(`Toggle failed: ${err.message}`, 'error');
+            }
+        });
+    }
+
+    /* -------------------------------------------------------------------
+       Modal wiring — info popups for the Maker API and admin credentials.
+       Identical behavior to the standalone /hubs page so we don't surprise
+       users mid-migration.
+       ------------------------------------------------------------------- */
+    function initModals() {
+        const makerModal = document.getElementById('maker-api-modal');
+        const makerOpen  = document.getElementById('btn-maker-api-info');
+        const makerClose = document.getElementById('btn-maker-api-modal-close');
+        if (makerOpen && makerModal) {
+            makerOpen.addEventListener('click', () => { makerModal.style.display = 'flex'; });
+        }
+        if (makerClose && makerModal) {
+            makerClose.addEventListener('click', () => { makerModal.style.display = 'none'; });
+            makerModal.addEventListener('click', (e) => {
+                if (e.target === makerModal) makerModal.style.display = 'none';
+            });
+        }
+
+        const credsModal = document.getElementById('admin-creds-modal');
+        const credsClose = document.getElementById('btn-admin-creds-modal-close');
+        // Per-hub ? buttons are rendered dynamically by hubs-controller.js,
+        // so delegate clicks from the document body.
+        if (credsModal) {
+            document.addEventListener('click', (e) => {
+                if (e.target.classList?.contains('btn-admin-creds-help')) {
+                    credsModal.style.display = 'flex';
+                }
+            });
+            if (credsClose) {
+                credsClose.addEventListener('click', () => { credsModal.style.display = 'none'; });
+            }
+            credsModal.addEventListener('click', (e) => {
+                if (e.target === credsModal) credsModal.style.display = 'none';
+            });
+        }
+    }
+
+    /* -------------------------------------------------------------------
+       Boot.
+       ------------------------------------------------------------------- */
+    function boot() {
+        initTabs();
+        initMakerApiToggle();
+        initModals();
+        loadSettings();
+        refreshMakerApiPanel();
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', boot);
+    } else {
+        boot();
+    }
 </script>
 {% endblock %}

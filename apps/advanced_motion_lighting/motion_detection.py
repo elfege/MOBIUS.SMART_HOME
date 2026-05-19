@@ -19,7 +19,7 @@ eventsocket. With the WS as sole intake (eventsocket-SOT migration on
 
 import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import requests
 
@@ -29,21 +29,41 @@ class MotionDetectionMixin:
 
     def _is_motion_active(self) -> bool:
         """
-        Check if any configured motion sensor is currently reporting active.
+        Return True if motion should be considered "currently active" for
+        this instance.
 
-        Two-tier check (fastest to slowest):
-          Tier 1 — in-memory last_motion_time timestamp
-          Tier 2 — event_log: motion=active for any sensor within timeout
+        CANONICAL LOGIC (Elfege's directive 2026-05-19, after multiple
+        rounds of getting this wrong by confusing events with states):
+
+          Each sensor has a CURRENT STATE — the value of its most recent
+          motion event. State is 'active' or 'inactive'.
+
+            - ANY sensor currently 'active'  →  motion is on (keep on).
+              No timeout window applies; the sensor itself is reporting
+              motion right now. Lights stay on until ALL sensors flip
+              to 'inactive'.
+
+            - ALL sensors currently 'inactive'  →  start the off-timer
+              from the LATEST "went inactive" timestamp (i.e., the
+              moment the LAST sensor to be active finally flipped off).
+              If now - that timestamp < timeout_for_this_mode →
+              still in window → keep on. Else → off.
+
+          This is NOT a "find active EVENT within last N seconds" check.
+          The earlier version conflated event-in-window with current state
+          and missed the case where a sensor (e.g. the GE one) stays
+          IN 'active' state for 14 minutes between events — events-in-window
+          said "expired" but the sensor was literally still active the
+          whole time.
 
         Returns:
-            True if motion is considered active, False otherwise
+            True if motion is considered active (keep on), False otherwise.
         """
         functional = [
             sid for sid, ok in self._functional_sensors.items() if ok
         ]
 
         if not functional:
-            # No functional sensors — use fail-safe setting
             if self.get_setting('considerActiveWhenFail', False):
                 self.logger.warning("No functional sensors, assuming active (fail-safe)")
                 return True
@@ -51,67 +71,92 @@ class MotionDetectionMixin:
 
         timeout_seconds = self._get_timeout_seconds()
 
-        # --- Tier 1: in-memory timestamp (fast path for normal runtime) ---
-        if self._runtime.last_motion_time:
-            # Tz-aware comparison: motion.py stores last_motion_time as
-            # datetime.now(timezone.utc). Mixing naive here would raise.
-            age = (datetime.now(timezone.utc)
-                   - self._runtime.last_motion_time).total_seconds()
-            if age < timeout_seconds:
-                return True
-
-        # --- Tier 2: event_log query (DB-as-truth, no Hubitat HTTP) ---
-        # CANONICAL LOGIC (Elfege's Groovy original, 2026-05-18 directive):
+        # Query PER sensor: most recent motion event regardless of value.
+        # That row's event_value IS the sensor's current state; its
+        # received_at IS when that state began.
         #
-        #   "When was the last ACTIVE event?
-        #    timeSinceLastActive > timeout_for_this_mode  →  off
-        #    else                                          →  keep on"
-        #
-        # That's it. inactive events don't enter the decision. They mark
-        # when the PIR stopped reporting motion, but the off-timer
-        # anchors to the most recent ACTIVE event. If no active event
-        # in the last <timeout> seconds → motion is no longer active.
-        #
-        # No "defer when no data" branch. Absence of evidence is
-        # evidence of absence here: if the sensors aren't reporting
-        # active events, there's no reason to assume motion. Worst case
-        # post-restart: lights briefly off, next active event turns
-        # them right back on. That's correct behavior — better than
-        # keeping them on speculatively forever.
-        try:
-            pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
-            sensor_list = '(' + ','.join(str(s) for s in functional) + ')'
-            from datetime import timedelta
-            cutoff = (datetime.now(timezone.utc)
-                      - timedelta(seconds=timeout_seconds)).isoformat()
-            r = requests.get(
-                f"{pg}/event_log",
-                params={
-                    'canonical_device_id': f'in.{sensor_list}',
-                    'event_type': 'eq.motion',
-                    'event_value': 'eq.active',
-                    'received_at': f'gte.{cutoff}',
-                    'select': 'received_at,canonical_device_id',
-                    'order': 'received_at.desc',
-                    'limit': '1',
-                },
-                timeout=3,
-            )
-            if r.status_code == 200 and r.json():
-                row = r.json()[0]
-                self.logger.debug(
-                    f"Tier 2: motion=active on canon="
-                    f"{row['canonical_device_id']} "
-                    f"at {row['received_at']} (within {timeout_seconds}s)"
+        # PostgREST doesn't let us do "max per group" in one round trip
+        # without RPC, so we loop. With 1-5 sensors per instance the
+        # cost is negligible compared to one wide query + client-side
+        # group-by, and the code stays straightforward.
+        pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+        per_sensor_state: Dict[str, Tuple[str, str]] = {}
+        for sid in functional:
+            try:
+                r = requests.get(
+                    f"{pg}/event_log",
+                    params={
+                        'canonical_device_id': f'eq.{sid}',
+                        'event_type': 'eq.motion',
+                        'select': 'received_at,event_value',
+                        'order': 'received_at.desc',
+                        'limit': '1',
+                    },
+                    timeout=3,
                 )
-                return True
-            if r.status_code != 200:
+                if r.status_code == 200 and r.json():
+                    row = r.json()[0]
+                    per_sensor_state[str(sid)] = (
+                        (row.get('event_value') or '').lower(),
+                        row.get('received_at') or '',
+                    )
+            except Exception as e:
                 self.logger.warning(
-                    f"Tier 2 event_log query non-200: {r.status_code}"
+                    f"motion: per-sensor state query failed for canon={sid}: {e}"
                 )
+
+        # Rule 1: ANY sensor currently 'active' → motion is on.
+        currently_active = [
+            sid for sid, (val, _) in per_sensor_state.items() if val == 'active'
+        ]
+        if currently_active:
+            self.logger.debug(
+                f"motion: sensors {currently_active} currently in ACTIVE state"
+                f" — keep on"
+            )
+            return True
+
+        # Rule 2: ALL sensors currently 'inactive' (or unknown). Compute
+        # the off-timer anchor as the MAX of inactive timestamps.
+        inactive_ts = [
+            ts for val, ts in per_sensor_state.values() if val == 'inactive'
+        ]
+        if not inactive_ts:
+            # No motion events for any subscribed sensor at all (cold
+            # cache / fresh install). Per the canonical logic, no
+            # evidence of active = off. The first incoming active event
+            # will trip the on path immediately.
+            return False
+
+        # All-inactive moment = the latest of the inactive event times
+        # (the last sensor to fall silent). ISO-8601 strings compare
+        # lexically, so max() works directly.
+        latest_inactive_iso = max(inactive_ts)
+        try:
+            latest_inactive_at = datetime.fromisoformat(
+                latest_inactive_iso.replace('Z', '+00:00')
+            )
+            age_seconds = (
+                datetime.now(timezone.utc) - latest_inactive_at
+            ).total_seconds()
         except Exception as e:
-            # Network/DB error → fail closed (no motion).
-            self.logger.warning(f"Tier 2 motion check failed: {e}")
+            self.logger.warning(
+                f"motion: failed to parse latest_inactive {latest_inactive_iso!r}: {e}"
+            )
+            return False
+
+        if age_seconds < timeout_seconds:
+            self.logger.debug(
+                f"motion: all sensors inactive since {latest_inactive_iso} "
+                f"(age={age_seconds:.1f}s < {timeout_seconds}s) — keep on"
+            )
+            return True
+
+        self.logger.debug(
+            f"motion: all sensors inactive since {latest_inactive_iso} "
+            f"(age={age_seconds:.1f}s ≥ {timeout_seconds}s) — turn off"
+        )
+        return False
 
         # No active event in the timeout window → motion is off.
         return False

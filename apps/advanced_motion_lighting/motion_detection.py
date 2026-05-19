@@ -61,16 +61,26 @@ class MotionDetectionMixin:
                 return True
 
         # --- Tier 2: event_log query (DB-as-truth, no Hubitat HTTP) ---
-        # ONE query that asks "is there any motion=active event for ANY of
-        # these sensors within the last <timeout> seconds?" PostgREST handles
-        # the FROM clause, we just filter via the in-list operator + a time
-        # window. Returns at most 1 row — we only need a yes/no.
+        # CANONICAL LOGIC (Elfege's Groovy original, 2026-05-18 directive):
+        #
+        #   "When was the last ACTIVE event?
+        #    timeSinceLastActive > timeout_for_this_mode  →  off
+        #    else                                          →  keep on"
+        #
+        # That's it. inactive events don't enter the decision. They mark
+        # when the PIR stopped reporting motion, but the off-timer
+        # anchors to the most recent ACTIVE event. If no active event
+        # in the last <timeout> seconds → motion is no longer active.
+        #
+        # No "defer when no data" branch. Absence of evidence is
+        # evidence of absence here: if the sensors aren't reporting
+        # active events, there's no reason to assume motion. Worst case
+        # post-restart: lights briefly off, next active event turns
+        # them right back on. That's correct behavior — better than
+        # keeping them on speculatively forever.
         try:
             pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
-            # PostgREST in.() takes a comma-separated list inside parens
             sensor_list = '(' + ','.join(str(s) for s in functional) + ')'
-            # Compute cutoff as ISO. Use UTC explicitly; event_log.received_at
-            # is TIMESTAMPTZ stored in UTC.
             from datetime import timedelta
             cutoff = (datetime.now(timezone.utc)
                       - timedelta(seconds=timeout_seconds)).isoformat()
@@ -87,39 +97,21 @@ class MotionDetectionMixin:
                 },
                 timeout=3,
             )
-            if r.status_code == 200:
-                rows = r.json()
-                if rows:
-                    row = rows[0]
-                    self.logger.debug(
-                        f"Sensor canon={row['canonical_device_id']} "
-                        f"motion=active recorded at {row['received_at']} "
-                        f"(within {timeout_seconds}s timeout) — Tier 2 hit"
-                    )
-                    return True
-            else:
+            if r.status_code == 200 and r.json():
+                row = r.json()[0]
+                self.logger.debug(
+                    f"Tier 2: motion=active on canon="
+                    f"{row['canonical_device_id']} "
+                    f"at {row['received_at']} (within {timeout_seconds}s)"
+                )
+                return True
+            if r.status_code != 200:
                 self.logger.warning(
                     f"Tier 2 event_log query non-200: {r.status_code}"
                 )
         except Exception as e:
-            # Network/DB error → fail closed (no motion). Don't fail open
-            # because that would leave lights on indefinitely if the DB is
-            # the thing that's broken.
+            # Network/DB error → fail closed (no motion).
             self.logger.warning(f"Tier 2 motion check failed: {e}")
 
-        # Post-restart safety: if Tier 1 has nothing (no in-memory motion
-        # observed yet this process lifetime) AND Tier 2 returned no rows,
-        # we have *no information* — that's not the same as "no motion".
-        # Returning False here would cause master() to turn lights off
-        # 5s after every restart while the user is still in the room.
-        # Real motion-inactive transitions go through the event handler
-        # which calls schedule_timeout(); that path remains the
-        # authoritative "no motion" signal. Until then, defer.
-        if self._runtime.last_motion_time is None:
-            self.logger.info(
-                "No motion data yet (in-memory empty + event_log empty in "
-                "window). Deferring; not turning lights off without evidence."
-            )
-            return True
-
+        # No active event in the timeout window → motion is off.
         return False

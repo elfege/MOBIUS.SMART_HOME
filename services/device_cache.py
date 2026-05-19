@@ -324,36 +324,60 @@ class DeviceCache:
         """
         key = str(device_id)
 
-        # Update memory cache
-        if key in self._memory_cache:
-            attrs = self._memory_cache[key].get('attributes', {})
-            attrs[attribute_name] = attribute_value
-            self._memory_cache[key]['attributes'] = attrs
-            self._memory_cache[key]['last_synced_at'] = (
-                datetime.now(timezone.utc).isoformat()
-            )
-            self._memory_cache[key]['sync_source'] = 'webhook'
+        # Memory cache — UPSERT (create entry if not present).
+        # Previously this was guard-gated on `key in self._memory_cache`,
+        # so devices that never went through the bulk-import path got no
+        # cache entry, ever. That broke the on-already-on / off-already-off
+        # dedup downstream: AML's `_turn_off_switch` returns early only if
+        # cache says switch=='off', and an absent device means dedup is
+        # skipped — every periodic master() tick fires a redundant command.
+        # Caught live 2026-05-18 on canon 104 (Light Kitchen): 1 row in
+        # device_cache for the whole system.
+        if key not in self._memory_cache:
+            try:
+                cid_int = int(device_id)
+            except (TypeError, ValueError):
+                cid_int = device_id
+            self._memory_cache[key] = {
+                "device_id": cid_int,
+                "attributes": {},
+            }
+        attrs = self._memory_cache[key].setdefault('attributes', {}) or {}
+        attrs[attribute_name] = attribute_value
+        self._memory_cache[key]['attributes'] = attrs
+        self._memory_cache[key]['last_synced_at'] = (
+            datetime.now(timezone.utc).isoformat()
+        )
+        self._memory_cache[key]['sync_source'] = 'webhook'
 
-        # Update database using PATCH
+        # DB upsert. We can't PATCH for missing rows, so use POST with
+        # `on_conflict=device_id` + `resolution=merge-duplicates`. The PK
+        # is `device_id` (BIGINT not null) so the upsert is well-defined.
+        # We send the full attribute dict merged with the new value;
+        # PostgREST replaces the JSONB column (not deep-merge), so we
+        # need the merged dict, not just the new key.
         try:
-            # First get current device to merge attributes
-            current = self.get_device(device_id)
-            if current:
-                attrs = current.get('attributes', {})
-                attrs[attribute_name] = attribute_value
-
-                response = requests.patch(
-                    f"{self.postgrest_url}/device_cache",
-                    params={"device_id": f"eq.{key}"},
-                    json={
-                        "attributes": attrs,
-                        "last_synced_at": datetime.now(timezone.utc).isoformat(),
-                        "sync_source": "webhook"
-                    },
-                    headers={"Content-Type": "application/json"},
-                    timeout=5
-                )
-                return response.status_code in (200, 204)
+            try:
+                cid_int = int(device_id)
+            except (TypeError, ValueError):
+                cid_int = device_id
+            response = requests.post(
+                f"{self.postgrest_url}/device_cache"
+                f"?on_conflict=device_id",
+                json={
+                    "device_id": cid_int,
+                    "attributes": attrs,
+                    "last_synced_at":
+                        datetime.now(timezone.utc).isoformat(),
+                    "sync_source": "webhook",
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates",
+                },
+                timeout=5,
+            )
+            return response.status_code in (200, 201, 204)
         except Exception as e:
             self.logger.error(f"Failed to update device attribute: {e}", exc_info=True)
 

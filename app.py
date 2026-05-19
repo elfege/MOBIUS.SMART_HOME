@@ -959,12 +959,20 @@ async def get_devices_by_categories(categories: str = Query(...)):
         )
         r.raise_for_status()
         all_devices = r.json()
+        # Case-insensitive capability matching. Hubitat ships capabilities
+        # as PascalCase ("MotionSensor", "Switch") but wizard configs use
+        # camelCase ("motionSensor", "switch") in places. The naive `c in
+        # caps` would silently return empty for every category. Build a
+        # lowercase capability set per device once and compare lowered
+        # category names against it.
         out = {c: [] for c in cats}
+        cats_lower = {c.lower(): c for c in cats}
         for d in all_devices:
             caps = d.get('capabilities') or []
-            for c in cats:
-                if c in caps:
-                    out[c].append(d)
+            caps_lower = {str(c).lower() for c in caps}
+            for cat_lower, cat_orig in cats_lower.items():
+                if cat_lower in caps_lower:
+                    out[cat_orig].append(d)
         return out
     except Exception as e:
         logger.error(f"get_devices_by_categories: {e}", exc_info=True)

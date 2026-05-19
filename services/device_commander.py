@@ -194,6 +194,7 @@ class DeviceCommander:
         args: Optional[List] = None,
         verify: bool = True,
         device_name: str = "",
+        instance_id: Optional[int] = None,
     ) -> CommandResult:
         """
         Send a command to a device asynchronously (dispatched to thread).
@@ -237,7 +238,7 @@ class DeviceCommander:
             result = await loop.run_in_executor(
                 self._executor,
                 self._execute_command_sync,
-                device_id, command, args, verify, device_name,
+                device_id, command, args, verify, device_name, instance_id,
             )
         except Exception as e:
             logger.error(
@@ -264,6 +265,7 @@ class DeviceCommander:
         args: Optional[List] = None,
         verify: bool = True,
         device_name: str = "",
+        instance_id: Optional[int] = None,
     ) -> CommandResult:
         """
         Send a command to a device synchronously.
@@ -307,7 +309,7 @@ class DeviceCommander:
         try:
             future = self._executor.submit(
                 self._execute_command_sync,
-                device_id, command, args, verify, device_name,
+                device_id, command, args, verify, device_name, instance_id,
             )
             result = future.result(timeout=self.command_timeout)
         except Exception as e:
@@ -356,6 +358,7 @@ class DeviceCommander:
         hub_name: str,
         command: str,
         args: Optional[List],
+        instance_id: Optional[int] = None,
     ) -> Optional[int]:
         """
         Insert a 'pending' device_commands row at command issue time.
@@ -392,6 +395,11 @@ class DeviceCommander:
                 'max_attempts': 1,
                 'outcome': 'pending',
             }
+            # Thread the instance_id through so "who issued this command?"
+            # is answerable from the DB. NULL means "didn't pass one"
+            # (e.g., a direct curl /send-command call without context).
+            if instance_id is not None:
+                payload['instance_id'] = int(instance_id)
             r = self._db_http.post(
                 f'{self._postgrest_url}/device_commands',
                 json=payload,
@@ -554,6 +562,7 @@ class DeviceCommander:
         args: Optional[List],
         verify: bool,
         device_name: str,
+        instance_id: Optional[int] = None,
     ) -> CommandResult:
         """
         Synchronous command execution with nested retries and native-hub routing.
@@ -609,6 +618,7 @@ class DeviceCommander:
             hub_name=hub_name,
             command=command,
             args=args,
+            instance_id=instance_id,
         )
 
         # Resolve expected state for verification

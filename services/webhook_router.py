@@ -672,12 +672,25 @@ class WebhookRouter:
             )
 
             # Set new mode to active (upsert).
+            # `mode_id` is NOT NULL + UNIQUE — derive a stable id from
+            # the name so re-emerging modes hit the existing row instead
+            # of failing with a not-null violation that silently leaves
+            # the table in is_active=false state (seen live 2026-05-18).
             # `updated_at` intentionally omitted — postgres default fires
             # the correct UTC instant; naive datetime.now() would store
             # 4h off because PostgREST session is UTC.
+            mode_id = mode_name.lower().replace(' ', '_')[:50]
+            # `on_conflict=mode_id` is REQUIRED for the upsert because
+            # mode_id is a UNIQUE constraint (not the PRIMARY KEY which
+            # is `id`). Without this param PostgREST does ON CONFLICT
+            # against the PK only, fails the unique-violation, and
+            # returns 409 — leaving is_active=false on whatever the
+            # prior PATCH deactivated. Caught live 2026-05-18.
             requests.post(
-                f"{self.postgrest_url}/location_modes",
+                f"{self.postgrest_url}/location_modes"
+                f"?on_conflict=mode_id",
                 json={
+                    'mode_id': mode_id,
                     'mode_name': mode_name,
                     'is_active': True,
                 },

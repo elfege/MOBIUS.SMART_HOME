@@ -397,6 +397,9 @@ def run_db_migrations():
         "ALTER TABLE hub_config ADD COLUMN IF NOT EXISTS admin_username VARCHAR(80)",
         "ALTER TABLE hub_config ADD COLUMN IF NOT EXISTS admin_password VARCHAR(200)",
         "ALTER TABLE hub_config ADD COLUMN IF NOT EXISTS admin_creds_index INTEGER",
+        # 2026-05-18: mode poller reads currentMode from the hub flagged
+        # is_primary=TRUE. No new column needed — is_primary already
+        # designates the authoritative hub for location-level concerns.
 
         # Grants
         "GRANT SELECT, INSERT, UPDATE, DELETE ON system_settings TO smarthome_anon",
@@ -551,6 +554,33 @@ async def lifespan(app: FastAPI):
         )
     except Exception as e:
         logger.warning(f"Hub TZ periodic refresh schedule failed: {e}")
+
+    # Hub-derived location-mode polling (2026-05-18).
+    # The eventsocket WS doesn't deliver LOCATION frames on Elfege's
+    # firmware (zero captured in raw_events across ~2.5k DEVICE frames).
+    # Pull `currentMode` from the authoritative hub every 60s and write
+    # location_modes + mode_change_log on transitions; route_mode_change
+    # fires so running AML instances see on_mode_change() the same way
+    # the WS path would have delivered it.
+    def _mode_poll_first_pass():
+        try:
+            from services.mode_poller import run_poll_pass
+            result = run_poll_pass()
+            logger.info(f"mode_poller startup pass: {result}")
+        except Exception as e:
+            logger.warning(f"mode_poller startup pass failed: {e}")
+
+    threading.Thread(
+        target=_mode_poll_first_pass,
+        name="startup-mode-poll",
+        daemon=True,
+    ).start()
+    try:
+        from services.mode_poller import schedule_poll_job
+        from services.scheduler_service import get_scheduler
+        schedule_poll_job(get_scheduler()._scheduler, interval_seconds=60)
+    except Exception as e:
+        logger.warning(f"mode_poller schedule failed: {e}")
 
     # Start Samsung TV client (WS + HTTP power-poll background tasks).
     # Config is read from env vars (set in docker-compose or start.sh).
@@ -829,6 +859,105 @@ async def get_instance_status(instance_id: int):
     }
 
 
+@app.get("/api/instances/{instance_id}/runtime-status", tags=["instances"])
+async def get_instance_runtime_status(instance_id: int):
+    """
+    Live runtime state of a running instance — what the debug-panel
+    countdown reads to show "time until next turn-off".
+
+    Returns a small JSON with:
+      - last_motion_time:  ISO UTC of the most recent motion=active event
+                           seen by this instance (None if never)
+      - timeout_seconds:   current effective no-motion timeout, after
+                           per-mode lookup + system-floor clamp
+      - timeout_at:        ISO UTC of when AML will next decide off
+                           (= last_motion_time + timeout_seconds);
+                           None if last_motion_time is None
+      - remaining_seconds: float — positive means "off pending in N s",
+                           zero/negative means "should have fired by now"
+                           (master() picks it up on the next tick)
+      - current_mode:      string from location_modes (DB-read, not Maker)
+      - is_motion_active:  current Tier-1+Tier-2 verdict
+      - is_paused:         persisted pause state
+      - is_running:        whether the instance is loaded in-memory
+
+    404 if the instance row doesn't exist. 200 with is_running=false
+    and null runtime fields when the instance is stopped.
+    """
+    from datetime import datetime, timezone
+    from services.instance_manager import get_instance_manager
+    manager = get_instance_manager()
+
+    instance = manager.get_instance(instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    running = manager.get_running_instance(instance_id)
+    out = {
+        "id": instance_id,
+        "label": instance.get("label"),
+        "is_running": running is not None,
+        "is_paused": instance.get("is_paused", False),
+        "last_motion_time": None,
+        "timeout_seconds": None,
+        # User's configured display unit ('seconds' or 'minutes'). The
+        # UI formats the countdown accordingly so a 5-min timeout reads
+        # "off in 4m 23s" and a 30-sec timeout reads "off in 18s".
+        "time_unit": (instance.get("settings") or {}).get("timeUnit", "seconds"),
+        "timeout_at": None,
+        "remaining_seconds": None,
+        "current_mode": None,
+        "is_motion_active": None,
+    }
+    if running is None:
+        return out
+
+    # Read in-memory runtime state. These are AML-specific attributes;
+    # other app types may not have them — defend with getattr.
+    rt = getattr(running, "_runtime", None)
+    last_motion = getattr(rt, "last_motion_time", None) if rt else None
+
+    timeout_seconds = None
+    try:
+        # _get_timeout_seconds is on the TimeoutMixin (AML); FanAutomation
+        # has a different path. Guard so we don't crash on non-AML types.
+        if hasattr(running, "_get_timeout_seconds"):
+            timeout_seconds = int(running._get_timeout_seconds())
+    except Exception as e:
+        logger.debug(f"runtime-status: _get_timeout_seconds failed: {e}")
+
+    try:
+        if hasattr(running, "_get_current_mode"):
+            out["current_mode"] = running._get_current_mode()
+    except Exception:
+        pass
+
+    try:
+        if hasattr(running, "_is_motion_active"):
+            out["is_motion_active"] = bool(running._is_motion_active())
+    except Exception:
+        pass
+
+    if last_motion is not None:
+        # last_motion_time is set tz-aware (datetime.now(timezone.utc));
+        # serialize to ISO and compute remaining if we have a timeout.
+        out["last_motion_time"] = last_motion.isoformat()
+        if timeout_seconds is not None:
+            from datetime import timedelta
+            timeout_at = last_motion + timedelta(seconds=timeout_seconds)
+            out["timeout_at"] = timeout_at.isoformat()
+            out["timeout_seconds"] = timeout_seconds
+            out["remaining_seconds"] = (
+                timeout_at - datetime.now(timezone.utc)
+            ).total_seconds()
+    elif timeout_seconds is not None:
+        # No motion observed yet this process lifetime — surface the
+        # configured timeout for the user but no countdown to anchor it to.
+        out["timeout_seconds"] = timeout_seconds
+
+    return out
+
+
 @app.post("/api/instances/{instance_id}/run", tags=["instances"])
 async def run_instance(instance_id: int):
     """
@@ -959,12 +1088,20 @@ async def get_devices_by_categories(categories: str = Query(...)):
         )
         r.raise_for_status()
         all_devices = r.json()
+        # Case-insensitive capability matching. Hubitat ships capabilities
+        # as PascalCase ("MotionSensor", "Switch") but wizard configs use
+        # camelCase ("motionSensor", "switch") in places. The naive `c in
+        # caps` would silently return empty for every category. Build a
+        # lowercase capability set per device once and compare lowered
+        # category names against it.
         out = {c: [] for c in cats}
+        cats_lower = {c.lower(): c for c in cats}
         for d in all_devices:
             caps = d.get('capabilities') or []
-            for c in cats:
-                if c in caps:
-                    out[c].append(d)
+            caps_lower = {str(c).lower() for c in caps}
+            for cat_lower, cat_orig in cats_lower.items():
+                if cat_lower in caps_lower:
+                    out[cat_orig].append(d)
         return out
     except Exception as e:
         logger.error(f"get_devices_by_categories: {e}", exc_info=True)

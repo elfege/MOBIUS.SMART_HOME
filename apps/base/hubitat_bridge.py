@@ -128,12 +128,18 @@ class HubitatMixin:
         try:
             commander = get_device_commander()
             device_name = self._get_device_display_name(device_id)
+            # Thread the instance_id through so device_commands.instance_id
+            # is populated. Without this, every command row is NULL in that
+            # column and post-hoc "who turned the light off?" debugging is
+            # impossible. self.instance_id is set on every running instance
+            # by InstanceManager.
             return commander.send_command_sync(
                 device_id=device_id,
                 command=command,
                 args=args,
                 verify=verify,
                 device_name=device_name,
+                instance_id=getattr(self, 'instance_id', None),
             )
         except Exception as e:
             self.logger.error(

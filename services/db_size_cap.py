@@ -36,17 +36,19 @@ logger = logging.getLogger(__name__)
 # scheduled_jobs added 2026-05-18 — it was missing entirely and grew to
 # 1.5GB (12k cancelled timeout rows + bloat) before being caught.
 CAPS = [
-    ('event_log',          1500 * 1024 * 1024, 'received_at'),
-    ('raw_events',         1500 * 1024 * 1024, 'received_at'),
-    ('event_routings',      400 * 1024 * 1024, 'enqueued_at'),
-    ('device_commands',     400 * 1024 * 1024, 'issued_at'),
-    ('scheduled_jobs',      100 * 1024 * 1024, 'created_at'),
-    ('instance_state_log',   50 * 1024 * 1024, 'occurred_at'),
+    ('raw_events',         2500 * 1024 * 1024, 'received_at'),
+    ('event_log',          2000 * 1024 * 1024, 'received_at'),
+    ('event_routings',      500 * 1024 * 1024, 'enqueued_at'),
+    ('device_commands',     500 * 1024 * 1024, 'issued_at'),
+    ('scheduled_jobs',      150 * 1024 * 1024, 'created_at'),
+    ('instance_state_log',  100 * 1024 * 1024, 'occurred_at'),
     ('mode_change_log',      25 * 1024 * 1024, 'became_active_at'),
     ('system_boot_log',      25 * 1024 * 1024, 'boot_at'),
 ]
-# Total budget: 4000 MB. Per-table individual caps trip earlier if any
-# single table runs away; the global ordering above is just preference.
+# Total budget: ~5.8 GB. raw_events is the largest because it's the
+# only place LOCATION-source frames would be captured and is the
+# authoritative forensic record (every WS frame regardless of source).
+# Per-table individual caps trip earlier if any single table runs away.
 
 PRUNE_TARGET_FRACTION = 0.85  # Prune down to 85% of cap so we don't
                               # re-trigger immediately on the next row.

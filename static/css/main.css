@@ -384,6 +384,63 @@ body {
     color: var(--color-terminal-blue);
 }
 
+/* When the device name is rendered as a link to the Hubitat admin page,
+   keep the same color and avoid the default link blue/underline; show
+   underline only on hover so it still reads as actionable. */
+a.debug-device {
+    color: var(--color-terminal-blue);
+    text-decoration: none;
+    cursor: pointer;
+}
+a.debug-device:hover {
+    text-decoration: underline;
+}
+
+/* Debug status banner (runtime state above the Event Log).
+   Shows: countdown to next AML turn-off, current location mode,
+   motion-active verdict, pause flag. */
+.debug-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.6rem;
+    margin: 0 0 0.35rem 0;
+    background: rgba(255,255,255,0.025);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    font-size: 0.85rem;
+    flex-wrap: wrap;
+}
+.debug-status-loading,
+.debug-status-muted {
+    opacity: 0.55;
+}
+.debug-status-error {
+    color: var(--color-danger, #e57373);
+}
+.debug-status-countdown {
+    color: var(--color-terminal-yellow);
+    font-variant-numeric: tabular-nums;
+}
+.debug-status-overdue {
+    color: var(--color-danger, #e57373);
+    font-variant-numeric: tabular-nums;
+}
+.debug-status-mode strong {
+    color: var(--color-terminal-blue);
+}
+.debug-status-motion-active {
+    color: var(--color-terminal-green);
+}
+.debug-status-motion-inactive {
+    opacity: 0.7;
+}
+.debug-status-paused {
+    color: var(--color-warning, #d6a13a);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+}
+
 .debug-event {
     color: var(--color-terminal-green);
 }

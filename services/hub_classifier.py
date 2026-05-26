@@ -741,15 +741,16 @@ def get_hub_for_device(hubitat_id: str) -> Optional[Dict[str, Any]]:
 
     postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
 
-    # JOIN against hub_config via the hub_id FK so hub_ip / hub_name come
-    # from the editable hubs table — devices.hub_ip is denormalized cache,
-    # hub_config is the source of truth. PostgREST embedded resource syntax:
-    # /devices?select=...,hub_config(...)
+    # Resolve hub_ip / hub_name from the editable hub_config (source of truth;
+    # devices.hub_ip is denormalized cache) via the hub_id FK. Two explicit
+    # queries rather than PostgREST resource-embedding: post the 2026-05-26
+    # schema split, both tables are dshub storage exposed as `api` VIEWS, and
+    # PostgREST cannot infer FK embedding through a view.
     try:
         resp = requests.get(
             f"{postgrest_url}/devices",
             params={
-                "select": "id,hubitat_id,label,hub_id,hub_config(hub_name,hub_ip,is_enabled)",
+                "select": "id,hubitat_id,label,hub_id",
                 "hubitat_id": f"eq.{key}",
             },
             timeout=3,
@@ -765,7 +766,19 @@ def get_hub_for_device(hubitat_id: str) -> Optional[Dict[str, Any]]:
                     f"in `devices` table — picking first ({rows[0].get('label')!r})"
                 )
             row = rows[0]
-            hub = row.get("hub_config") or {}
+            hub = {}
+            hub_id = row.get("hub_id")
+            if hub_id is not None:
+                hresp = requests.get(
+                    f"{postgrest_url}/hub_config",
+                    params={
+                        "select": "hub_name,hub_ip,is_enabled",
+                        "id": f"eq.{hub_id}",
+                    },
+                    timeout=3,
+                )
+                if hresp.status_code == 200 and hresp.json():
+                    hub = hresp.json()[0]
             result = {
                 "id":         row["id"],
                 "hub_id":     row.get("hub_id"),

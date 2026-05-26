@@ -309,6 +309,59 @@ class HubitatAdminClient:
                 pass  # not parseable JSON despite header — treat status as truth
         return (True, False)
 
+    def probe_command_path(self, device_id: int) -> Dict[str, Any]:
+        """
+        Non-mutating health probe of the /device/runmethod TRANSPORT.
+
+        Sends a no-arg `refresh` (harmless) and reports which contract the
+        hub accepts. This is the canary used by hub_contract_watch to detect
+        the kind of firmware contract flip that broke commands on 2026-05-26.
+
+        We care about the *transport*, not whether the device obeys: a hub on
+        the JSON contract answers HTTP 200 (even `{success:false}` if the
+        device lacks refresh) → transport OK. Only an HTTP >= 400 means the
+        hub rejected the request shape itself.
+
+        Returns:
+            {
+              "ok": bool,                 # transport accepted by some contract
+              "contract": "json"|"form"|"none",
+              "status": int,              # last HTTP status observed
+              "error": str|None,          # body snippet when ok is False
+            }
+        """
+        # JSON contract (current firmware 2.5.0.x).
+        try:
+            r = self._request(
+                "POST", "/device/runmethod",
+                json={"id": int(device_id), "method": "refresh", "args": []},
+                allow_redirects=False,
+            )
+            if not self._runmethod_result(r)[1]:  # not transport_failed
+                return {"ok": True, "contract": "json",
+                        "status": r.status_code, "error": None}
+            last_status, last_body = r.status_code, r.text[:160]
+        except Exception as e:
+            last_status, last_body = 0, str(e)[:160]
+
+        # Legacy form-urlencoded contract (older firmware).
+        try:
+            r2 = self._request(
+                "POST", "/device/runmethod",
+                data={"id": str(device_id), "method": "refresh"},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                allow_redirects=False,
+            )
+            if not self._runmethod_result(r2)[1]:
+                return {"ok": True, "contract": "form",
+                        "status": r2.status_code, "error": None}
+            last_status, last_body = r2.status_code, r2.text[:160]
+        except Exception as e:
+            last_status, last_body = 0, str(e)[:160]
+
+        return {"ok": False, "contract": "none",
+                "status": last_status, "error": last_body}
+
 
 def to_maker_shape(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Normalize a `/device/fullJson/<id>` response to the Maker-API shape

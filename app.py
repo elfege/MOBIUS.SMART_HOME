@@ -435,6 +435,17 @@ def run_db_migrations():
         )
         conn.autocommit = True
         cur = conn.cursor()
+        # Schema split (migration 007): tables live in dshub/dsapp/dscore, not
+        # public. Ensure those schemas exist and resolve unqualified names to
+        # them, so the idempotent CREATE TABLE IF NOT EXISTS / ALTER statements
+        # below find the real (moved) tables instead of recreating empty
+        # shadows in public. The live split is performed by 007 + init-db.sql;
+        # this only keeps the catch-up migrations pointing at the right place.
+        cur.execute("CREATE SCHEMA IF NOT EXISTS dshub")
+        cur.execute("CREATE SCHEMA IF NOT EXISTS dsapp")
+        cur.execute("CREATE SCHEMA IF NOT EXISTS dscore")
+        cur.execute("CREATE SCHEMA IF NOT EXISTS api")
+        cur.execute("SET search_path = dshub, dsapp, dscore, public")
         for sql in migrations:
             cur.execute(sql)
         # Tell PostgREST to reload its schema cache so columns added by the

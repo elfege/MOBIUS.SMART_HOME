@@ -291,6 +291,18 @@ def run_db_migrations():
             updated_at              TIMESTAMPTZ DEFAULT NOW()
         )""",
 
+        # Admin-API contract-drift watch (2026-05-26). Firmware 2.5.0.143
+        # changed POST /device/runmethod from form-encoded to JSON with no
+        # backward compat, breaking all commands. hub_contract_watch polls
+        # firmware version + a runmethod canary per hub; these columns hold
+        # the per-hub result, surfaced on the Hubs settings cards.
+        "ALTER TABLE hub_health ADD COLUMN IF NOT EXISTS platform_version TEXT",
+        "ALTER TABLE hub_health ADD COLUMN IF NOT EXISTS platform_version_seen_at TIMESTAMPTZ",
+        "ALTER TABLE hub_health ADD COLUMN IF NOT EXISTS command_path_ok BOOLEAN",
+        "ALTER TABLE hub_health ADD COLUMN IF NOT EXISTS command_path_contract VARCHAR(10)",
+        "ALTER TABLE hub_health ADD COLUMN IF NOT EXISTS command_path_checked_at TIMESTAMPTZ",
+        "ALTER TABLE hub_health ADD COLUMN IF NOT EXISTS command_path_error TEXT",
+
         # Grant PostgREST access to all new tables + their sequences.
         "GRANT SELECT, INSERT, UPDATE, DELETE ON event_routings TO smarthome_anon",
         "GRANT SELECT, INSERT, UPDATE, DELETE ON device_commands TO smarthome_anon",
@@ -425,6 +437,10 @@ def run_db_migrations():
         cur = conn.cursor()
         for sql in migrations:
             cur.execute(sql)
+        # Tell PostgREST to reload its schema cache so columns added by the
+        # ALTERs above (e.g. hub_health contract-watch columns) are visible
+        # to the REST API immediately, not just after the next restart.
+        cur.execute("NOTIFY pgrst, 'reload schema'")
         cur.close()
         conn.close()
         logger.info("DB migrations applied successfully")
@@ -581,6 +597,32 @@ async def lifespan(app: FastAPI):
         schedule_poll_job(get_scheduler()._scheduler, interval_seconds=60)
     except Exception as e:
         logger.warning(f"mode_poller schedule failed: {e}")
+
+    # Hubitat admin-API contract-drift watch (2026-05-26).
+    # Firmware 2.5.0.143 changed POST /device/runmethod from form-encoded to
+    # JSON with no backward compat, silently breaking every command. This
+    # watcher polls each hub's firmware version + a harmless runmethod canary
+    # and records the result in hub_health (surfaced on the Hubs cards), so the
+    # next contract flip announces itself instead of being diagnosed by hand.
+    # First pass in a background thread (network × N hubs); 6h recurring.
+    def _contract_watch_first_pass():
+        try:
+            from services.hub_contract_watch import run_watch_pass
+            result = run_watch_pass()
+            logger.info(f"contract_watch startup pass: {result}")
+        except Exception as e:
+            logger.warning(f"contract_watch startup pass failed: {e}")
+    threading.Thread(
+        target=_contract_watch_first_pass,
+        name="startup-contract-watch",
+        daemon=True,
+    ).start()
+    try:
+        from services.hub_contract_watch import schedule_watch_job
+        from services.scheduler_service import get_scheduler
+        schedule_watch_job(get_scheduler()._scheduler, interval_seconds=21600)
+    except Exception as e:
+        logger.warning(f"contract_watch schedule failed: {e}")
 
     # Start Samsung TV client (WS + HTTP power-poll background tasks).
     # Config is read from env vars (set in docker-compose or start.sh).

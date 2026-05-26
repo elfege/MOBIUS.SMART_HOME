@@ -31,7 +31,7 @@ Per-hub instance kept in module-level dict, keyed by hub_ip.
 import logging
 import os
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -179,30 +179,67 @@ class HubitatAdminClient:
         argument: Optional[str] = None,
     ) -> bool:
         """
-        Issue a command via the admin API's runmethod endpoint:
-          POST /device/runmethod
-          Content-Type: application/x-www-form-urlencoded
-          body: id=<device_id>&method=<command>[&arg=<argument>]
+        Issue a command via the admin API's runmethod endpoint.
 
-        Endpoint shape verified against live hubs via Elfege's chrome_nvr
-        function in .bash_utils (firmware 2.5.x).  Success = HTTP 2xx OR 3xx
-        (302 is the standard admin-form-flow response).
+        CURRENT contract (Hubitat firmware 2.5.0.x, C-8):
+          POST /device/runmethod
+          Content-Type: application/json
+          body: {"id": <id>, "method": "<cmd>",
+                 "args": [{"type": "<NUMBER|STRING>", "value": <v>}, ...]}
+          No-arg commands send "args": []. Success = HTTP 200 with a JSON
+          body {"success": true}. Shape taken from the live UI's
+          /ui2/js/vue-hub2.min.js.
+
+        HISTORY: firmware 2.5.0.x changed this endpoint from the old
+        form-urlencoded shape (id=&method=&arg=&value=) to JSON, with NO
+        backward compatibility. A hub that receives the wrong body type
+        answers with a bare HTTP 500 ("Server error") rather than a 415,
+        which is why this surfaced as "every command fails verification
+        with got=None" instead of an obvious content-type error.
+
+        DEFENSIVE: we try JSON first; if the hub rejects it at the
+        transport level (>=400 — i.e. it is on a different/older firmware
+        that wants the legacy shape), we retry ONCE with the old
+        form-urlencoded body. A 200 with {"success": false} is a genuine
+        command failure, NOT a transport problem, so it does NOT trigger
+        the fallback. This keeps a mixed-firmware fleet working and makes
+        the next contract flip self-healing in one direction.
         """
-        body = {"id": str(device_id), "method": command}
-        if argument is not None:
-            # Hubitat's runmethod takes the argument as a separate field.
-            # Field name varies by firmware ("arg" or "value"); we send
-            # both so either parses.
-            body["arg"] = str(argument)
-            body["value"] = str(argument)
+        # --- attempt 1: current JSON contract ---
+        json_payload = {
+            "id": int(device_id) if str(device_id).isdigit() else device_id,
+            "method": command,
+            "args": self._build_runmethod_args(argument),
+        }
         try:
             r = self._request(
                 "POST", "/device/runmethod",
-                data=body,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                json=json_payload,
                 allow_redirects=False,
             )
-            ok = (200 <= r.status_code < 400)
+            ok, transport_failed = self._runmethod_result(r)
+
+            # --- attempt 2 (fallback): legacy form-urlencoded contract ---
+            if transport_failed:
+                logger.warning(
+                    f"hubitat_admin [{self.hub_name}] device {device_id}/"
+                    f"{command}: JSON runmethod rejected (HTTP {r.status_code}) "
+                    f"— hub may be on the legacy contract; retrying form-encoded"
+                )
+                body = {"id": str(device_id), "method": command}
+                if argument is not None:
+                    body["arg"] = str(argument)
+                    body["value"] = str(argument)
+                r_fallback = self._request(
+                    "POST", "/device/runmethod",
+                    data=body,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    allow_redirects=False,
+                )
+                ok2, _ = self._runmethod_result(r_fallback)
+                if ok2:
+                    r, ok = r_fallback, True
+
             if ok:
                 logger.info(
                     f"hubitat_admin [{self.hub_name}] device {device_id}/"
@@ -211,8 +248,8 @@ class HubitatAdminClient:
             else:
                 logger.warning(
                     f"hubitat_admin [{self.hub_name}] device {device_id}/"
-                    f"{command} non-2xx/3xx: HTTP {r.status_code} "
-                    f"body={r.text[:120]!r}"
+                    f"{command} runmethod not OK: HTTP {r.status_code} "
+                    f"body={r.text[:160]!r}"
                 )
             return ok
         except Exception as e:
@@ -221,6 +258,56 @@ class HubitatAdminClient:
                 f"({device_id}/{command}) failed: {e}"
             )
             return False
+
+    @staticmethod
+    def _build_runmethod_args(argument: Optional[str]) -> List[Dict[str, Any]]:
+        """
+        Build the JSON `args` array for /device/runmethod.
+
+        No argument → []. Single argument → one typed entry. Type is
+        inferred the way the UI declares it: numeric values are NUMBER,
+        everything else STRING. Hubitat coerces within reason, but sending
+        the right type avoids parameter-binding surprises (e.g. setLevel).
+        """
+        if argument is None:
+            return []
+        s = str(argument)
+        try:
+            num = float(s)
+            # send an int when it is integral (setLevel expects 0-100)
+            value: Any = int(num) if num.is_integer() else num
+            return [{"type": "NUMBER", "value": value}]
+        except (TypeError, ValueError):
+            return [{"type": "STRING", "value": s}]
+
+    @staticmethod
+    def _runmethod_result(r: requests.Response) -> Tuple[bool, bool]:
+        """
+        Interpret a /device/runmethod response.
+
+        Returns (ok, transport_failed):
+          - ok             — the command was accepted AND not reported failed.
+          - transport_failed — the hub rejected the request shape itself
+            (HTTP >= 400), signalling we may be speaking the wrong contract
+            and should try the fallback encoding.
+
+        A 2xx/3xx with a JSON body {"success": false} is a real command
+        failure (ok=False) but NOT a transport failure — we do not retry
+        with a different encoding in that case.
+        """
+        transport_failed = r.status_code >= 400
+        if transport_failed:
+            return (False, True)
+        # 2xx/3xx — inspect the JSON envelope if present.
+        ctype = r.headers.get("Content-Type", "")
+        if "application/json" in ctype:
+            try:
+                payload = r.json()
+                if isinstance(payload, dict) and payload.get("success") is False:
+                    return (False, False)
+            except ValueError:
+                pass  # not parseable JSON despite header — treat status as truth
+        return (True, False)
 
 
 def to_maker_shape(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

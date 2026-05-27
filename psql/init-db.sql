@@ -763,3 +763,45 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA dscore GRANT USAGE,SELECT ON SEQUENCES TO sma
 
 NOTIFY pgrst, 'reload schema';
 COMMIT;
+
+-- =============================================================================
+-- MIGRATION 008 (2026-05-26) — classifier dedup by (hub_ip,hubitat_id) +
+-- linkedDevice/primary rule. Retires UNIQUE(label)+SKIP_MESH; adds
+-- is_name_duplicate; upsert_device keys on identity and sets hub_id.
+-- See psql/migrations/008_classifier_dedup_linkeddevice_primary_2026_05_26.sql
+-- =============================================================================
+BEGIN;
+ALTER TABLE dshub.devices DROP CONSTRAINT IF EXISTS devices_label_key;
+ALTER TABLE dshub.devices ADD COLUMN IF NOT EXISTS is_name_duplicate BOOLEAN NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS idx_devices_label ON dshub.devices(label);
+
+DROP FUNCTION IF EXISTS api.upsert_device(text,text,text,text,text,text,jsonb,jsonb);
+DROP FUNCTION IF EXISTS api.upsert_device(text,text,integer,text,text,text,text,jsonb,jsonb,boolean);
+CREATE OR REPLACE FUNCTION api.upsert_device(
+    p_hub_ip TEXT, p_hubitat_id TEXT, p_hub_id INTEGER, p_name TEXT, p_label TEXT,
+    p_device_type TEXT, p_protocol TEXT, p_capabilities JSONB, p_attributes JSONB,
+    p_is_name_duplicate BOOLEAN
+) RETURNS TABLE(device_id BIGINT, action TEXT)
+LANGUAGE plpgsql SET search_path = dshub, public AS $$
+DECLARE v_id BIGINT;
+BEGIN
+    SELECT id INTO v_id FROM devices WHERE hub_ip = p_hub_ip AND hubitat_id = p_hubitat_id;
+    IF v_id IS NULL THEN
+        INSERT INTO devices (hub_ip, hubitat_id, hub_id, name, label, device_type, protocol,
+             capabilities, attributes, is_name_duplicate, last_synced_at)
+        VALUES (p_hub_ip, p_hubitat_id, p_hub_id, p_name, p_label, p_device_type, p_protocol,
+             p_capabilities, p_attributes, p_is_name_duplicate, NOW())
+        RETURNING id INTO v_id;
+        device_id := v_id; action := 'INSERT'; RETURN NEXT;
+    ELSE
+        UPDATE devices SET hub_id=p_hub_id, name=p_name, label=p_label, device_type=p_device_type,
+            protocol=p_protocol, capabilities=p_capabilities, attributes=p_attributes,
+            is_name_duplicate=p_is_name_duplicate, last_synced_at=NOW()
+        WHERE id = v_id;
+        device_id := v_id; action := 'UPDATE'; RETURN NEXT;
+    END IF;
+END; $$;
+GRANT EXECUTE ON FUNCTION api.upsert_device(text,text,integer,text,text,text,text,jsonb,jsonb,boolean) TO smarthome_anon;
+CREATE OR REPLACE VIEW api.devices AS SELECT * FROM dshub.devices;
+NOTIFY pgrst, 'reload schema';
+COMMIT;

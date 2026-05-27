@@ -512,7 +512,7 @@ async def lifespan(app: FastAPI):
     import threading
     def _startup_classification():
         try:
-            from services.hub_classifier import run_classification, invalidate_cache
+            from services.device_to_hubs_classifier import run_classification, invalidate_cache
             logger.info("Running startup hub classification...")
             result = run_classification()
             invalidate_cache()
@@ -1168,7 +1168,7 @@ async def refresh_devices_from_hubitat():
     `devices` table. Use sparingly — the reconcile poll already keeps this
     fresh in the background. Returns the count of devices refreshed.
     """
-    from services.hub_classifier import run_classification, invalidate_cache
+    from services.device_to_hubs_classifier import run_classification, invalidate_cache
     try:
         result = run_classification()
         invalidate_cache()
@@ -1184,7 +1184,7 @@ async def refresh_devices_from_hubitat():
 @app.get("/api/devices/{device_id}", tags=["devices"])
 async def get_device(device_id: str):
     """Get device details."""
-    from services.hub_classifier import fetch_device_live
+    from services.device_to_hubs_classifier import fetch_device_live
 
     try:
         device = fetch_device_live(device_id)
@@ -1521,7 +1521,7 @@ async def run_hub_classification():
     This enables the DeviceCommander to route commands directly to
     the hub that physically owns each device (bypassing Hub Mesh relay).
     """
-    from services.hub_classifier import run_classification, invalidate_cache
+    from services.device_to_hubs_classifier import run_classification, invalidate_cache
     import asyncio
 
     try:
@@ -2022,7 +2022,7 @@ async def matter_update_match(body: UpdateMatterDeviceMatchRequest):
     # Get the Maker API device name for display
     maker_name = ''
     try:
-        from services.hub_classifier import fetch_device_live
+        from services.device_to_hubs_classifier import fetch_device_live
         device = fetch_device_live(body.maker_api_device_id)
         if device:
             maker_name = device.get('label') or device.get('name', '')
@@ -2315,7 +2315,7 @@ async def get_test_devices(instance_id: int):
     to the browser.
     """
     from services.instance_manager import get_instance_manager
-    from services.hub_classifier import fetch_device_live
+    from services.device_to_hubs_classifier import fetch_device_live
 
     manager = get_instance_manager()
     instance = manager.get_instance(instance_id)
@@ -2328,7 +2328,7 @@ async def get_test_devices(instance_id: int):
     # via the canonical devices row joined with hub_config — used to enrich
     # the response so the frontend can render hub-specific links and open
     # one EventSocket per distinct hub without an extra roundtrip.
-    from services.hub_classifier import get_device_by_canonical_id
+    from services.device_to_hubs_classifier import get_device_by_canonical_id
 
     result = {}
     for category, device_ids in device_selections.items():
@@ -2684,7 +2684,7 @@ async def list_hubs():
 def _invalidate_hub_caches():
     """Drop in-process caches that reference hub_config rows."""
     try:
-        from services.hub_classifier import invalidate_device_lookup_cache
+        from services.device_to_hubs_classifier import invalidate_device_lookup_cache
         invalidate_device_lookup_cache()
     except Exception:
         pass

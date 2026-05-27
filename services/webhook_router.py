@@ -314,7 +314,7 @@ class WebhookRouter:
         # displayNames, (b) any caller that already passes canonical ids
         # in the deviceId field.
         if canonical_id is None and device_id.isdigit():
-            from services.hub_classifier import get_device_by_canonical_id
+            from services.device_to_hubs_classifier import get_device_by_canonical_id
             row = get_device_by_canonical_id(int(device_id))
             if row is not None:
                 canonical_id = row["id"]

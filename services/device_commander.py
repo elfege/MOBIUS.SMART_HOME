@@ -523,7 +523,7 @@ class DeviceCommander:
             Falls back to (default_client, device_id, 'default') if unresolvable.
         """
         try:
-            from services.hub_classifier import (
+            from services.device_to_hubs_classifier import (
                 get_device_by_canonical_id, get_hub_for_device,
             )
             from services.hubitat_client import get_hub_client_by_ip

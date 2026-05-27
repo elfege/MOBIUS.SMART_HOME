@@ -261,7 +261,7 @@ class E2ETestRunner:
             Dict mapping device_id -> {attribute: value}
         """
         from services.hubitat_client import get_default_client, get_hub_client_by_ip
-        from services.hub_classifier import (
+        from services.device_to_hubs_classifier import (
             get_device_by_canonical_id, get_hub_for_device,
         )
         default_client = get_default_client()
@@ -509,7 +509,7 @@ class E2ETestRunner:
             retry_delay: Seconds between retries (default: 1.0)
         """
         from services.hubitat_client import get_default_client, get_hub_client_by_ip
-        from services.hub_classifier import (
+        from services.device_to_hubs_classifier import (
             get_device_by_canonical_id, get_hub_for_device,
         )
 

@@ -1,0 +1,160 @@
+# ─────────────────────────────────────────────────────────────────────
+# auto-tag.yml — auto-version + tag + GitHub Release on push to main.
+#
+# Analogous to 0_MOBIUS.NVR's release automation, but where NVR computes
+# the version bump in LOCAL git hooks (scripts/_auto_version.sh), here the
+# whole thing lives in a GitHub Action.
+#
+# Bump level is decided ONLY by the volume of PYTHON CODE changed since the
+# last tag — not docs, not templates, not SQL, not config. Rationale
+# (Elfège, 2026-05-26): the version should track how much actual program
+# logic moved, so a docs-only or template-only push does not cut a release.
+#
+#   .py lines changed (added+deleted) since last v-tag  →  bump
+#     0            →  no release (no code changed)
+#     1   .. 49    →  patch   (vX.Y.Z+1)
+#     50  .. 399   →  minor   (vX.Y+1.0)
+#     >= 400       →  major   (vX+1.0.0)
+#   Thresholds live in env below — tune freely.
+#
+# Seed: if no v*.*.* tag exists yet, the first qualifying push seeds
+# v3.3.11 (a mature-project baseline; the repo had no prior tags/version
+# strings to derive from). A baseline v3.3.11 was tagged manually at the
+# pre-action merge, so in practice this action bumps forward from there.
+#
+# Manual override: push your own annotated tag `vX.Y.Z` (or run this
+# workflow via "Run workflow" with an explicit version) — the action only
+# ever moves forward and skips if the computed tag already exists.
+#
+# No-loop note: the tag this action pushes uses GITHUB_TOKEN, which does
+# NOT re-trigger workflows, and a tag push is not a branch push — so this
+# job never retriggers itself. Tag + Release are done in ONE job to avoid
+# the cross-workflow trigger gap.
+# ─────────────────────────────────────────────────────────────────────
+name: Auto Tag & Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_version:
+        description: "Explicit version to tag (e.g. 4.0.0), overrides .py-LOC computation"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  SEED_VERSION: "3.3.11"
+  PATCH_MAX: "49"     # 1..PATCH_MAX .py lines  → patch
+  MINOR_MAX: "399"    # PATCH_MAX+1..MINOR_MAX  → minor;  > MINOR_MAX → major
+
+jobs:
+  auto-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Compute version bump from .py code churn
+        id: bump
+        run: |
+          set -euo pipefail
+
+          parse() { echo "${1#v}" | awk -F. '{print $1, $2, $3}'; }
+          bump() { # bump <ver> <level>
+            read -r MA MI PA <<< "$(parse "$1")"
+            case "$2" in
+              major) echo "$((MA+1)).0.0" ;;
+              minor) echo "$MA.$((MI+1)).0" ;;
+              patch) echo "$MA.$MI.$((PA+1))" ;;
+            esac
+          }
+
+          LATEST="$(git tag -l 'v*.*.*' | sort -V | tail -1)"
+
+          # --- manual override path (workflow_dispatch) ---
+          FORCE="${{ github.event.inputs.force_version }}"
+          if [ -n "$FORCE" ]; then
+            NEW="$FORCE"
+            LEVEL="manual"
+            PY=0
+          elif [ -z "$LATEST" ]; then
+            # First run, no tag anywhere → seed.
+            NEW="${SEED_VERSION}"
+            LEVEL="seed"
+            PY=0
+          else
+            # .py lines changed (added + deleted) since the last tag.
+            PY="$(git diff --numstat "${LATEST}" HEAD -- '*.py' \
+                  | awk '{a=($1=="-"?0:$1); d=($2=="-"?0:$2); s+=a+d} END{print s+0}')"
+            if [ "$PY" -eq 0 ]; then
+              echo "No .py code changed since ${LATEST} — skipping release."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            elif [ "$PY" -le "${PATCH_MAX}" ]; then
+              LEVEL="patch"
+            elif [ "$PY" -le "${MINOR_MAX}" ]; then
+              LEVEL="minor"
+            else
+              LEVEL="major"
+            fi
+            NEW="$(bump "${LATEST#v}" "$LEVEL")"
+          fi
+
+          if git rev-parse "v${NEW}" >/dev/null 2>&1; then
+            echo "Tag v${NEW} already exists — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "new=v${NEW}" >> "$GITHUB_OUTPUT"
+          echo "prev=${LATEST}" >> "$GITHUB_OUTPUT"
+          echo "level=${LEVEL}" >> "$GITHUB_OUTPUT"
+          echo "py=${PY}" >> "$GITHUB_OUTPUT"
+          echo "→ ${LATEST:-<none>}  +${PY} .py lines  ⇒  ${LEVEL}  ⇒  v${NEW}"
+
+      - name: Create + push annotated tag
+        if: steps.bump.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.bump.outputs.new }}" \
+            -m "${{ steps.bump.outputs.new }} (${{ steps.bump.outputs.level }} — ${{ steps.bump.outputs.py }} .py lines changed since ${{ steps.bump.outputs.prev }})"
+          git push origin "${{ steps.bump.outputs.new }}"
+
+      - name: Generate release notes
+        if: steps.bump.outputs.skip == 'false'
+        id: notes
+        run: |
+          set -euo pipefail
+          PREV="${{ steps.bump.outputs.prev }}"
+          {
+            echo "notes<<EOF"
+            echo "**${{ steps.bump.outputs.level }}** release — ${{ steps.bump.outputs.py }} lines of Python changed since ${PREV:-the beginning}."
+            echo ""
+            if [ -n "$PREV" ]; then
+              git log "${PREV}..HEAD" --no-merges --pretty='- %s (%h)'
+            else
+              git log --no-merges --pretty='- %s (%h)' | head -50
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: steps.bump.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ steps.bump.outputs.new }}" \
+            --title "${{ steps.bump.outputs.new }}" \
+            --notes "${{ steps.notes.outputs.notes }}" \
+            --target "${{ github.sha }}"

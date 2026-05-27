@@ -95,6 +95,12 @@ class HubitatEventsocketClient:
         if not self._hubs:
             logger.warning('hubitat_eventsocket: no enabled hubs — not starting')
             return
+        # Idempotency: cancel any already-running tasks before scheduling new
+        # ones. Belt-and-suspenders with start_eventsocket's own guard.
+        for name, task in list(self._tasks.items()):
+            if not task.done():
+                task.cancel()
+        self._tasks.clear()
         for hub in self._hubs:
             name = hub['hub_name']
             self._tasks[name] = asyncio.create_task(
@@ -381,12 +387,30 @@ _client: Optional[HubitatEventsocketClient] = None
 
 
 async def start_eventsocket() -> None:
-    """Lifespan startup hook — call from FastAPI lifespan()."""
+    """Lifespan startup hook — call from FastAPI lifespan().
+
+    Idempotent: if a prior `_client` is still around (lifespan re-entry,
+    uvicorn reload, test fixture), tear it down before creating a new one.
+    Without this guard each call adds another WS task per hub; with N starts
+    we end up with N parallel sockets each delivering every event, which
+    duplicates event_log writes N-fold (caught live 2026-05-19: 6
+    connections to hub .70, 3 to .69 → every event written 2-6x)."""
     global _client
     enabled = os.environ.get('EVENTSOCKET_ENABLED', 'true').strip().lower() == 'true'
     if not enabled:
         logger.info('hubitat_eventsocket: EVENTSOCKET_ENABLED=false — not starting')
         return
+
+    if _client is not None:
+        logger.warning(
+            'hubitat_eventsocket: start called while existing client active '
+            '— stopping it first to prevent duplicate WS connections'
+        )
+        try:
+            await _client.stop()
+        except Exception as e:
+            logger.warning(f'hubitat_eventsocket: prior client stop failed: {e}')
+        _client = None
 
     hubs = _load_hub_list()
     if not hubs:

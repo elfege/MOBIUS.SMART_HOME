@@ -81,6 +81,17 @@ class ReconcilePoll:
         self._stop_event = asyncio.Event()
         self._router = None
         self._device_cache = None
+        # Per-(canonical_id, attr) memory of the last hub-reported value
+        # we observed. Used to suppress re-synthesizing the SAME state
+        # every cycle when device_cache hasn't caught up yet — divergence
+        # alone isn't enough; we want hub-value-CHANGE since last poll.
+        # Otherwise: 16:21:33 hub=active → synthesize 'active', cache
+        # gets the update, but if the cache write fails silently or has
+        # latency, next poll still sees cache=None hub=active and
+        # synthesizes again. Caught 2026-05-19: 11 synthesized 'active'
+        # events for canon 244 in a 12-minute window where Hubitat only
+        # reported one real active.
+        self._last_seen: Dict[tuple, str] = {}
 
     async def start(self) -> None:
         if self._task is not None:
@@ -327,7 +338,20 @@ class ReconcilePoll:
                     continue
                 cached_val = cache_attrs.get(attr)
                 if str(cached_val) == str(hub_val):
+                    # Cache agrees with hub — nothing to do.
+                    self._last_seen[(canonical_id, attr)] = str(hub_val)
                     continue
+                # Cache disagrees with hub. Only synthesize on a NEW
+                # hub state — i.e., the hub value changed since our
+                # last observation. If we've seen this exact hub value
+                # before on this attr, the divergence is just cache
+                # lag and we shouldn't replay the same "event" every
+                # poll. The cache will reconverge naturally as real
+                # eventsocket frames arrive.
+                key = (canonical_id, attr)
+                if self._last_seen.get(key) == str(hub_val):
+                    continue
+                self._last_seen[key] = str(hub_val)
                 # Divergence — synthesize event.
                 payload = {
                     'deviceId': native_id,
@@ -474,11 +498,24 @@ _service: Optional[ReconcilePoll] = None
 
 
 async def start_reconcile_poll() -> None:
-    """Lifespan startup hook."""
+    """Lifespan startup hook. Idempotent — if a prior _service is still
+    running (lifespan re-entry, uvicorn reload), stop it before
+    starting a new one. Same singleton-leak class of bug as the
+    eventsocket multi-start, caught 2026-05-19."""
     global _service
     if os.environ.get('RECONCILE_POLL_ENABLED', 'true').strip().lower() != 'true':
         logger.info('reconcile_poll: RECONCILE_POLL_ENABLED=false — not starting')
         return
+    if _service is not None:
+        logger.warning(
+            'reconcile_poll: start called while a prior service is active — '
+            'stopping it first to prevent duplicate polling loops'
+        )
+        try:
+            await _service.stop()
+        except Exception as e:
+            logger.warning(f'reconcile_poll: prior stop failed: {e}')
+        _service = None
     _service = ReconcilePoll()
     await _service.start()
 

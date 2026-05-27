@@ -8,7 +8,7 @@ Post-Phase-5 the cache is keyed by the canonical `devices.id` PK, NOT
 the per-hub Hubitat id. This matches the rest of the system:
 device_selections, device_subscriptions, and event.device_id all use
 canonical ids. Callers that have a Hubitat per-hub id must translate
-via services.hub_classifier (get_device_by_canonical_id /
+via services.device_to_hubs_classifier (get_device_by_canonical_id /
 get_hub_for_device) before hitting the cache.
 
 Key features:
@@ -199,7 +199,7 @@ class DeviceCache:
 
         # Resolve (hub_ip, hubitat_id) → canonical id for each device.
         # Single batch query against the canonical devices table.
-        from services.hub_classifier import get_hub_for_device  # late import
+        from services.device_to_hubs_classifier import get_hub_for_device  # late import
 
         cache_entries = []
         for device in devices:

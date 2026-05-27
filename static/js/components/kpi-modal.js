@@ -460,6 +460,13 @@ async function _loadAndRender($modal, instanceId, instanceLabel, isRefresh = fal
             _renderHourlyChart(metrics);
             _renderTypeChart(metrics);
             _attachDebugStream(instanceId, metrics);
+            // On the FIRST open the modal is still animating to its 95vh size
+            // via a CSS transition, so the charts above are created against a
+            // container that hasn't reached final dimensions — Chart.js measures
+            // a too-small box and the EVENT TYPES bars don't fill (only corrected
+            // on the 30s auto-refresh, which rebuilds the HTML while the modal is
+            // already full-size). Force a resize once the open transition settles.
+            if (!isRefresh) _resizeChartsAfterOpen();
         });
 
         if (isRefresh) {
@@ -567,6 +574,23 @@ function _deviceBreakdown(selections) {
 /* =============================================================================
    Charts
    ============================================================================= */
+
+/**
+ * Force-resize all active Chart.js instances once the modal's open transition
+ * has settled. Chart.js's responsive observer can miss the container growing
+ * via a CSS transition on first open, leaving the EVENT TYPES bars sized to a
+ * pre-transition box. We re-measure three ways (all idempotent): after a double
+ * rAF (layout settle), on the backdrop's transitionend (open animation done),
+ * and via a timeout fallback in case transitionend never fires.
+ */
+function _resizeChartsAfterOpen() {
+    const resize = () => _charts.forEach(c => { try { c.resize(); } catch (_) {} });
+    requestAnimationFrame(() => requestAnimationFrame(resize));
+    setTimeout(resize, 350);
+    if ($activeBackdrop) {
+        $activeBackdrop.one('transitionend', resize);
+    }
+}
 
 /**
  * Render the hourly activity bar chart.

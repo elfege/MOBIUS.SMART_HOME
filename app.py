@@ -291,6 +291,18 @@ def run_db_migrations():
             updated_at              TIMESTAMPTZ DEFAULT NOW()
         )""",
 
+        # Admin-API contract-drift watch (2026-05-26). Firmware 2.5.0.143
+        # changed POST /device/runmethod from form-encoded to JSON with no
+        # backward compat, breaking all commands. hub_contract_watch polls
+        # firmware version + a runmethod canary per hub; these columns hold
+        # the per-hub result, surfaced on the Hubs settings cards.
+        "ALTER TABLE hub_health ADD COLUMN IF NOT EXISTS platform_version TEXT",
+        "ALTER TABLE hub_health ADD COLUMN IF NOT EXISTS platform_version_seen_at TIMESTAMPTZ",
+        "ALTER TABLE hub_health ADD COLUMN IF NOT EXISTS command_path_ok BOOLEAN",
+        "ALTER TABLE hub_health ADD COLUMN IF NOT EXISTS command_path_contract VARCHAR(10)",
+        "ALTER TABLE hub_health ADD COLUMN IF NOT EXISTS command_path_checked_at TIMESTAMPTZ",
+        "ALTER TABLE hub_health ADD COLUMN IF NOT EXISTS command_path_error TEXT",
+
         # Grant PostgREST access to all new tables + their sequences.
         "GRANT SELECT, INSERT, UPDATE, DELETE ON event_routings TO smarthome_anon",
         "GRANT SELECT, INSERT, UPDATE, DELETE ON device_commands TO smarthome_anon",
@@ -423,8 +435,23 @@ def run_db_migrations():
         )
         conn.autocommit = True
         cur = conn.cursor()
+        # Schema split (migration 007): tables live in dshub/dsapp/dscore, not
+        # public. Ensure those schemas exist and resolve unqualified names to
+        # them, so the idempotent CREATE TABLE IF NOT EXISTS / ALTER statements
+        # below find the real (moved) tables instead of recreating empty
+        # shadows in public. The live split is performed by 007 + init-db.sql;
+        # this only keeps the catch-up migrations pointing at the right place.
+        cur.execute("CREATE SCHEMA IF NOT EXISTS dshub")
+        cur.execute("CREATE SCHEMA IF NOT EXISTS dsapp")
+        cur.execute("CREATE SCHEMA IF NOT EXISTS dscore")
+        cur.execute("CREATE SCHEMA IF NOT EXISTS api")
+        cur.execute("SET search_path = dshub, dsapp, dscore, public")
         for sql in migrations:
             cur.execute(sql)
+        # Tell PostgREST to reload its schema cache so columns added by the
+        # ALTERs above (e.g. hub_health contract-watch columns) are visible
+        # to the REST API immediately, not just after the next restart.
+        cur.execute("NOTIFY pgrst, 'reload schema'")
         cur.close()
         conn.close()
         logger.info("DB migrations applied successfully")
@@ -485,7 +512,7 @@ async def lifespan(app: FastAPI):
     import threading
     def _startup_classification():
         try:
-            from services.hub_classifier import run_classification, invalidate_cache
+            from services.device_to_hubs_classifier import run_classification, invalidate_cache
             logger.info("Running startup hub classification...")
             result = run_classification()
             invalidate_cache()
@@ -581,6 +608,32 @@ async def lifespan(app: FastAPI):
         schedule_poll_job(get_scheduler()._scheduler, interval_seconds=60)
     except Exception as e:
         logger.warning(f"mode_poller schedule failed: {e}")
+
+    # Hubitat admin-API contract-drift watch (2026-05-26).
+    # Firmware 2.5.0.143 changed POST /device/runmethod from form-encoded to
+    # JSON with no backward compat, silently breaking every command. This
+    # watcher polls each hub's firmware version + a harmless runmethod canary
+    # and records the result in hub_health (surfaced on the Hubs cards), so the
+    # next contract flip announces itself instead of being diagnosed by hand.
+    # First pass in a background thread (network × N hubs); 6h recurring.
+    def _contract_watch_first_pass():
+        try:
+            from services.hub_contract_watch import run_watch_pass
+            result = run_watch_pass()
+            logger.info(f"contract_watch startup pass: {result}")
+        except Exception as e:
+            logger.warning(f"contract_watch startup pass failed: {e}")
+    threading.Thread(
+        target=_contract_watch_first_pass,
+        name="startup-contract-watch",
+        daemon=True,
+    ).start()
+    try:
+        from services.hub_contract_watch import schedule_watch_job
+        from services.scheduler_service import get_scheduler
+        schedule_watch_job(get_scheduler()._scheduler, interval_seconds=21600)
+    except Exception as e:
+        logger.warning(f"contract_watch schedule failed: {e}")
 
     # Start Samsung TV client (WS + HTTP power-poll background tasks).
     # Config is read from env vars (set in docker-compose or start.sh).
@@ -1115,7 +1168,7 @@ async def refresh_devices_from_hubitat():
     `devices` table. Use sparingly — the reconcile poll already keeps this
     fresh in the background. Returns the count of devices refreshed.
     """
-    from services.hub_classifier import run_classification, invalidate_cache
+    from services.device_to_hubs_classifier import run_classification, invalidate_cache
     try:
         result = run_classification()
         invalidate_cache()
@@ -1131,7 +1184,7 @@ async def refresh_devices_from_hubitat():
 @app.get("/api/devices/{device_id}", tags=["devices"])
 async def get_device(device_id: str):
     """Get device details."""
-    from services.hub_classifier import fetch_device_live
+    from services.device_to_hubs_classifier import fetch_device_live
 
     try:
         device = fetch_device_live(device_id)
@@ -1468,7 +1521,7 @@ async def run_hub_classification():
     This enables the DeviceCommander to route commands directly to
     the hub that physically owns each device (bypassing Hub Mesh relay).
     """
-    from services.hub_classifier import run_classification, invalidate_cache
+    from services.device_to_hubs_classifier import run_classification, invalidate_cache
     import asyncio
 
     try:
@@ -1969,7 +2022,7 @@ async def matter_update_match(body: UpdateMatterDeviceMatchRequest):
     # Get the Maker API device name for display
     maker_name = ''
     try:
-        from services.hub_classifier import fetch_device_live
+        from services.device_to_hubs_classifier import fetch_device_live
         device = fetch_device_live(body.maker_api_device_id)
         if device:
             maker_name = device.get('label') or device.get('name', '')
@@ -2262,7 +2315,7 @@ async def get_test_devices(instance_id: int):
     to the browser.
     """
     from services.instance_manager import get_instance_manager
-    from services.hub_classifier import fetch_device_live
+    from services.device_to_hubs_classifier import fetch_device_live
 
     manager = get_instance_manager()
     instance = manager.get_instance(instance_id)
@@ -2275,7 +2328,7 @@ async def get_test_devices(instance_id: int):
     # via the canonical devices row joined with hub_config — used to enrich
     # the response so the frontend can render hub-specific links and open
     # one EventSocket per distinct hub without an extra roundtrip.
-    from services.hub_classifier import get_device_by_canonical_id
+    from services.device_to_hubs_classifier import get_device_by_canonical_id
 
     result = {}
     for category, device_ids in device_selections.items():
@@ -2631,7 +2684,7 @@ async def list_hubs():
 def _invalidate_hub_caches():
     """Drop in-process caches that reference hub_config rows."""
     try:
-        from services.hub_classifier import invalidate_device_lookup_cache
+        from services.device_to_hubs_classifier import invalidate_device_lookup_cache
         invalidate_device_lookup_cache()
     except Exception:
         pass

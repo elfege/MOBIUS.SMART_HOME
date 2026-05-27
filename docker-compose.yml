@@ -167,7 +167,12 @@ services:
       - "${POSTGREST_EXTERNAL_PORT:-3002}:${POSTGREST_INTERNAL_PORT:-3001}"
     environment:
       PGRST_DB_URI: postgres://${POSTGRES_USER:-smarthome_api}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_INTERNAL_PORT:-5432}/${POSTGRES_DB:-smarthome}
-      PGRST_DB_SCHEMA: public
+      # Schema split (2026-05-26): PostgREST exposes the single `api` schema,
+      # which holds 1:1 views over the dshub/dsapp/dscore storage schemas
+      # (Option B). PGRST_DB_SCHEMAS is the v12 key (plural); keep the singular
+      # too for belt-and-suspenders.
+      PGRST_DB_SCHEMAS: api
+      PGRST_DB_SCHEMA: api
       PGRST_DB_ANON_ROLE: smarthome_anon
       PGRST_SERVER_PORT: "${POSTGREST_INTERNAL_PORT:-3001}"
       PGRST_OPENAPI_MODE: ignore-privileges

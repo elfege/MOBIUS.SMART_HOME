@@ -183,6 +183,12 @@ class WebhookRouter:
                     params={
                         "select": "id,hub_ip,hubitat_id",
                         "label": f"eq.{candidate}",
+                        # Labels are no longer UNIQUE (migration 008): a
+                        # genuinely-distinct same-label native on another hub
+                        # is kept as is_name_duplicate=true. The CANONICAL row
+                        # (mirror-detection anchor) is always the winner, so
+                        # restrict to is_name_duplicate=false.
+                        "is_name_duplicate": "eq.false",
                     },
                     timeout=3,
                 )

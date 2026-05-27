@@ -153,6 +153,17 @@ $(document).ready(function () {
     // Rendering
     // =========================================================================
 
+    /** Compact "Nm/Nh/Nd ago" from an age in ms (for the unresponsive badge). */
+    function _timeAgoShort(ms) {
+        if (ms == null || ms < 0) return 'unknown';
+        const m = Math.floor(ms / 60000);
+        if (m < 1) return 'just now';
+        if (m < 60) return `${m}m ago`;
+        const h = Math.floor(m / 60);
+        if (h < 24) return `${h}h ago`;
+        return `${Math.floor(h / 24)}d ago`;
+    }
+
     /**
      * Render the Matter nodes grid.
      */
@@ -172,11 +183,43 @@ $(document).ready(function () {
             const name = extractNodeName(node) || `Node ${nodeId}`;
             const mapped = mappings.find(m => m.matter_node_id === nodeId);
 
+            // Responsiveness: a node is "unresponsive" if its matched Hubitat
+            // device is offline, or it hasn't been seen by the matter_discovery
+            // scan in a while. last_seen_at is refreshed every scan (~5 min);
+            // 30 min with no sighting = stale (escalates the visual at 6h+).
+            const lastSeen = node._last_seen_at ? new Date(node._last_seen_at).getTime() : null;
+            const ageMs = lastSeen !== null ? (Date.now() - lastSeen) : null;
+            const STALE_MS = 30 * 60 * 1000;
+            const LONG_MS = 6 * 60 * 60 * 1000;
+            const offline = node._is_online === false;
+            const stale = offline || (ageMs !== null && ageMs > STALE_MS);
+            const longGone = offline || (ageMs !== null && ageMs > LONG_MS);
+            const seenAgo = lastSeen !== null ? _timeAgoShort(ageMs) : 'unknown';
+
+            // Escalating highlight on the tile for unresponsive devices.
+            const cardStyle = longGone
+                ? 'style="border:1px solid #c0564a;box-shadow:0 0 0 2px rgba(192,86,74,.35);"'
+                : (stale ? 'style="border:1px solid #c79a5a;box-shadow:0 0 0 1px rgba(199,154,90,.30);"' : '');
+            const staleBadge = stale
+                ? `<span class="node-stale-badge" title="No sighting for ${seenAgo}${offline ? ' (device reported offline)' : ''}"
+                         style="margin-left:auto;font-size:.72rem;padding:.1rem .45rem;border-radius:4px;background:${longGone ? 'rgba(192,86,74,.25)' : 'rgba(199,154,90,.22)'};color:${longGone ? '#e6857a' : '#d9b277'};">⚠ unresponsive · ${seenAgo}</span>`
+                : '';
+
+            // 5.3 — quick link to the device on its Hubitat hub (when mapped).
+            const hubIp = node._hub_ip;
+            const hubDevId = node._hubitat_device_id || (mapped && mapped.hubitat_device_id);
+            const mappedHtml = (hubIp && hubDevId)
+                ? `<div class="node-mapped">Mapped to Hubitat
+                       <a href="http://${hubIp}/device/edit/${hubDevId}" target="_blank" rel="noopener"
+                          title="Open on the Hubitat hub">#${hubDevId} ↗</a></div>`
+                : (mapped ? `<div class="node-mapped">Mapped to Hubitat #${mapped.hubitat_device_id}</div>` : '');
+
             html += `
-                <div class="node-card" data-node-id="${nodeId}">
+                <div class="node-card${stale ? ' node-card--stale' : ''}" data-node-id="${nodeId}" ${cardStyle}>
                     <div class="node-card-header">
                         <h4 class="node-name">${escapeHtml(name)}</h4>
                         <span class="node-id">ID: ${nodeId}</span>
+                        ${staleBadge}
                     </div>
                     <div class="node-details">
                         ${extractNodeDetails(node)}
@@ -187,10 +230,7 @@ $(document).ready(function () {
                         <button class="btn btn-small btn-secondary btn-test-off"
                                 data-node-id="${nodeId}">Test OFF</button>
                     </div>
-                    ${mapped
-                        ? `<div class="node-mapped">Mapped to Hubitat #${mapped.hubitat_device_id}</div>`
-                        : ''
-                    }
+                    ${mappedHtml}
                 </div>
             `;
         }

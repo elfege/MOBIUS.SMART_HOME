@@ -511,10 +511,23 @@ export class DashboardController {
      * /samsung-tv page. Static for now — promote to data-driven when a second
      * driver lands.
      */
-    renderDrivers() {
+    async renderDrivers() {
         const el = document.getElementById('drivers-container');
         if (!el) return;
         window.dashboard = this;  // ensure inline onclick handlers resolve
+
+        // Device label comes from SAMSUNG_TV_NAME (a slug, e.g. "living_room_tv")
+        // via /samsung-tv/api/status, title-cased for display. Falls back to a
+        // generic label if the controller isn't reachable.
+        let tvLabel = 'Samsung TV';
+        try {
+            const s = await fetch('/samsung-tv/api/status').then(r => r.ok ? r.json() : null);
+            if (s && s.name) {
+                tvLabel = String(s.name).replace(/_/g, ' ')
+                    .replace(/\b\w/g, c => c.toUpperCase());
+            }
+        } catch (_) { /* keep fallback label */ }
+
         el.innerHTML = `
             <div class="app-group" data-driver="samsung_tv">
                 <button class="app-group-header" aria-expanded="false"
@@ -529,7 +542,7 @@ export class DashboardController {
                          onclick="window.location='/samsung-tv'"
                          title="Open the Samsung TV controller">
                         <div class="card-header">
-                            <h3>Living Room TV</h3>
+                            <h3>${utils.escapeHtml(tvLabel)}</h3>
                             <span class="app-type-badge">Samsung TV</span>
                         </div>
                         <div class="card-body">

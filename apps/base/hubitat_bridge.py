@@ -39,7 +39,7 @@ class HubitatMixin:
         get_device_events_live() with a canonical devices.id.
         """
         try:
-            from services.hub_classifier import get_hub_for_device
+            from services.device_to_hubs_classifier import get_hub_for_device
             from services.hubitat_client import get_hub_client_by_ip
             row = get_hub_for_device(str(hubitat_id))
             if row and row.get("hub_ip"):
@@ -57,7 +57,7 @@ class HubitatMixin:
         reachable client.
         """
         try:
-            from services.hub_classifier import get_device_by_canonical_id
+            from services.device_to_hubs_classifier import get_device_by_canonical_id
             from services.hubitat_client import get_hub_client_by_ip
             row = get_device_by_canonical_id(canonical_id)
             if not row or not row.get("hub_ip"):

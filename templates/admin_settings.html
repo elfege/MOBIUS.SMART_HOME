@@ -572,6 +572,49 @@
     const FALLBACK_SECTION = 'general';
 
     /* -------------------------------------------------------------------
+       DERIVED settings — written by background services (hub_tz_resolver),
+       NOT by the user. Rendering them as editable Save inputs is misleading:
+       a manual edit is overwritten on the next refresh. These render as
+       read-only, expandable (click-to-full) displays instead.
+       (Co-located with SECTION_MAP, matching this controller's existing
+       hardcoded-knowledge pattern. A future, more durable approach is an
+       `editable` boolean column on system_settings driving this.)
+       ------------------------------------------------------------------- */
+    const DERIVED_KEYS = new Set([
+        'hub_tz_breakdown',     // {hub_name: tz_or_status} from hub_tz_resolver
+        'hub_tz_inconsistency', // resolver: do the hubs disagree on TZ?
+        'timezone',             // hub-derived, cached; resolver-owned
+    ]);
+
+    /* Read-only display for a derived setting. JSON values get an expandable,
+       pretty-printed <details>; scalars render as plain text. No Save. */
+    function renderReadonly(row) {
+        const raw = String(row.value ?? '');
+        let parsed = null;
+        try {
+            const t = raw.trim();
+            if (t.startsWith('{') || t.startsWith('[')) parsed = JSON.parse(t);
+        } catch (_) { /* not JSON — fall through to scalar */ }
+
+        let body;
+        if (parsed !== null) {
+            const pretty = JSON.stringify(parsed, null, 2);
+            const count = Array.isArray(parsed) ? parsed.length : Object.keys(parsed).length;
+            body = `<details class="setting-readonly-json" style="cursor:pointer;">
+                   <summary style="opacity:.85;">View value (JSON) — ${count} ${count === 1 ? 'entry' : 'entries'}</summary>
+                   <pre style="margin:.4rem 0 0;padding:.5rem .6rem;background:rgba(255,255,255,0.03);border:1px solid var(--color-border,#333);border-radius:6px;overflow:auto;max-height:40vh;white-space:pre-wrap;word-break:break-word;font-size:.82rem;">${utils.escapeHtml(pretty)}</pre>
+               </details>`;
+        } else {
+            body = `<span style="opacity:.9;">${utils.escapeHtml(raw) || '<em>(empty)</em>'}</span>`;
+        }
+
+        return `<div class="setting-readonly" title="Auto-managed by the system — not user-editable">
+                    ${body}
+                    <span style="display:inline-block;margin-top:.3rem;font-size:.75rem;opacity:.55;">auto-managed · read-only</span>
+                </div>`;
+    }
+
+    /* -------------------------------------------------------------------
        Label derivation — first sentence of `description` (if short
        enough), otherwise snake_case → Title Case from the key.
        ------------------------------------------------------------------- */
@@ -628,10 +671,20 @@
         const desc = row.description
             ? `<div class="setting-desc">${utils.escapeHtml(row.description)}</div>`
             : '';
+        const editable = !DERIVED_KEYS.has(row.key);
+        // Editable rows: input + Save. Derived rows: read-only display, no Save.
+        const controlHtml = editable
+            ? `<div class="setting-input">${renderInput(row)}</div>
+               <div class="setting-save">
+                   <button class="btn btn-secondary setting-save-btn">Save</button>
+                   <span class="setting-save-status" data-key="${utils.escapeHtml(row.key)}"></span>
+               </div>`
+            : `<div class="setting-input">${renderReadonly(row)}</div>`;
         return `
             <div class="setting-row"
                  data-key="${utils.escapeHtml(row.key)}"
-                 data-type="${row.value_type}">
+                 data-type="${row.value_type}"
+                 data-editable="${editable}">
                 <div class="setting-label">
                     <div class="setting-name">
                         ${utils.escapeHtml(label)}${restartBadge}
@@ -639,11 +692,7 @@
                     </div>
                     ${desc}
                 </div>
-                <div class="setting-input">${renderInput(row)}</div>
-                <div class="setting-save">
-                    <button class="btn btn-secondary setting-save-btn">Save</button>
-                    <span class="setting-save-status" data-key="${utils.escapeHtml(row.key)}"></span>
-                </div>
+                ${controlHtml}
             </div>`;
     }
 

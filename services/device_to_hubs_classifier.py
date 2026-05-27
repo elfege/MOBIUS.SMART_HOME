@@ -15,7 +15,7 @@ The resulting device_hub_mapping table enables:
 - Protocol awareness (Z-Wave / Zigbee / Matter / LAN / Virtual)
 
 Usage:
-    from services.hub_classifier import run_classification
+    from services.device_to_hubs_classifier import run_classification
     results = run_classification()   # queries all hubs, populates DB table
 """
 

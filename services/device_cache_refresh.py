@@ -131,7 +131,7 @@ class DeviceCacheRefreshService:
         """
         from services.device_cache import get_default_cache
         from services.hubitat_client import get_default_client, get_hub_client_by_ip
-        from services.hub_classifier import get_device_by_canonical_id
+        from services.device_to_hubs_classifier import get_device_by_canonical_id
         from services.matter_client import get_all_matter_mappings
 
         cache = get_default_cache()

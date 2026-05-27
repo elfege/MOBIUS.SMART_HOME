@@ -139,30 +139,54 @@ def detect_protocol(device_type: str) -> str:
 
 def _fetch_hub_devices(
     hub_ip: str,
-    app_number: str,
-    token: str,
-    timeout: int = 15
+    hub_name: str,
 ) -> Optional[List[Dict[str, Any]]]:
     """
-    Fetch all devices from a single hub's Maker API.
+    Fetch all devices from a single hub via the ADMIN API (/device/list/data).
 
-    Args:
-        hub_ip: Hub IP address
-        app_number: Maker API app number
-        token: Access token
-        timeout: Request timeout in seconds
+    Migrated off Maker /devices/all (2026-05-26): the admin roster carries the
+    authoritative `linkedDevice` boolean (mesh mirror vs native), plus
+    `deviceNetworkId`, `type`, and `deviceTypeName`, and includes admin-only
+    devices the Maker app never exposed. Capabilities/attributes are NOT in this
+    endpoint — they are filled per native device later (reuse-or-fullJson).
 
-    Returns:
-        List of device dicts or None on failure
+    Returns the raw roster list, or None on failure.
     """
-    url = f"http://{hub_ip}/apps/api/{app_number}/devices/all"
     try:
-        resp = requests.get(url, params={"access_token": token}, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
+        from services.hubitat_admin_client import get_client
+        client = get_client(hub_ip, hub_name)
+        return client.get_all_devices()
     except Exception as e:
-        logger.error(f"Failed to fetch devices from {hub_ip}: {e}")
+        logger.error(f"Failed to fetch devices from {hub_ip} (admin API): {e}")
         return None
+
+
+def _fetch_caps_attrs(
+    hub_ip: str, hub_name: str, device_id: str,
+) -> tuple:
+    """Fetch (capabilities, attributes) for one device via admin fullJson.
+
+    Only called for devices we don't already have capabilities cached for
+    (new / admin-only devices). Returns ([], {}) on any failure.
+    """
+    try:
+        from services.hubitat_admin_client import get_client, to_maker_shape
+        raw = get_client(hub_ip, hub_name).get_device(int(device_id))
+        if not raw:
+            return [], {}
+        # Capabilities live at device.capabilities in the admin fullJson
+        # (to_maker_shape only normalizes attributes/currentStates, not caps).
+        dev = raw.get("device", raw) if isinstance(raw, dict) else {}
+        caps = dev.get("capabilities") or []
+        shaped = to_maker_shape(raw)
+        attrs = {
+            a["name"]: a.get("currentValue")
+            for a in (shaped or {}).get("attributes", []) if a.get("name")
+        }
+        return caps, attrs
+    except Exception as e:
+        logger.debug(f"_fetch_caps_attrs {hub_ip}/{device_id}: {e}")
+    return [], {}
 
 
 def _is_mesh_linked(device: Dict[str, Any]) -> bool:
@@ -208,51 +232,67 @@ def _parse_source_hub(device_name: str) -> Optional[str]:
     return None
 
 
-def _ingest_into_devices(native_entries: List[Dict[str, Any]], hub_ip: str) -> None:
+def _ingest_into_devices(natives: List[Dict[str, Any]]) -> None:
     """
-    Upsert native devices from one hub into the canonical `devices` table.
+    Upsert the GLOBALLY-deduped native devices into the canonical `devices`
+    table, keyed on (hub_ip, hubitat_id) — the true device identity.
 
-    Calls the upsert_device() PL/pgSQL function for each device. The function
-    decides INSERT (new physical device), UPDATE (refresh existing), or
-    SKIP_MESH (a different hub already owns this name — Hub Mesh mirror).
+    `natives` is the full cross-hub native list AFTER dedup: each entry carries
+    hub_ip, id (hubitat_id), hub_id, label, name, type, protocol, and the
+    classifier's `is_name_duplicate` verdict (a native that lost a same-label
+    conflict to the primary hub — stored hidden, kept as a failover candidate).
+
+    Capabilities/attributes (not in the admin roster) are REUSED from the
+    existing row by (hub_ip, hubitat_id); only devices without cached
+    capabilities (new / admin-only) trigger a per-device fullJson fetch.
 
     Errors are swallowed per-device so one bad row can't poison the rest.
     """
-    if not native_entries:
+    if not natives:
         return
 
     postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
-    counts = {"INSERT": 0, "UPDATE": 0, "SKIP_MESH": 0, "ERROR": 0}
 
-    for e in native_entries:
-        # The Maker API returns attributes as a list of {name, currentValue}
-        # dicts; we want a flat {name: value} map so the JSONB column is
-        # sane to query. Tolerate both shapes since classify_hub may have
-        # already passed it through.
-        raw_attrs = e.get("attributes", {})
-        if isinstance(raw_attrs, list):
-            attrs_map = {}
-            for a in raw_attrs:
-                if isinstance(a, dict) and "name" in a:
-                    attrs_map[a["name"]] = a.get("currentValue")
-            attrs = attrs_map
-        elif isinstance(raw_attrs, dict):
-            attrs = raw_attrs
-        else:
-            attrs = {}
+    # Preload existing capabilities/attributes for reuse (one query).
+    existing: Dict[tuple, Dict[str, Any]] = {}
+    try:
+        r = requests.get(
+            f"{postgrest_url}/devices",
+            params={"select": "hub_ip,hubitat_id,capabilities,attributes"},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            for row in r.json():
+                existing[(row["hub_ip"], str(row["hubitat_id"]))] = row
+    except Exception as e:
+        logger.debug(f"ingest: existing-caps preload failed: {e}")
+
+    counts = {"INSERT": 0, "UPDATE": 0, "ERROR": 0, "FULLJSON": 0}
+
+    for e in natives:
+        key = (e["hub_ip"], str(e.get("id", "")))
+        ex = existing.get(key)
+        caps = ex.get("capabilities") if ex else None
+        attrs = (ex.get("attributes") if ex else None) or {}
+        if caps in (None, [], {}):
+            # New / uncached device — fetch capabilities via admin fullJson.
+            caps, attrs = _fetch_caps_attrs(e["hub_ip"], e.get("hub_name", ""), e.get("id", ""))
+            counts["FULLJSON"] += 1
 
         try:
             r = requests.post(
                 f"{postgrest_url}/rpc/upsert_device",
                 json={
-                    "p_hub_ip":       hub_ip,
-                    "p_hubitat_id":   str(e.get("id", "")),
-                    "p_name":         e.get("name", ""),
-                    "p_label":        e.get("label", ""),
-                    "p_device_type":  e.get("type", ""),
-                    "p_protocol":     e.get("protocol", "unknown"),
-                    "p_capabilities": e.get("capabilities", []),
-                    "p_attributes":   attrs,
+                    "p_hub_ip":            e["hub_ip"],
+                    "p_hubitat_id":        str(e.get("id", "")),
+                    "p_hub_id":            e.get("hub_id"),
+                    "p_name":              e.get("name", ""),
+                    "p_label":             e.get("label", ""),
+                    "p_device_type":       e.get("type", ""),
+                    "p_protocol":          e.get("protocol", "unknown"),
+                    "p_capabilities":      caps or [],
+                    "p_attributes":        attrs or {},
+                    "p_is_name_duplicate": bool(e.get("is_name_duplicate", False)),
                 },
                 headers={"Content-Type": "application/json"},
                 timeout=10,
@@ -267,41 +307,41 @@ def _ingest_into_devices(native_entries: List[Dict[str, Any]], hub_ip: str) -> N
                 counts["ERROR"] += 1
                 logger.warning(
                     f"upsert_device failed for {e.get('name')!r} "
-                    f"on hub {hub_ip}: HTTP {r.status_code} {r.text[:200]}"
+                    f"on hub {e.get('hub_ip')}: HTTP {r.status_code} {r.text[:200]}"
                 )
-        except Exception as ex:
+        except Exception as ex2:
             counts["ERROR"] += 1
             logger.warning(
                 f"upsert_device exception for {e.get('name')!r} "
-                f"on hub {hub_ip}: {ex}"
+                f"on hub {e.get('hub_ip')}: {ex2}"
             )
 
     logger.info(
-        f"devices table ingest from {hub_ip}: "
-        f"INSERT={counts['INSERT']} UPDATE={counts['UPDATE']} "
-        f"SKIP_MESH={counts['SKIP_MESH']} ERROR={counts['ERROR']}"
+        f"devices ingest: INSERT={counts['INSERT']} UPDATE={counts['UPDATE']} "
+        f"ERROR={counts['ERROR']} (fullJson caps fetches={counts['FULLJSON']})"
     )
 
 
 def classify_hub(
     hub_name: str,
     hub_ip: str,
-    app_number: str,
-    token: str,
+    hub_id: Optional[int] = None,
+    is_primary: bool = False,
+    **_ignored,
 ) -> Dict[str, Any]:
     """
-    Classify all devices on a single hub as native or mesh-linked.
+    Classify all devices on a single hub as native or mesh-linked, using the
+    admin roster's authoritative `linkedDevice` boolean.
 
-    Args:
-        hub_name: Human-readable hub name (e.g., 'Home 1', 'MAIN')
-        hub_ip: Hub IP address
-        app_number: Maker API app number
-        token: Access token
+    Does NOT ingest here — ingest is global (run_classification), so the
+    same-label primary-hub-wins dedup can see every hub's natives at once.
 
-    Returns:
-        Dict with 'native' and 'linked' device lists, plus metadata
+    Returns a dict with 'native' and 'linked' entry lists + hub metadata.
+    Each native entry carries the fields the global dedup + ingester need:
+    id (hubitat_id), label, name, type, protocol, dni, hub_ip, hub_name,
+    hub_id, is_primary.
     """
-    devices = _fetch_hub_devices(hub_ip, app_number, token)
+    devices = _fetch_hub_devices(hub_ip, hub_name)
     if devices is None:
         return {"error": f"Failed to fetch from {hub_ip}", "native": [], "linked": []}
 
@@ -309,15 +349,14 @@ def classify_hub(
     linked = []
 
     for d in devices:
-        is_linked = _is_mesh_linked(d)
+        # AUTHORITATIVE mesh signal — the admin roster boolean (not the old
+        # Maker hubMeshDisabled attribute, not the name suffix).
+        is_linked = bool(d.get("linkedDevice"))
         name = d.get("name", "")
-        # Hubitat sometimes propagates labels across hubs with trailing
-        # whitespace (mesh artifact). Strip on ingest so the canonical
-        # table stores one normalized label per physical device, and the
-        # webhook router's label lookup matches even when the firing hub
-        # had a slightly different whitespace variant.
+        # Strip trailing whitespace (mesh artifact) so one normalized label
+        # is stored per device and label lookups match across hubs.
         label = (d.get("label") or name).strip()
-        device_type = d.get("type", "")
+        device_type = d.get("deviceTypeName") or d.get("type") or ""
         protocol = detect_protocol(device_type)
         source_hub = _parse_source_hub(name) if is_linked else None
 
@@ -329,27 +368,17 @@ def classify_hub(
             "protocol": protocol,
             "is_linked": is_linked,
             "source_hub": source_hub,
-            # Carry full Maker API fields through so the canonical-devices
-            # ingester can populate capabilities + attributes without a
-            # second fetch. These are only consumed by _ingest_into_devices.
-            "capabilities": d.get("capabilities", []),
-            "attributes":   d.get("attributes", {}),
+            "dni": d.get("deviceNetworkId"),
+            "hub_ip": hub_ip,
+            "hub_name": hub_name,
+            "hub_id": hub_id,
+            "is_primary": is_primary,
         }
 
         if is_linked:
             linked.append(entry)
         else:
             native.append(entry)
-
-    # Defense-in-depth: also push native devices into the canonical
-    # `devices` table via the upsert_device() psql function. The function
-    # is mesh-phobic — it returns SKIP_MESH if a different hub tries to
-    # claim a name that another hub already owns. Failures here MUST NOT
-    # break classify_hub; the legacy device_hub_mapping path still works.
-    try:
-        _ingest_into_devices(native, hub_ip)
-    except Exception as e:
-        logger.warning(f"_ingest_into_devices failed for hub {hub_name}: {e}")
 
     logger.info(
         f"{_C}Hub {hub_name}{_R} ({hub_ip}): "
@@ -361,48 +390,49 @@ def classify_hub(
     return {
         "hub_name": hub_name,
         "hub_ip": hub_ip,
+        "hub_id": hub_id,
+        "is_primary": is_primary,
         "total": len(devices),
         "native": native,
         "linked": linked,
     }
 
 
-def _get_hub_configs() -> List[Dict[str, str]]:
+def _get_hub_configs() -> List[Dict[str, Any]]:
     """
-    Get hub connection configs from environment variables.
+    Load enabled hubs from the `hub_config` table (the UI-editable source of
+    truth), ordered PRIMARY hub first. Replaces the old hardcoded env-var /
+    Maker-creds loader — the classifier now honors `hub_config.is_primary`
+    (the same flag mode_poller and device_commander use), so same-label
+    conflicts resolve to the user-designated primary, not a hardcoded ".72".
 
-    Returns list of dicts with hub_name, hub_ip, app_number, token.
-    Uses the standard env var naming: HUBITAT_HUB_IP_MAIN, etc.
+    Returns [{hub_name, hub_ip, hub_id, is_primary}], primary first then by id.
     """
-    hubs = []
-
-    # Hub name → env var suffix mapping
-    hub_env_map = {
-        "MAIN": "MAIN",
-        "Home 1": "OTHER_HUB_1",
-        "Home 2": "OTHER_HUB_2",
-        "Home 3": "OTHER_HUB_3",
-    }
-
-    for hub_name, suffix in hub_env_map.items():
-        ip = os.environ.get(f"HUBITAT_HUB_IP_{suffix}")
-        app_num = os.environ.get(f"HUBITAT_API_NUMBER_{suffix}")
-        token = os.environ.get(f"HUBITAT_API_TOKEN_{suffix}")
-
-        if ip and app_num and token:
-            hubs.append({
-                "hub_name": hub_name,
-                "hub_ip": ip,
-                "app_number": app_num,
-                "token": token,
-            })
-        else:
-            logger.warning(
-                f"Missing env vars for hub {hub_name} "
-                f"(HUBITAT_*_{suffix}), skipping"
-            )
-
-    return hubs
+    pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    try:
+        r = requests.get(
+            f"{pg}/hub_config",
+            params={
+                "is_enabled": "eq.true",
+                "select": "id,hub_name,hub_ip,is_primary",
+                "order": "is_primary.desc,id.asc",
+            },
+            timeout=5,
+        )
+        if r.status_code == 200:
+            return [
+                {
+                    "hub_name": h["hub_name"],
+                    "hub_ip": h["hub_ip"],
+                    "hub_id": h["id"],
+                    "is_primary": bool(h.get("is_primary")),
+                }
+                for h in r.json()
+            ]
+        logger.error(f"_get_hub_configs: hub_config load HTTP {r.status_code}")
+    except Exception as e:
+        logger.error(f"_get_hub_configs: hub_config load failed: {e}")
+    return []
 
 
 def run_classification() -> Dict[str, Any]:
@@ -426,7 +456,46 @@ def run_classification() -> Dict[str, Any]:
         result = classify_hub(**cfg)
         hub_results[cfg["hub_name"]] = result
 
-    # Step 2: Build native device registry (label → native hub info)
+    # Step 2: GLOBAL native dedup — the PRIMARY hub wins a same-label conflict.
+    # Mesh mirrors are already excluded (linkedDevice), so only genuinely-
+    # distinct natives are compared. The loser(s) are flagged is_name_duplicate
+    # (hidden in the picker, but KEPT as failover candidates — Matter/LAN
+    # devices bindable to multiple hubs). No primary in the group → earliest
+    # hub_id wins (deterministic).
+    all_natives: List[Dict[str, Any]] = []
+    for result in hub_results.values():
+        all_natives.extend(result.get("native", []))
+
+    def _rank(e: Dict[str, Any]):
+        return (0 if e.get("is_primary") else 1, e.get("hub_id") or 1_000_000)
+
+    by_label: Dict[str, List[Dict[str, Any]]] = {}
+    for e in all_natives:
+        key = (e.get("label") or "").strip().lower()
+        if key:
+            by_label.setdefault(key, []).append(e)
+
+    name_dups = 0
+    for group in by_label.values():
+        winner = min(group, key=_rank)
+        for e in group:
+            e["is_name_duplicate"] = (len(group) > 1 and e is not winner)
+            if e["is_name_duplicate"]:
+                name_dups += 1
+    if name_dups:
+        logger.info(f"classifier dedup: {name_dups} same-label native(s) flagged is_name_duplicate (primary wins)")
+
+    # Ingest ALL natives (winners + flagged losers) into `devices`, keyed on
+    # (hub_ip, hubitat_id). hub_id is set here — fixing the old INSERT that
+    # silently failed on hub_id NOT NULL.
+    try:
+        _ingest_into_devices(all_natives)
+    except Exception as e:
+        logger.warning(f"_ingest_into_devices (global) failed: {e}")
+
+    # Step 3: device_hub_mapping cross-reference (command routing). Native
+    # registry = WINNERS only (is_name_duplicate=false); mirrors come from
+    # linked devices on other hubs sharing the label.
     native_registry: Dict[str, Dict[str, Any]] = {}
     all_devices_by_hub: Dict[str, Dict[str, Dict]] = {}
 
@@ -435,18 +504,18 @@ def run_classification() -> Dict[str, Any]:
             continue
         all_devices_by_hub[hub_name] = {}
         for d in result.get("native", []):
-            native_registry[d["label"]] = {
-                "hub_name": hub_name,
-                "hub_ip": result["hub_ip"],
-                "id": d["id"],
-                "protocol": d["protocol"],
-                "type": d["type"],
-            }
+            if not d.get("is_name_duplicate"):
+                native_registry[d["label"]] = {
+                    "hub_name": hub_name,
+                    "hub_ip": result["hub_ip"],
+                    "id": d["id"],
+                    "protocol": d["protocol"],
+                    "type": d["type"],
+                }
             all_devices_by_hub[hub_name][d["label"]] = d
         for d in result.get("linked", []):
             all_devices_by_hub[hub_name][d["label"]] = d
 
-    # Step 3: Cross-reference — find mirrors on other hubs
     routing_entries = []
     for label, native_info in native_registry.items():
         mirrors = {}

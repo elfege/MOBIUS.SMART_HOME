@@ -1725,6 +1725,11 @@ async def matter_nodes():
                     or match.get('device_name')
                 )
                 node['_hubitat_device_id'] = match.get('maker_api_device_id')
+                # Enrich for the Matter UI: hub link target + responsiveness
+                # signals (matter_discovery refreshes is_online/last_seen_at).
+                node['_hub_ip'] = match.get('hub_ip')
+                node['_is_online'] = match.get('is_online')
+                node['_last_seen_at'] = match.get('last_seen_at')
 
                 # Backfill: if matched by UniqueID but our_node_id not set, update DB
                 if not match.get('our_node_id') and node_id:

@@ -422,12 +422,18 @@
 /* ---------- panels (right pane) ---------- */
 .settings-panels {
     min-width: 0;
+    /* Stack every panel in ONE grid cell so the container is always as tall as
+       the LARGEST tab — switching tabs no longer resizes/jumps the layout.
+       (Inactive panels stay in flow but invisible; see .settings-panel below.) */
+    display: grid;
+    grid-template-columns: 1fr;
 }
 .settings-panel {
-    display: none;
+    grid-area: 1 / 1;        /* all panels overlap in the same cell */
+    visibility: hidden;      /* occupy space (sizes the container) but unseen + non-interactive */
 }
 .settings-panel.is-active {
-    display: block;
+    visibility: visible;
 }
 .settings-panel-title {
     margin: 0 0 0.25rem;

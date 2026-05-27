@@ -165,6 +165,23 @@ $(document).ready(function () {
     }
 
     /**
+     * Responsiveness verdict from a matched device's is_online + last_seen_at.
+     * stale = offline or no sighting >30m; longGone = offline or >6h.
+     */
+    function _staleness(isOnline, lastSeenAt) {
+        const lastSeen = lastSeenAt ? new Date(lastSeenAt).getTime() : null;
+        const ageMs = lastSeen !== null ? (Date.now() - lastSeen) : null;
+        const STALE_MS = 30 * 60 * 1000, LONG_MS = 6 * 60 * 60 * 1000;
+        const offline = isOnline === false;
+        return {
+            stale: offline || (ageMs !== null && ageMs > STALE_MS),
+            longGone: offline || (ageMs !== null && ageMs > LONG_MS),
+            offline,
+            seenAgo: ageMs !== null ? _timeAgoShort(ageMs) : 'unknown',
+        };
+    }
+
+    /**
      * Render the Matter nodes grid.
      */
     function renderNodes() {
@@ -244,6 +261,14 @@ $(document).ready(function () {
         $container.find('.btn-test-off').on('click', function () {
             testMatterCommand($(this).data('node-id'), 'off');
         });
+
+        // Node staleness (_is_online/_last_seen_at) just became available;
+        // refresh the mappings table so its Remove-button highlights reflect
+        // responsiveness too (loadAll fetches nodes + mappings in parallel, so
+        // mappings may have rendered before nodes were known).
+        if (typeof mappings !== 'undefined' && mappings && mappings.length) {
+            renderMappings();
+        }
     }
 
     /**
@@ -280,15 +305,35 @@ $(document).ready(function () {
             );
             const hName = hDevice ? hDevice.label || hDevice.name : '';
 
+            // Correlate to the enriched node (matterNodes carry _is_online /
+            // _last_seen_at) for responsiveness. Highlights the Remove button
+            // for long-unresponsive devices — the natural "this one's dead,
+            // clean it up" affordance.
+            const node = matterNodes.find(
+                n => (n.node_id || n.nodeId) === m.matter_node_id
+            );
+            const st = node
+                ? _staleness(node._is_online, node._last_seen_at)
+                : { stale: false, longGone: false, seenAgo: 'unknown' };
+            const rmStyle = st.longGone
+                ? 'style="background:#c0564a;border-color:#c0564a;box-shadow:0 0 0 2px rgba(192,86,74,.45);"'
+                : (st.stale ? 'style="box-shadow:0 0 0 2px rgba(199,154,90,.5);"' : '');
+            const rmTitle = st.stale
+                ? `title="Unresponsive — no sighting for ${st.seenAgo}${st.offline ? ' (device offline)' : ''}; consider removing"`
+                : '';
+            const staleMark = st.stale
+                ? ` <span title="unresponsive · ${st.seenAgo}" style="color:${st.longGone ? '#e6857a' : '#d9b277'};">⚠</span>`
+                : '';
+
             html += `
-                <tr>
-                    <td>#${m.hubitat_device_id} ${escapeHtml(hName)}</td>
+                <tr${st.longGone ? ' style="background:rgba(192,86,74,.06);"' : ''}>
+                    <td>#${m.hubitat_device_id} ${escapeHtml(hName)}${staleMark}</td>
                     <td>${m.matter_node_id}</td>
                     <td>${m.matter_endpoint_id}</td>
                     <td>${escapeHtml(m.device_name || '')}</td>
                     <td>
                         <button class="btn btn-small btn-danger btn-delete-mapping"
-                                data-device-id="${m.hubitat_device_id}">Remove</button>
+                                data-device-id="${m.hubitat_device_id}" ${rmStyle} ${rmTitle}>Remove</button>
                     </td>
                 </tr>
             `;

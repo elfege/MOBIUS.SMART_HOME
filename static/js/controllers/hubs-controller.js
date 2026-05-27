@@ -80,11 +80,58 @@ function setStatus($form, msg, isError) {
         .css('color', isError ? '#e57373' : '#7ec27e');
 }
 
-function renderHub(hub) {
+/**
+ * Populate the admin-API contract-drift health line on a hub card from a
+ * hub_health row (see services/hub_contract_watch.py). Shows firmware version
+ * and a green/red/amber badge for the runmethod command path.
+ */
+function applyHealth($form, health) {
+    const $fw = $form.find('.hub-health-firmware');
+    const $badge = $form.find('.hub-health-badge');
+    const $checked = $form.find('.hub-health-checked');
+
+    if (!health) {
+        $fw.text('');
+        $badge.text('').css({ background: '', color: '' });
+        $checked.text('');
+        return;
+    }
+
+    $fw.text(health.platform_version ? `Firmware ${health.platform_version}` : 'Firmware —');
+
+    const ok = health.command_path_ok;
+    const contract = health.command_path_contract;
+    let label, bg, fg;
+    if (ok === true && contract === 'form') {
+        label = 'Commands OK (legacy form contract)'; bg = '#5a4a1e'; fg = '#f0d97a';
+    } else if (ok === true) {
+        label = 'Commands OK'; bg = '#1e4a2e'; fg = '#7ec27e';
+    } else if (ok === false) {
+        label = `Commands BROKEN (HTTP path rejected)`; bg = '#5a1e1e'; fg = '#e57373';
+    } else {
+        label = 'Command path not yet checked'; bg = '#333'; fg = '#aaa';
+    }
+    $badge.text(label).css({ background: bg, color: fg });
+    if (ok === false && health.command_path_error) {
+        $badge.attr('title', health.command_path_error);
+    } else {
+        $badge.removeAttr('title');
+    }
+
+    if (health.command_path_checked_at) {
+        const d = new Date(health.command_path_checked_at);
+        $checked.text(`checked ${d.toLocaleString()}`);
+    } else {
+        $checked.text('');
+    }
+}
+
+function renderHub(hub, health) {
     const tpl = document.getElementById('hub-card-template');
     const node = tpl.content.firstElementChild.cloneNode(true);
     const $form = $(node);
     fillForm($form, hub);
+    applyHealth($form, health);
 
     $form.on('submit', async function (e) {
         e.preventDefault();
@@ -137,9 +184,18 @@ async function loadAll() {
     try {
         $status.text('Loading…');
         const hubs = await fetchJSON('/api/hubs');
+        // Merge per-hub admin-API contract-drift health (best-effort; the
+        // hub list still renders if the health endpoint is unavailable).
+        let healthById = {};
+        try {
+            const health = await fetchJSON('/api/hubs/health');
+            for (const row of health) healthById[row.hub_id] = row;
+        } catch (e) {
+            // non-fatal — cards just render without the health line
+        }
         $status.text(`${hubs.length} hub${hubs.length === 1 ? '' : 's'} configured`);
         for (const h of hubs) {
-            $list.append(renderHub(h));
+            $list.append(renderHub(h, healthById[h.id]));
         }
     } catch (err) {
         $status.text(`Failed to load: ${err.message}`).css('color', '#e57373');

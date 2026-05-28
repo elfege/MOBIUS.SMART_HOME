@@ -289,7 +289,12 @@ class WebhookRouter:
         #   3. deviceId itself IS a canonical PK (e2e test injection sends
         #      synthesized displayNames; device_selections store canonical
         #      PKs, so tests author scenarios with deviceId = canonical id).
-        canonical_row = self._lookup_canonical_by_label(display_name)
+        # Sync PostgREST call on every event — off the loop so a slow lookup
+        # can't hold the dispatch path. Worker thread is fine: per-event
+        # latency budget is well above to_thread dispatch overhead.
+        canonical_row = await asyncio.to_thread(
+            self._lookup_canonical_by_label, display_name
+        )
 
         # Mesh-mirror filter at ingest: silently drop mirrors before any
         # event_log write happens. The eventsocket fans out the same event
@@ -436,17 +441,23 @@ class WebhookRouter:
             except Exception:
                 processing_ms = None
 
-        event_log_id = self._log_event_v2(
-            event=event,
-            hub_ip=hub_ip,
-            canonical_id=canonical_id,
-            intake_path=intake_path,
-            processing_ms=processing_ms,
-            routed_to=routed_to,
-            raw_payload=webhook_payload,
+        # Both writes are sync PostgREST calls — dispatch to a worker thread
+        # so the per-event hot path never holds the event loop on a slow
+        # database. asyncio.to_thread takes a callable and **kwargs as
+        # positional only, so wrap in a lambda to keep the kwargs form.
+        event_log_id = await asyncio.to_thread(
+            lambda: self._log_event_v2(
+                event=event,
+                hub_ip=hub_ip,
+                canonical_id=canonical_id,
+                intake_path=intake_path,
+                processing_ms=processing_ms,
+                routed_to=routed_to,
+                raw_payload=webhook_payload,
+            )
         )
         if event_log_id is not None and routings:
-            self._log_routings(event_log_id, routings)
+            await asyncio.to_thread(self._log_routings, event_log_id, routings)
 
         # Broadcast to E2E test SSE subscribers (if any are listening).
         # This lets the E2E terminal log show live webhook traffic.
@@ -559,8 +570,8 @@ class WebhookRouter:
         )
         notified = sum(1 for ok in results if ok)
 
-        # Update location_modes table
-        self._update_mode(new_mode)
+        # Update location_modes table — sync PostgREST writes, off the loop.
+        await asyncio.to_thread(self._update_mode, new_mode)
 
         return notified
 

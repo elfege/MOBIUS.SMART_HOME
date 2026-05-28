@@ -464,7 +464,10 @@ class WebhookRouter:
         # Best-effort: failures here must never affect event routing.
         try:
             from services.e2e_events import get_e2e_broadcaster
-            import asyncio
+            # NOTE: asyncio is imported at module level (line 15). A second
+            # function-local `import asyncio` here would shadow it and turn
+            # every asyncio.* reference earlier in this function into an
+            # UnboundLocalError. Removed 2026-05-28.
 
             broadcaster = get_e2e_broadcaster()
             if broadcaster.subscriber_count > 0:
@@ -490,7 +493,7 @@ class WebhookRouter:
         # Best-effort: failures here must never affect event routing.
         try:
             from services.dashboard_broadcaster import get_dashboard_broadcaster
-            import asyncio
+            # asyncio is module-level (see note above); no local import here.
 
             dash_broadcaster = get_dashboard_broadcaster()
             if dash_broadcaster.client_count > 0:

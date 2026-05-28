@@ -129,7 +129,9 @@ class ReconcilePoll:
             pass
 
         while not self._stop_event.is_set():
-            interval = self._pick_interval()
+            # _pick_interval blocks on PostgREST — offload to a worker thread
+            # so the event loop is never held by the sync HTTP call.
+            interval = await asyncio.to_thread(self._pick_interval)
             try:
                 await self._one_pass()
             except asyncio.CancelledError:
@@ -177,13 +179,15 @@ class ReconcilePoll:
     # ------------------------------------------------------------------
 
     async def _one_pass(self) -> None:
-        hubs = self._load_hubs()
+        # Both helpers below issue sync PostgREST requests; route them through
+        # a worker thread so the event loop keeps spinning if PostgREST stalls.
+        hubs = await asyncio.to_thread(self._load_hubs)
         if not hubs:
             return
 
         # Build (canonical_id → set of subscribed event_types). One query,
         # used across all hubs.
-        sub_map = self._load_subscriptions()
+        sub_map = await asyncio.to_thread(self._load_subscriptions)
         if not sub_map:
             return
 
@@ -297,7 +301,10 @@ class ReconcilePoll:
             )
             return 0
 
-        canonical_by_native = self._load_canonical_by_hub_native(hub_ip)
+        # Sync PostgREST call → off the loop, same rationale as in _one_pass.
+        canonical_by_native = await asyncio.to_thread(
+            self._load_canonical_by_hub_native, hub_ip
+        )
         # Inverse lookup: native id list for THIS hub limited to canonical
         # ids that anyone is actually subscribed to. Used by the admin API
         # path to skip the metadata-only bulk endpoint and pull state only
@@ -382,7 +389,8 @@ class ReconcilePoll:
                         f'attr={attr}: {e}'
                     )
 
-        self._update_hub_health(hub_id, diffs)
+        # Sync PostgREST PATCH → off the loop.
+        await asyncio.to_thread(self._update_hub_health, hub_id, diffs)
         return diffs
 
     def _http_get_devices_all(

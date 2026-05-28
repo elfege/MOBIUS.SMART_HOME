@@ -1794,7 +1794,9 @@ async def matter_commission(body: MatterCommissionRequest):
 async def matter_mappings():
     """Get all Hubitat-to-Matter device mappings."""
     from services.matter_client import get_all_matter_mappings
-    return get_all_matter_mappings()
+    # get_all_matter_mappings() is sync (blocking requests.get on PostgREST);
+    # offload to a worker thread so a slow lookup can't hold the event loop.
+    return await asyncio.to_thread(get_all_matter_mappings)
 
 
 @app.post("/api/matter/map", tags=["matter"])

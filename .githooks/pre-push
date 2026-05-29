@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# ╔══════════════════════════════════════════════════════════════════════════════════════╗
+# ║  .githooks/pre-push                                                                  ║
+# ║                                                                                      ║
+# ║  Layer-2 defense in the dual-repo leak-prevention model. Refuses two classes of      ║
+# ║  push that would cause an unrecoverable mistake:                                     ║
+# ║                                                                                      ║
+# ║      (A) push DIRECTLY to the public mirror URL from the live repo                   ║
+# ║          (must always go through scripts/publish_public_mirror.sh)                   ║
+# ║      (B) push that introduces or modifies one of the                                 ║
+# ║          NEVER_TRACK_PATHS (e.g. chat.md, claude_rules.md, DOCS/) into history       ║
+# ║          (those should be in .gitignore — appearance in a diff means a `git add -f`  ║
+# ║          slipped through)                                                            ║
+# ║                                                                                      ║
+# ║  Canonical: ~/0_MOBIUS.TILES/docs/plans/dual_repo_canonical_runbook_and_pitfalls_    ║
+# ║             for_tiles_and_nvr_2026_05_29.md §1 (three-layer defense)                 ║
+# ║                                                                                      ║
+# ║      ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐              ║
+# ║      │ argv: remote URL │──▶│ check (A) public │──▶│ check (B) flagged│              ║
+# ║      │ stdin: ref ranges│   │ URL guard        │   │ paths in commits │              ║
+# ║      └──────────────────┘   └──────────────────┘   └────────┬─────────┘              ║
+# ║                                                             ▼                        ║
+# ║                                                     ┌──────────────────┐             ║
+# ║                                                     │ allow OR exit 1  │             ║
+# ║                                                     └──────────────────┘             ║
+# ║                                                                                      ║
+# ║  CANONICAL EXCEPTIONS (documented):                                                  ║
+# ║    S.2.1  source_global_env replaced by S.2.18 portable helper sourcing — hook       ║
+# ║           runs on every clone including public; no personal shell config available.  ║
+# ║    S.2.3  PAUSE_FILE — not applicable to a git hook.                                 ║
+# ║    S.2.6  No bg-PID tracking — hook is a one-shot stdin reader; no children survive. ║
+# ║    S.2.10 simple_logger — coloured echo to stderr for host-independence.             ║
+# ╚══════════════════════════════════════════════════════════════════════════════════════╝
+
+set -euo pipefail
+
+SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+SCRIPT_R_PATH=$(realpath "${BASH_SOURCE[0]}")
+SCRIPT_DIR="${SCRIPT_R_PATH%${SCRIPT_NAME}}"
+
+# Repo root = parent of .githooks/.  builtin cd bypasses any cd wrapper (S.2.17).
+REPO_ROOT="$(builtin cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Color helpers: home → in-repo fallback → tolerated absent (S.2.18).
+. ~/.env.colors 2>/dev/null || . "${REPO_ROOT}/.env.colors" 2>/dev/null || true
+
+########################################################################-########################################################################
+SMARTHOME_PREPUSH__REMOTE_NAME="${1:-}"           # $1 from git: short remote name (origin, public, …)
+SMARTHOME_PREPUSH__REMOTE_URL="${2:-}"            # $2 from git: full remote URL
+# Regex that matches the PUBLIC mirror URL but NOT the private dev URL.
+# elfege/MOBIUS.SMART_HOME.git           → match (public)
+# elfege/MOBIUS.SMART_HOME-dev.git       → no match (private — "-dev" suffix)
+# Anchors at end-of-string ensure "-dev.git" never matches.
+SMARTHOME_PREPUSH__PUBLIC_URL_REGEX='[/:]elfege/MOBIUS\.SMART_HOME\.git$|[/:]elfege/MOBIUS\.SMART_HOME$'
+
+# Layer-2 NEVER-TRACK paths: must match .gitignore "untracked everywhere" block.
+# These are the operator-only files that should never appear in any commit's diff.
+# Privately-tracked files (handoff, project_history, plans, history, teachings,
+# weekly_summaries, patent) are NOT in this list — they're intentionally tracked
+# in the private repo and only stripped at publish time by publish_public_mirror.sh.
+SMARTHOME_PREPUSH__NEVER_TRACK_PATHS=(
+	"chat.md"
+	"claude_rules.md"
+	"DOCS"
+	".tag"
+	".hubitat"
+	"_SYNCAPP"
+	"postgres_data"
+	"app_structure.txt"
+	"claude_rules.txt"
+	"file_history.txt"
+	"tree.txt"
+)
+
+SMARTHOME_PREPUSH__ZERO_SHA="0000000000000000000000000000000000000000"
+########################################################################-########################################################################
+
+########################################################################-########################################################################
+#                                                                INITIALIZATION                                                                  #
+########################################################################-########################################################################
+smarthome_prepush__say() {
+	# Coloured stderr write. Hooks never write to stdout (git ignores it); stderr
+	# is what the operator sees alongside the push attempt.
+	echo -e "$@" >&2
+}
+########################################################################-########################################################################
+
+########################################################################-########################################################################
+#                                                              REMOTE-URL GUARD                                                                  #
+########################################################################-########################################################################
+smarthome_prepush__guard_public_url() {
+	# Layer-2 (A): refuse a direct push to the public mirror URL. The architecture
+	# invariant is that nothing pushes to public from the LIVE working repo; only
+	# scripts/publish_public_mirror.sh does (from a /tmp clone, after filter-repo).
+	# If the operator added `public` as a remote on the live repo and tried to
+	# `git push public main`, this catches it.
+	if [[ "$SMARTHOME_PREPUSH__REMOTE_URL" =~ $SMARTHOME_PREPUSH__PUBLIC_URL_REGEX ]]; then
+		smarthome_prepush__say ""
+		smarthome_prepush__say "${RED:-}✗ REFUSING direct push to public mirror URL${NC:-}"
+		smarthome_prepush__say "  remote: ${SMARTHOME_PREPUSH__REMOTE_NAME} (${SMARTHOME_PREPUSH__REMOTE_URL})"
+		smarthome_prepush__say ""
+		smarthome_prepush__say "  The public mirror MUST be published via scripts/publish_public_mirror.sh,"
+		smarthome_prepush__say "  which clones into /tmp, runs git filter-repo to strip private content,"
+		smarthome_prepush__say "  and fast-forward-pushes the cleansed history."
+		smarthome_prepush__say ""
+		smarthome_prepush__say "  Pushing directly would leak every privately-tracked file (handoffs, plans,"
+		smarthome_prepush__say "  history, patent, etc.) to the public portfolio repo."
+		smarthome_prepush__say ""
+		smarthome_prepush__say "  Correct command:"
+		smarthome_prepush__say "    ${CYAN:-}./scripts/publish_public_mirror.sh main${NC:-}"
+		smarthome_prepush__say ""
+		smarthome_prepush__say "  Emergency bypass (NOT recommended, breaks portfolio invariant):"
+		smarthome_prepush__say "    ${CYAN:-}git push --no-verify${NC:-} …"
+		smarthome_prepush__say ""
+		exit 1
+	fi
+}
+########################################################################-########################################################################
+
+########################################################################-########################################################################
+#                                                            PRIVATE-PATH GUARD                                                                  #
+########################################################################-########################################################################
+smarthome_prepush__diff_introduces_path() {
+	# Return 0 if ANY commit in the given range ADDS or MODIFIES the path.
+	# --diff-filter=AM intentionally excludes Deletions and Renames: a delete
+	# of a flagged path is a SCRUBBING action (good — let it through), and a
+	# rename only matters if the new name is itself flagged, which surfaces
+	# as an A on the new name. (Canonical PITFALL_3.)
+	# Diff-based (not tree-based) — we want to block the commit that ADDS
+	# or modifies the path, not deadlock on a pre-existing tracked file
+	# living elsewhere in the tree.
+	local range_args=("$1")
+	local path="$2"
+	local sha
+
+	if [[ "$1" == "RANGE_NEW_REF" ]]; then
+		# New ref (tag or branch): walk commits reachable from local that are NOT
+		# already on any remote-tracking branch.
+		range_args=("$3" --not --remotes)
+	fi
+
+	while read -r sha; do
+		[[ -z "$sha" ]] && continue
+		if git diff-tree --no-commit-id --name-only --diff-filter=AM -r "$sha" 2>/dev/null \
+			| awk -v p="$path" '$0==p || index($0, p"/")==1 {f=1} END{exit !f}'; then
+			return 0
+		fi
+	done < <(git rev-list "${range_args[@]}" 2>/dev/null)
+	return 1
+}
+
+smarthome_prepush__guard_never_track_paths() {
+	# Layer-2 (B): walk every commit-range git is about to push and block if any
+	# commit introduces a NEVER_TRACK path. Reads stdin once into an array because
+	# the inner diff_introduces_path uses its own while-read and would race.
+	local local_ref local_sha remote_ref remote_sha
+	local violations=0
+	local push_lines=()
+	local line
+
+	while IFS= read -r line; do
+		push_lines+=("$line")
+	done
+
+	for line in "${push_lines[@]}"; do
+		read -r local_ref local_sha remote_ref remote_sha <<< "$line"
+		# Branch deletion: nothing to inspect.
+		[[ "$local_sha" == "$SMARTHOME_PREPUSH__ZERO_SHA" ]] && continue
+
+		local range_mode range_a=""
+		if [[ "$remote_sha" == "$SMARTHOME_PREPUSH__ZERO_SHA" ]]; then
+			range_mode="RANGE_NEW_REF"
+			range_a="$local_sha"
+		else
+			range_mode="${remote_sha}..${local_sha}"
+		fi
+
+		for path in "${SMARTHOME_PREPUSH__NEVER_TRACK_PATHS[@]}"; do
+			if smarthome_prepush__diff_introduces_path "$range_mode" "$path" "$range_a"; then
+				smarthome_prepush__say "${RED:-}✗ REFUSING PUSH:${NC:-} commit in ${range_mode} introduces/modifies '${path}' → ${remote_ref}"
+				violations=$((violations + 1))
+			fi
+		done
+	done
+
+	if (( violations > 0 )); then
+		smarthome_prepush__say ""
+		smarthome_prepush__say "Paths flagged as untracked-everywhere (per .gitignore + canonical §3.2):"
+		printf "  - %s\n" "${SMARTHOME_PREPUSH__NEVER_TRACK_PATHS[@]}" >&2
+		smarthome_prepush__say ""
+		smarthome_prepush__say "Appearance in a diff means a 'git add -f' likely bypassed .gitignore."
+		smarthome_prepush__say "Either: drop the file with 'git rm --cached <path>' + recommit, OR"
+		smarthome_prepush__say "       remove the path from .gitignore + .githooks/pre-push + filter rules"
+		smarthome_prepush__say "       (all three layers must stay in lockstep — see canonical §1)."
+		smarthome_prepush__say ""
+		smarthome_prepush__say "Emergency bypass (NOT recommended): ${CYAN:-}git push --no-verify${NC:-} …"
+		smarthome_prepush__say ""
+		exit 1
+	fi
+}
+########################################################################-########################################################################
+
+########################################################################-########################################################################
+#                                                                  EXECUTION                                                                     #
+########################################################################-########################################################################
+smarthome_prepush__run() {
+	# Order: cheap URL check first (no git invocations) → expensive diff walk
+	# only when the URL check passes. Stdin is consumed exactly once, inside
+	# the diff walk.
+	smarthome_prepush__guard_public_url
+	smarthome_prepush__guard_never_track_paths
+	exit 0
+}
+########################################################################-########################################################################
+
+smarthome_prepush__run

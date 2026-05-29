@@ -1,0 +1,86 @@
+# autotag.yml — semver auto-tag on every push to main, plus GitHub Release.
+#
+# Belt-and-braces with the local .githooks/post-commit hook: the hook fires
+# from the dev's machine, this Action fires from anywhere (including a push
+# arriving from a different clone). Both are idempotent — _auto_version.sh
+# never downgrades ./.tag and only tags HEAD if no tag points at it yet.
+#
+# Why the Release is created HERE (not by release.yml on the tag push):
+# GITHUB_TOKEN-driven pushes do NOT trigger downstream workflows. If this
+# Action pushed the tag and then expected release.yml to fire on the tag,
+# nothing would happen. So we do the Release creation inline. release.yml
+# remains for tags pushed manually from a dev machine. (Canonical PITFALL_6.)
+#
+# NOTE: the public mirror republish (scripts/publish_public_mirror.sh) is
+# intentionally NOT triggered here yet — that requires a deploy key or PAT
+# for elfege/MOBIUS.SMART_HOME. See publish-public-mirror.yml.disabled for
+# the template.
+name: Autotag
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: autotag-main
+  cancel-in-progress: false
+
+jobs:
+  autotag:
+    name: Bump version and tag HEAD
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Run _auto_version.sh
+        run: |
+          chmod +x scripts/_auto_version.sh
+          scripts/_auto_version.sh
+
+      - name: Resolve the tag that points at HEAD (if any)
+        id: tag
+        run: |
+          TAG="$(git tag --points-at HEAD 'v*.*.*' | sort -V | tail -1)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Push the new tag (if one was created)
+        if: steps.tag.outputs.tag != ''
+        run: |
+          git push origin "${{ steps.tag.outputs.tag }}"
+
+      - name: Build release notes
+        if: steps.tag.outputs.tag != ''
+        id: notes
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          PREV="$(git tag -l 'v*.*.*' | sort -V | grep -B1 "^${TAG}$" | head -1)"
+          if [ "$PREV" = "$TAG" ] || [ -z "$PREV" ]; then
+            RANGE="$TAG"; HEADER="### Initial release"
+          else
+            RANGE="${PREV}..${TAG}"; HEADER="### Changes since ${PREV}"
+          fi
+          { echo "$HEADER"; echo ""; git log "$RANGE" --pretty=format:'- %s' --no-merges | head -200; } > /tmp/notes.md
+          echo "notes_path=/tmp/notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: steps.tag.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --title "${{ steps.tag.outputs.tag }}" \
+            --notes-file "${{ steps.notes.outputs.notes_path }}" \
+            --verify-tag || true

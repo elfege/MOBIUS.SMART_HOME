@@ -44,3 +44,47 @@ nginx/certs/
 venv_test/
 .pytest_cache/
 backups/
+
+# ──────────────────────────────────────────────────────────────────────
+# DUAL-REPO PRIVATE-NOTES GUARD (operator workflow preserved)
+# Per canonical ~/0_MOBIUS.TILES/docs/plans/dual_repo_canonical_runbook_
+#     and_pitfalls_for_tiles_and_nvr_2026_05_29.md §3
+#
+# DESIGN: most operator-private docs stay TRACKED in the private repo
+# (operator's audit trail + the `commit` alias depends on `git add .`).
+# The leak is prevented at PUBLISH TIME by scripts/publish_public_mirror.sh
+# (layer 3) which filter-repo's them out of the cleansed public history,
+# AND by .githooks/pre-push (layer 2) which differentiates remotes and
+# refuses to push these paths to a public remote URL.
+#
+# Only files that should be untracked EVERYWHERE (operator does not
+# version them at all) go in the gitignore block below.
+# ──────────────────────────────────────────────────────────────────────
+
+# Untracked everywhere — operator never wants these versioned
+chat.md
+claude_rules.md
+DOCS/
+.tag
+
+# Operator-private dirs that have caused leaks elsewhere in the portfolio
+# (TILES learned the hard way — MSG-300 canonical pitfall). Defensive
+# entries: not tracked here today, but guards against an accidental commit
+# from running infrastructure (e.g. a stray docker volume mount).
+_SYNCAPP/
+.hubitat/
+postgres_data/
+
+# Operator dump files (defensive — not tracked here today)
+app_structure.txt
+claude_rules.txt
+file_history.txt
+tree.txt
+
+# Allowlist: scripts and hooks that MUST stay tracked (filename matches
+# patterns the operator might add globally elsewhere). Keeps the
+# publish/auto-version surface visible in the private repo.
+!scripts/publish_public_mirror.sh
+!scripts/_auto_version.sh
+!.githooks/pre-push
+!.githooks/pre-commit

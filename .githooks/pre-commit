@@ -2,21 +2,29 @@
 # ╔══════════════════════════════════════════════════════════════════════════════════════╗
 # ║  .githooks/pre-commit                                                                ║
 # ║                                                                                      ║
-# ║  Keeps the in-repo copies of color/logger helpers in sync with the developer's       ║
-# ║  home copies before every commit. End-user clones have no ~/.env.colors or           ║
-# ║  ~/logger.sh, so the hook is a silent no-op there — safe to ship on the public       ║
-# ║  repo.                                                                               ║
+# ║  Keeps the in-repo copies of operator-shared helper files in sync with the           ║
+# ║  developer's home canonical copies before every commit. End-user clones have no      ║
+# ║  ~/.env.colors / ~/logger.sh / ~/start_utils.sh, so the hook is a silent no-op       ║
+# ║  there — safe to ship on the public repo.                                            ║
 # ║                                                                                      ║
-# ║      ~/.env.colors ──┐                                                               ║
-# ║                      │ rsync (if newer)                                              ║
-# ║      ~/logger.sh ────┴──▶ ./<repo-root>/{.env.colors,logger.sh} ──▶ git add          ║
+# ║  start_utils.sh is project-agnostic by contract (each project's start.sh sets        ║
+# ║  START_UTILS__PROJECT="SMARTHOME"/"TILES"/... before sourcing) — so one canonical    ║
+# ║  ~/start_utils.sh edited by the operator is automatically picked up by every         ║
+# ║  MOBIUS project's repo on its next commit.                                           ║
+# ║                                                                                      ║
+# ║      ~/.env.colors        ──┐                                                        ║
+# ║      ~/logger.sh           ─┤ rsync (only if newer/changed)                          ║
+# ║      ~/start_utils.sh      ─┴──▶ ./<repo-root>/{.env.colors,logger.sh,                ║
+# ║                                                  start_utils.sh}   ──▶ git add      ║
 # ╚══════════════════════════════════════════════════════════════════════════════════════╝
 set -e
 
 REPO_ROOT="$(builtin cd "$(git rev-parse --show-toplevel)" && pwd)"
 CHANGED=0
 
-for f in .env.colors logger.sh; do
+# Files whose canonical lives at ~/<name> and whose in-repo copy must stay in
+# lockstep. Hook is silent-no-op when the home copy is absent (end-user clone).
+for f in .env.colors logger.sh start_utils.sh; do
 	src="$HOME/$f"
 	dst="$REPO_ROOT/$f"
 	# Only act when the home copy exists (dev machine). Compare with cmp so we
@@ -29,5 +37,5 @@ for f in .env.colors logger.sh; do
 	fi
 done
 
-[ "$CHANGED" -eq 1 ] && echo "pre-commit: refreshed in-repo .env.colors / logger.sh from home"
+[ "$CHANGED" -eq 1 ] && echo "pre-commit: refreshed in-repo .env.colors / logger.sh / start_utils.sh from home"
 exit 0

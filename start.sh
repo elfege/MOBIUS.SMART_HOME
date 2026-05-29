@@ -48,6 +48,10 @@ builtin cd "$SCRIPT_DIR" &>/dev/null || true
 . ~/logger.sh --no-exec &>/dev/null || . "${SCRIPT_DIR}logger.sh" --no-exec &>/dev/null || true
 
 # Required: repo-local startup library (AWS-secret pull + .env-only mode + color fallbacks).
+# Sets START_UTILS__PROJECT so the library reads SMARTHOME_-prefixed env vars
+# via bash indirection — the same library file is shared (via ~/start_utils.sh
+# + pre-commit rsync) across every MOBIUS project, each setting its own prefix.
+export START_UTILS__PROJECT="SMARTHOME"
 . "${SCRIPT_DIR}start_utils.sh" || {
 	echo -e "${RED}✗ Failed to source ${SCRIPT_DIR}start_utils.sh — required by start.sh${NC}"
 	exit 1

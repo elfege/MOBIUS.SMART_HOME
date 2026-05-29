@@ -46,6 +46,9 @@ export class DashboardController {
         // Render immediately from HTTP — never gate the UI on WebSocket
         await this.loadInstances();
 
+        // Drivers section (standalone device controllers; static for now).
+        this.renderDrivers();
+
         // Then open WebSocket for real-time push updates
         this._connectWebSocket();
     }
@@ -299,7 +302,30 @@ export class DashboardController {
 
         document.getElementById('empty-state').style.display = 'none';
 
-        this.container.innerHTML = this.instances.map(inst => this.renderCard(inst)).join('');
+        // Group instances by app type so the Apps section shows one collapsible
+        // group per app (app name → its instances). Cards themselves are
+        // unchanged (renderCard).
+        const groups = {};
+        for (const inst of this.instances) {
+            (groups[inst.app_type_id] = groups[inst.app_type_id] || []).push(inst);
+        }
+        this.container.innerHTML = Object.keys(groups).map(typeId => {
+            const insts = groups[typeId];
+            const name = this.getAppTypeName(Number(typeId));
+            const cards = insts.map(inst => this.renderCard(inst)).join('');
+            const n = insts.length;
+            const gridId = `app-group-${typeId}`;
+            return `
+                <div class="app-group" data-app="${typeId}">
+                    <button class="app-group-header" aria-expanded="true"
+                            onclick="dashboard.toggleGroup(this, '${gridId}')">
+                        <span class="app-group-caret">▾</span>
+                        <span class="app-group-name">${utils.escapeHtml(name)}</span>
+                        <span class="app-group-count">${n} instance${n !== 1 ? 's' : ''}</span>
+                    </button>
+                    <div class="instances-grid app-group-instances" id="${gridId}">${cards}</div>
+                </div>`;
+        }).join('');
 
         // Bind event handlers
         this.bindEvents();
@@ -462,6 +488,74 @@ export class DashboardController {
      */
     bindEvents() {
         window.dashboard = this;
+    }
+
+    /**
+     * Toggle a collapsible group (app group or driver group). `btn` is the
+     * clicked header button; `gridId` is the instances grid it controls.
+     */
+    toggleGroup(btn, gridId) {
+        const grid = document.getElementById(gridId);
+        if (!grid) return;
+        const open = grid.style.display !== 'none';
+        grid.style.display = open ? 'none' : '';
+        btn.setAttribute('aria-expanded', String(!open));
+        const caret = btn.querySelector('.app-group-caret');
+        if (caret) caret.textContent = open ? '▸' : '▾';
+    }
+
+    /**
+     * Render the Drivers section — standalone device controllers (not app
+     * instances). For now the only driver is the Samsung TV with one device;
+     * drilling in (driver → device → controller) opens the existing
+     * /samsung-tv page. Static for now — promote to data-driven when a second
+     * driver lands.
+     */
+    async renderDrivers() {
+        const el = document.getElementById('drivers-container');
+        if (!el) return;
+        window.dashboard = this;  // ensure inline onclick handlers resolve
+
+        // Device label comes from SAMSUNG_TV_NAME (a slug, e.g. "living_room_tv")
+        // via /samsung-tv/api/status, title-cased for display. Falls back to a
+        // generic label if the controller isn't reachable.
+        let tvLabel = 'Samsung TV';
+        try {
+            const s = await fetch('/samsung-tv/api/status').then(r => r.ok ? r.json() : null);
+            if (s && s.name) {
+                tvLabel = String(s.name).replace(/_/g, ' ')
+                    .replace(/\b\w/g, c => c.toUpperCase());
+            }
+        } catch (_) { /* keep fallback label */ }
+
+        el.innerHTML = `
+            <div class="app-group" data-driver="samsung_tv">
+                <button class="app-group-header" aria-expanded="false"
+                        onclick="dashboard.toggleGroup(this, 'driver-group-samsung_tv')">
+                    <span class="app-group-caret">▸</span>
+                    <span class="app-group-name">Samsung TV</span>
+                    <span class="app-group-count">1 device</span>
+                </button>
+                <div class="instances-grid app-group-instances" id="driver-group-samsung_tv"
+                     style="display:none;">
+                    <div class="instance-card driver-instance-card" style="cursor:pointer;"
+                         onclick="window.location='/samsung-tv'"
+                         title="Open the Samsung TV controller">
+                        <div class="card-header">
+                            <h3>${utils.escapeHtml(tvLabel)}</h3>
+                            <span class="app-type-badge">Samsung TV</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="card-body-top">
+                                <span class="status-indicator active">CONTROLLER</span>
+                                <div class="card-stats">
+                                    <span class="card-stat">Open controller →</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
     }
 
     /* =========================================================================

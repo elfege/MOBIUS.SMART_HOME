@@ -17,6 +17,26 @@
     line-height: 1.5;
 }
 .ws-health-alert a { color: var(--color-primary); }
+
+/* Apps / Drivers sections + collapsible groups (item 1, 2026-05-26). */
+.ds-section { margin-bottom: 1.75rem; }
+.ds-section-title {
+    font-size: 1.05rem; font-weight: 600; opacity: .75;
+    margin: 0 0 .6rem; text-transform: uppercase; letter-spacing: .04em;
+}
+.app-group { margin-bottom: .9rem; }
+.app-group-header {
+    display: flex; align-items: center; gap: .6rem; width: 100%; text-align: left;
+    background: rgba(255,255,255,0.03); border: 1px solid var(--color-border, #333);
+    border-radius: 8px; padding: .6rem .9rem; cursor: pointer;
+    color: var(--color-text); font-size: 1rem; font-family: inherit;
+}
+.app-group-header:hover { background: rgba(255,255,255,0.06); }
+.app-group-caret { opacity: .65; width: 1em; display: inline-block; }
+.app-group-name { font-weight: 600; }
+.app-group-count { margin-left: auto; opacity: .55; font-size: .85rem; }
+.app-group-instances { margin-top: .6rem; }
+.driver-instance-card .card-stat { color: var(--color-primary); }
 </style>
 {% endblock %}
 
@@ -28,16 +48,26 @@
     <div id="ws-health-alert" class="ws-health-alert" style="display:none;"></div>
 
     <section class="dashboard-header">
-        <h2>Your Automations</h2>
+        <h2>Your Smart Home</h2>
         <p class="status-summary">
             <span id="instances-count">Loading...</span>
         </p>
     </section>
 
-    <section class="instances-grid" id="instances-container">
-        <!-- Instance cards will be populated by JavaScript -->
-        <div class="loading-placeholder">
-            <p>Loading automations...</p>
+    <!-- APPS: automations grouped by app type. Click an app to expand its instances. -->
+    <section class="ds-section">
+        <h3 class="ds-section-title">Apps</h3>
+        <div id="instances-container">
+            <div class="loading-placeholder"><p>Loading automations...</p></div>
+        </div>
+    </section>
+
+    <!-- DRIVERS: standalone device controllers (Samsung TV for now). Click a driver →
+         its device(s) → opens the controller. Populated by renderDrivers(). -->
+    <section class="ds-section">
+        <h3 class="ds-section-title">Drivers</h3>
+        <div id="drivers-container">
+            <div class="loading-placeholder"><p>Loading drivers...</p></div>
         </div>
     </section>
 
@@ -99,11 +129,11 @@
         }).join('<br>');
         const recommendation = makerOn
             ? '<br><br>Maker API is currently enabled — it will pick up the slack until WS recovers.'
-            : '<br><br><strong>Maker API is disabled.</strong> Consider re-enabling on the Hubs page until the WS is healthy again.';
+            : '<br><br><strong>Maker API is disabled.</strong> Consider re-enabling in Settings → Hubs until the WS is healthy again.';
         alert.innerHTML = `
             <strong>⚠ Eventsocket health warning</strong><br>
             ${lines}${recommendation}
-            <a href="/hubs" style="margin-left:.5rem;">Go to Hubs →</a>
+            <a href="/admin/settings" style="margin-left:.5rem;">Go to Settings →</a>
         `;
         alert.style.display = 'block';
     }

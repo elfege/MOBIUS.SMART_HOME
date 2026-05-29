@@ -19,6 +19,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+# Defensive HTTP wrapper: offloads blocking `requests.*` calls onto a worker
+# thread so an unresponsive PostgREST / Hubitat hub can't hang the event loop.
+# Used by every FastAPI route below that talks to PostgREST. See
+# services/http_sync_offload.py for the rationale and the 2026-05-27 incident.
+from services.http_sync_offload import aget, apost, apatch, adelete
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -668,8 +674,18 @@ async def lifespan(app: FastAPI):
     )
     await _tv_client.start()
 
+    # Phase C defensive layer: in-process event-loop watchdog. Ticks every
+    # 2s; /api/health returns 503 if no tick within 10s. Docker healthcheck
+    # surfaces that as unhealthy, and the autoheal sidecar restarts the
+    # container. This narrows the stall-detection window from "loop fully
+    # wedged, no HTTP at all" to "loop degraded for >10s" — well before a
+    # stall becomes visible in the UI.
+    from services.loop_watchdog import start_watchdog, stop_watchdog
+    start_watchdog()
+
     yield
 
+    stop_watchdog()
     stop_cache_refresh()
     stop_matter_discovery()
     await stop_eventsocket()
@@ -716,8 +732,32 @@ app.include_router(samsung_tv_router)
 
 @app.get("/api/health", tags=["health"])
 async def health():
-    """Health check endpoint."""
-    return {"status": "ok"}
+    """
+    Liveness probe. Returns 200 only if the event-loop watchdog has
+    ticked within the alive threshold (10s by default). Returns 503 when
+    the loop is wedged or degraded — Docker healthcheck picks that up
+    and the autoheal sidecar restarts the container. See
+    services/loop_watchdog.py for the rationale.
+    """
+    from services.loop_watchdog import (
+        is_loop_alive,
+        last_tick_age_seconds,
+        ALIVE_THRESHOLD_SECS,
+    )
+    age = last_tick_age_seconds()
+    if not is_loop_alive():
+        # 503 fails the Docker healthcheck → autoheal restarts. Body is
+        # informational; the status code is what the orchestrator reads.
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "degraded",
+                "reason": "event loop watchdog stale",
+                "loop_lag_seconds": age,
+                "alive_threshold_seconds": ALIVE_THRESHOLD_SECS,
+            },
+        )
+    return {"status": "ok", "loop_lag_seconds": age}
 
 
 @app.get("/api/status", tags=["health"])
@@ -1083,7 +1123,6 @@ async def get_devices(capability: Optional[str] = Query(None)):
         capability: Filter by capability (e.g., 'motionSensor', 'switch').
                     PostgREST JSONB containment: capabilities ? capability.
     """
-    import requests as _requests
     try:
         pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
         params = {
@@ -1096,7 +1135,7 @@ async def get_devices(capability: Optional[str] = Query(None)):
             # of strings. NOT cs.{"value"} — that's PG-array literal syntax
             # and PostgREST rejects it on JSONB columns (PGRST 22P02).
             params['capabilities'] = f'cs.["{capability}"]'
-        r = _requests.get(f"{pg}/devices", params=params, timeout=5)
+        r = await aget(f"{pg}/devices", params=params, timeout=5)
         r.raise_for_status()
         rows = r.json()
         # Shape compatibility: legacy callers expect each device to have
@@ -1124,13 +1163,12 @@ async def get_devices_by_categories(categories: str = Query(...)):
     Internally one PostgREST call fetches all devices, then we group in
     memory. Faster than N round-trips and trivial to add new categories.
     """
-    import requests as _requests
     cats = [c.strip() for c in categories.split(',') if c.strip()]
     if not cats:
         return {}
     try:
         pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
-        r = _requests.get(
+        r = await aget(
             f"{pg}/devices",
             params={
                 'select': 'id,hub_ip,hubitat_id,label,name,device_type,'
@@ -1319,12 +1357,11 @@ async def list_system_settings(ui_only: bool = Query(True)):
     List system-wide settings. Default: only UI-exposed ones.
     Set ui_only=false to include internal knobs.
     """
-    import requests as _requests
     params = {"order": "key"}
     if ui_only:
         params["ui_exposed"] = "eq.true"
     try:
-        r = _requests.get(
+        r = await aget(
             f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/system_settings",
             params=params,
             timeout=5,
@@ -1374,10 +1411,9 @@ async def list_app_type_settings(type_name: str):
     """
     List per-app-type global settings for the named app type.
     """
-    import requests as _requests
     pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
     # Look up app_type id from name
-    r = _requests.get(f"{pg}/app_types",
+    r = await aget(f"{pg}/app_types",
                       params={"type_name": f"eq.{type_name}",
                               "select": "id"},
                       timeout=5)
@@ -1386,7 +1422,7 @@ async def list_app_type_settings(type_name: str):
         raise HTTPException(status_code=404,
                             detail=f"app_type {type_name!r} not found")
     app_type_id = rows[0]["id"]
-    r = _requests.get(f"{pg}/app_type_settings",
+    r = await aget(f"{pg}/app_type_settings",
                       params={"app_type_id": f"eq.{app_type_id}",
                               "ui_exposed": "eq.true",
                               "order": "key"},
@@ -1403,9 +1439,8 @@ class AppTypeSettingPatch(BaseModel):
 @app.get("/api/instances/{instance_id}/setting-exceptions", tags=["settings"])
 async def list_instance_setting_exceptions(instance_id: int):
     """List all per-field exceptions granted to this instance."""
-    import requests as _requests
     pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
-    r = _requests.get(
+    r = await aget(
         f"{pg}/instance_setting_exceptions",
         params={
             "instance_id": f"eq.{instance_id}",
@@ -1432,9 +1467,8 @@ async def grant_instance_setting_exception(
     system-enforced validation (e.g., motion_timeout_floor_seconds) for that
     field only. Audit record kept (granted_at).
     """
-    import requests as _requests
     pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
-    r = _requests.post(
+    r = await apost(
         f"{pg}/instance_setting_exceptions",
         json={
             "instance_id": instance_id,
@@ -1462,9 +1496,8 @@ async def revoke_instance_setting_exception(
 ):
     """Revoke a per-field exception. setting_path uses path-style routing so
     nested keys like `modeTimeouts.Night` work without URL encoding."""
-    import requests as _requests
     pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
-    r = _requests.delete(
+    r = await adelete(
         f"{pg}/instance_setting_exceptions",
         params={
             "instance_id": f"eq.{instance_id}",
@@ -1485,9 +1518,8 @@ async def patch_app_type_setting(
     type_name: str, key: str, body: AppTypeSettingPatch,
 ):
     """Update a per-app-type setting."""
-    import requests as _requests
     pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
-    r = _requests.get(f"{pg}/app_types",
+    r = await aget(f"{pg}/app_types",
                       params={"type_name": f"eq.{type_name}",
                               "select": "id"},
                       timeout=5)
@@ -1796,7 +1828,9 @@ async def matter_commission(body: MatterCommissionRequest):
 async def matter_mappings():
     """Get all Hubitat-to-Matter device mappings."""
     from services.matter_client import get_all_matter_mappings
-    return get_all_matter_mappings()
+    # get_all_matter_mappings() is sync (blocking requests.get on PostgREST);
+    # offload to a worker thread so a slow lookup can't hold the event loop.
+    return await asyncio.to_thread(get_all_matter_mappings)
 
 
 @app.post("/api/matter/map", tags=["matter"])
@@ -2627,9 +2661,8 @@ async def list_canonical_devices():
     even when the selection's device id doesn't appear in the current
     category's capability-filtered device list.
     """
-    import requests as _requests
     try:
-        r = _requests.get(
+        r = await aget(
             f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/devices",
             params={"select": "id,label,hub_ip,hubitat_id", "order": "label"},
             timeout=5,
@@ -2650,8 +2683,7 @@ async def list_hub_health():
     Per-hub WS + reconcile health. Used by the dashboard alert banner to
     decide whether to surface a 'recommend Maker API as fallback' warning.
     """
-    import requests as _requests
-    r = _requests.get(
+    r = await aget(
         f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/hub_health",
         params={"order": "hub_id"},
         timeout=5,
@@ -2664,9 +2696,8 @@ async def list_hub_health():
 @app.get("/api/hubs", tags=["hubs"])
 async def list_hubs():
     """List all configured Hubitat hubs (rows of hub_config)."""
-    import requests as _requests
     try:
-        r = _requests.get(
+        r = await aget(
             f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/hub_config",
             params={"order": "id"},
             timeout=5,
@@ -2707,7 +2738,6 @@ async def update_hub(hub_id: int, body: Dict[str, Any]):
     re-syncs `devices.hub_ip` from the new `hub_config.hub_ip` for any
     rows that referenced this hub (denormalized cache stays consistent).
     """
-    import requests as _requests
     allowed = {
         "hub_name", "hub_ip", "maker_api_app_number",
         "maker_api_token_env", "is_primary", "is_enabled",
@@ -2722,7 +2752,7 @@ async def update_hub(hub_id: int, body: Dict[str, Any]):
     # first — exactly one primary at a time.
     if patch.get("is_primary") is True:
         try:
-            _requests.patch(
+            await apatch(
                 f"{postgrest_url}/hub_config",
                 params={"id": f"neq.{hub_id}"},
                 json={"is_primary": False},
@@ -2733,7 +2763,7 @@ async def update_hub(hub_id: int, body: Dict[str, Any]):
             logger.warning(f"Could not clear is_primary on others: {e}")
 
     try:
-        r = _requests.patch(
+        r = await apatch(
             f"{postgrest_url}/hub_config",
             params={"id": f"eq.{hub_id}"},
             json=patch,
@@ -2749,7 +2779,7 @@ async def update_hub(hub_id: int, body: Dict[str, Any]):
         # If hub_ip changed, mirror it into devices.hub_ip (denormalized).
         if "hub_ip" in patch:
             try:
-                _requests.patch(
+                await apatch(
                     f"{postgrest_url}/devices",
                     params={"hub_id": f"eq.{hub_id}"},
                     json={"hub_ip": patch["hub_ip"]},
@@ -2771,7 +2801,6 @@ async def update_hub(hub_id: int, body: Dict[str, Any]):
 @app.post("/api/hubs", tags=["hubs"])
 async def create_hub(body: Dict[str, Any]):
     """Create a new hub_config row."""
-    import requests as _requests
     required = ("hub_name", "hub_ip", "maker_api_app_number", "maker_api_token_env")
     missing = [k for k in required if not body.get(k)]
     if missing:
@@ -2783,7 +2812,7 @@ async def create_hub(body: Dict[str, Any]):
 
     postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
     try:
-        r = _requests.post(
+        r = await apost(
             f"{postgrest_url}/hub_config",
             json=payload,
             headers={
@@ -2810,10 +2839,9 @@ async def delete_hub(hub_id: int):
     User must move or remove those devices first (or run a fresh classifier
     cycle that lets them be re-homed).
     """
-    import requests as _requests
     postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
     try:
-        r = _requests.get(
+        r = await aget(
             f"{postgrest_url}/devices",
             params={"hub_id": f"eq.{hub_id}", "select": "id", "limit": "1"},
             timeout=5,
@@ -2823,7 +2851,7 @@ async def delete_hub(hub_id: int):
                 status_code=409,
                 detail="Hub has devices; remove or re-classify them first",
             )
-        d = _requests.delete(
+        d = await adelete(
             f"{postgrest_url}/hub_config",
             params={"id": f"eq.{hub_id}"},
             timeout=5,

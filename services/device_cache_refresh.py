@@ -141,10 +141,12 @@ class DeviceCacheRefreshService:
         # device_cache may live on any hub, not just the default/MAIN).
         hubitat = get_default_client()
 
-        # Load all Matter mappings upfront (one DB query)
+        # Load all Matter mappings upfront (one DB query). Sync PostgREST
+        # call → off the loop so the cache-refresh task doesn't block on
+        # slow database responses.
         matter_map = {}
         try:
-            mappings = get_all_matter_mappings()
+            mappings = await asyncio.to_thread(get_all_matter_mappings)
             for m in mappings:
                 matter_map[str(m['hubitat_device_id'])] = m
         except Exception as e:

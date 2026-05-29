@@ -124,14 +124,22 @@ services:
       postgrest:
         condition: service_started
     restart: unless-stopped
+    # autoheal sidecar (see below) restarts this container when the Docker
+    # healthcheck reports unhealthy. Without this label the sidecar ignores it.
+    labels:
+      autoheal: "true"
     networks:
       - smarthome-net
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+      # Explicit urllib timeout so the probe cannot inherit the long urllib
+      # default — if the event loop is hung, the connect()/recv() must fail
+      # within the Docker `timeout` envelope (5s), not after a kernel-level
+      # SO_RCVTIMEO of minutes.
+      test: ["CMD", "python3", "-c", "import urllib.request,socket; socket.setdefaulttimeout(4); urllib.request.urlopen('http://localhost:5000/api/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 2
+      start_period: 20s
 
   # ---------------------------------------------------------------------------
   # PostgreSQL - Database for instances, subscriptions, device cache
@@ -224,6 +232,31 @@ services:
       MATTER_SERVER__PORT: "${MATTER_PORT:-5580}"
       MATTER_SERVER__VENDORID: "65521"
       MATTER_SERVER__FABRICID: "1"
+
+  # ---------------------------------------------------------------------------
+  # autoheal — restarts any container labeled `autoheal=true` when the Docker
+  # healthcheck reports it unhealthy. Closes the gap left by `restart:
+  # unless-stopped`, which only acts on process exit and ignores healthcheck
+  # state entirely. The 2026-05-27 incident sat unhealthy for hours because
+  # nothing was wired to act on the signal Docker was already producing.
+  #
+  # Image: willfarrell/autoheal — small, single-purpose, watches Docker events
+  # via the bind-mounted socket. AUTOHEAL_CONTAINER_LABEL=true means it ONLY
+  # touches containers explicitly opted in via the `autoheal=true` label, so
+  # a misfire can't ripple across the host.
+  # ---------------------------------------------------------------------------
+  autoheal:
+    image: willfarrell/autoheal:1.2.0
+    container_name: smarthome-autoheal
+    restart: always
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: "autoheal"   # restart containers tagged autoheal=true
+      AUTOHEAL_INTERVAL: "10"                 # poll Docker every 10s
+      AUTOHEAL_START_PERIOD: "30"             # grace before first check after start
+      AUTOHEAL_DEFAULT_STOP_TIMEOUT: "10"     # SIGTERM grace before SIGKILL on restart
+      CURL_TIMEOUT: "30"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 # =============================================================================
 # Networks

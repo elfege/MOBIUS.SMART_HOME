@@ -6,6 +6,13 @@
 # ║  AWS-Secrets-Manager pull (or .env-only fallback) plus minimal color fallbacks,      ║
 # ║  with zero dependency on any host-side shell config.                                 ║
 # ║                                                                                      ║
+# ║  PROJECT-AGNOSTIC by design (2026-05-29). A single canonical copy at                 ║
+# ║  ~/start_utils.sh is kept in sync into every MOBIUS project's repo root via the      ║
+# ║  pre-commit hook (rsync -au ~/start_utils.sh ./start_utils.sh). Each project's       ║
+# ║  start.sh / deploy.sh sets START_UTILS__PROJECT to its own prefix BEFORE sourcing,   ║
+# ║  e.g. SMARTHOME or TILES; this library then reads project-prefixed env vars via      ║
+# ║  bash indirection (${!varname}) so the same file works for every project.            ║
+# ║                                                                                      ║
 # ║     ┌──────────────────────────────┐                                                 ║
 # ║     │ pull_aws_secrets NAME ...    │                                                 ║
 # ║     └──────────────┬───────────────┘                                                 ║
@@ -31,11 +38,15 @@
 # ║            │ export keys   │   each KEY=VALUE → exported into the env                ║
 # ║            └───────────────┘                                                         ║
 # ║                                                                                      ║
-# ║  CONTROL:                                                                            ║
-# ║    SMARTHOME_USE_AWS_SECRETS  true  → pull from AWS Secrets Manager (default)        ║
+# ║  CONTRACT (set by caller before sourcing):                                           ║
+# ║    START_UTILS__PROJECT      Project prefix used for env-var indirection             ║
+# ║                              (e.g. "SMARTHOME", "TILES"). Required.                  ║
+# ║                                                                                      ║
+# ║  CONTROL (caller's env, read indirectly via START_UTILS__PROJECT):                   ║
+# ║    <PROJECT>_USE_AWS_SECRETS  true → pull from AWS Secrets Manager (default)         ║
 # ║                                false → .env-only mode (skip AWS entirely)            ║
-# ║    SMARTHOME_AWS_PROFILE      AWS CLI profile holding the secrets (prompt if unset)  ║
-# ║    SMARTHOME_ENV_FILE         Override path to the .env file (default: alongside)    ║
+# ║    <PROJECT>_AWS_PROFILE      AWS CLI profile holding the secrets (prompt if unset)  ║
+# ║    <PROJECT>_ENV_FILE         Override path to the .env file (default: alongside)    ║
 # ║                                                                                      ║
 # ║  EXPORTS:  pull_aws_secrets NAME [NAME ...]                                          ║
 # ║                                                                                      ║
@@ -45,9 +56,21 @@
 # ║        self-contained. (The canonical S.2.1 rule is documented-exception here.)      ║
 # ╚══════════════════════════════════════════════════════════════════════════════════════╝
 
-# Idempotent source guard — re-sourcing is a no-op.
-[ -n "${_SMARTHOME_START_UTILS_SOURCED:-}" ] && return 0 2>/dev/null || true
-_SMARTHOME_START_UTILS_SOURCED=1
+# Caller must set START_UTILS__PROJECT before sourcing. Refuse to source if absent
+# — bash indirection on an empty prefix would silently read globals like
+# `_USE_AWS_SECRETS` and behave incorrectly.
+if [ -z "${START_UTILS__PROJECT:-}" ]; then
+	echo "✗ start_utils.sh: caller must set START_UTILS__PROJECT (e.g. SMARTHOME, TILES) before sourcing" >&2
+	return 1 2>/dev/null || exit 1
+fi
+
+# Idempotent source guard — re-sourcing within the same shell is a no-op. The
+# guard sentinel is per-project so two projects sharing a shell instance don't
+# stomp each other (unusual but possible during cross-project debugging).
+__guard_var="_${START_UTILS__PROJECT}_START_UTILS_SOURCED"
+[ -n "${!__guard_var:-}" ] && return 0 2>/dev/null || true
+eval "${__guard_var}=1"
+unset __guard_var
 
 ########################################################################-########################################################################
 #                                                                  VARIABLES                                                                     #
@@ -64,12 +87,26 @@ START_UTILS__DIR="$(builtin cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && p
 ########################################################################-########################################################################
 
 ########################################################################-########################################################################
+#                                                               PROJECT INDIRECTION                                                              #
+########################################################################-########################################################################
+start_utils__resolve() {
+	# Resolve a project-prefixed env-var name → value via bash indirection.
+	# Usage: start_utils__resolve USE_AWS_SECRETS  → reads ${PROJECT}_USE_AWS_SECRETS.
+	# Returns empty string if the var is unset.
+	local suffix="$1"
+	local varname="${START_UTILS__PROJECT}_${suffix}"
+	printf '%s' "${!varname:-}"
+}
+########################################################################-########################################################################
+
+########################################################################-########################################################################
 #                                                                ENVIRONMENT                                                                     #
 ########################################################################-########################################################################
 start_utils__envfile() {
 	# Resolve the path of the project .env this lib should read.
-	# Honors SMARTHOME_ENV_FILE; defaults to the .env next to this script.
-	printf '%s' "${SMARTHOME_ENV_FILE:-${START_UTILS__DIR}/.env}"
+	# Honors <PROJECT>_ENV_FILE; defaults to the .env next to this script.
+	local override; override="$(start_utils__resolve ENV_FILE)"
+	printf '%s' "${override:-${START_UTILS__DIR}/.env}"
 }
 
 start_utils__dotenv_get() {
@@ -87,8 +124,9 @@ start_utils__dotenv_get() {
 
 start_utils__use_aws() {
 	# Return 0 if AWS Secrets Manager should be the source of truth, 1 if .env-only.
-	# Controlled by SMARTHOME_USE_AWS_SECRETS (env or .env). Default true.
-	local v="${SMARTHOME_USE_AWS_SECRETS:-$(start_utils__dotenv_get SMARTHOME_USE_AWS_SECRETS)}"
+	# Controlled by <PROJECT>_USE_AWS_SECRETS (env or .env). Default true.
+	local v; v="$(start_utils__resolve USE_AWS_SECRETS)"
+	[ -z "$v" ] && v="$(start_utils__dotenv_get "${START_UTILS__PROJECT}_USE_AWS_SECRETS")"
 	case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')" in
 		false | 0 | no | off) return 1 ;;
 		*)                    return 0 ;;
@@ -111,12 +149,13 @@ start_utils__load_dotenv() {
 
 start_utils__resolve_profile() {
 	# Resolve the AWS CLI profile name in precedence order:
-	#   1. SMARTHOME_AWS_PROFILE / AWS_PROFILE already exported
-	#   2. SMARTHOME_AWS_PROFILE in the project .env
+	#   1. <PROJECT>_AWS_PROFILE / AWS_PROFILE already exported
+	#   2. <PROJECT>_AWS_PROFILE in the project .env
 	# Prints the resolved name, or nothing if unset anywhere.
-	[ -n "${SMARTHOME_AWS_PROFILE:-}" ] && { printf '%s' "$SMARTHOME_AWS_PROFILE"; return 0; }
-	[ -n "${AWS_PROFILE:-}" ]           && { printf '%s' "$AWS_PROFILE";           return 0; }
-	start_utils__dotenv_get SMARTHOME_AWS_PROFILE
+	local v; v="$(start_utils__resolve AWS_PROFILE)"
+	[ -n "$v" ] && { printf '%s' "$v"; return 0; }
+	[ -n "${AWS_PROFILE:-}" ] && { printf '%s' "$AWS_PROFILE"; return 0; }
+	start_utils__dotenv_get "${START_UTILS__PROJECT}_AWS_PROFILE"
 }
 
 start_utils__prompt_profile() {
@@ -124,25 +163,27 @@ start_utils__prompt_profile() {
 	# persist the answer to .env so subsequent (including non-interactive) runs
 	# read it without prompting. Fails fast with instructions when no TTY is
 	# attached (e.g. systemd unit), rather than hanging on read.
-	local envf; envf="$(start_utils__envfile)"
+	local envf project_key
+	envf="$(start_utils__envfile)"
+	project_key="${START_UTILS__PROJECT}_AWS_PROFILE"
 	if [ ! -t 0 ]; then
-		echo -e "${RED}SMARTHOME_AWS_PROFILE is not set and no terminal is attached.${NC}" >&2
-		echo -e "${RED}Set it once:  echo 'SMARTHOME_AWS_PROFILE=<name>' >> ${envf}${NC}" >&2
+		echo -e "${RED}${project_key} is not set and no terminal is attached.${NC}" >&2
+		echo -e "${RED}Set it once:  echo '${project_key}=<name>' >> ${envf}${NC}" >&2
 		return 1
 	fi
-	echo -e "${YELLOW}AWS profile not configured (SMARTHOME_AWS_PROFILE).${NC}" >&2
+	echo -e "${YELLOW}AWS profile not configured (${project_key}).${NC}" >&2
 	local avail; avail="$(aws configure list-profiles 2>/dev/null | paste -sd', ' -)"
 	[ -n "$avail" ] && echo -e "  Available AWS profiles: ${CYAN}${avail}${NC}" >&2
 	local p=""
-	read -r -p "Enter the AWS profile to pull SMART_HOME secrets with: " p
+	read -r -p "Enter the AWS profile to pull ${START_UTILS__PROJECT} secrets with: " p
 	[ -z "$p" ] && { echo -e "${RED}No profile entered — aborting.${NC}" >&2; return 1; }
 	touch "$envf"
-	if grep -qE '^[[:space:]]*SMARTHOME_AWS_PROFILE=' "$envf"; then
-		sed -i "s|^[[:space:]]*SMARTHOME_AWS_PROFILE=.*|SMARTHOME_AWS_PROFILE=${p}|" "$envf"
+	if grep -qE "^[[:space:]]*${project_key}=" "$envf"; then
+		sed -i "s|^[[:space:]]*${project_key}=.*|${project_key}=${p}|" "$envf"
 	else
-		printf 'SMARTHOME_AWS_PROFILE=%s\n' "$p" >> "$envf"
+		printf '%s=%s\n' "$project_key" "$p" >> "$envf"
 	fi
-	echo -e "${GREEN}Saved SMARTHOME_AWS_PROFILE=${p} to ${envf}${NC}" >&2
+	echo -e "${GREEN}Saved ${project_key}=${p} to ${envf}${NC}" >&2
 	printf '%s' "$p"
 }
 ########################################################################-########################################################################
@@ -185,7 +226,7 @@ pull_aws_secrets() {
 	#
 	# Usage: pull_aws_secrets NAME [NAME ...]
 	#
-	# In .env-only mode (SMARTHOME_USE_AWS_SECRETS=false) this short-circuits to
+	# In .env-only mode (<PROJECT>_USE_AWS_SECRETS=false) this short-circuits to
 	# sourcing the project .env — no AWS call, no profile prompt — so the same
 	# call site works in both deployment modes without conditionals upstream.
 	#
@@ -194,8 +235,8 @@ pull_aws_secrets() {
 	if [ "$#" -eq 0 ] || [ "$1" = "--help" ]; then
 		echo "Usage: pull_aws_secrets NAME [NAME ...]"
 		echo "  Exports every key of each AWS Secrets Manager secret into the env."
-		echo "  Profile is read from SMARTHOME_AWS_PROFILE (env / .env); prompts if unset."
-		echo "  SMARTHOME_USE_AWS_SECRETS=false routes to .env-only mode (no AWS)."
+		echo "  Profile is read from ${START_UTILS__PROJECT}_AWS_PROFILE (env / .env); prompts if unset."
+		echo "  ${START_UTILS__PROJECT}_USE_AWS_SECRETS=false routes to .env-only mode (no AWS)."
 		return 0
 	fi
 

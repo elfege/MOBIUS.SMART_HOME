@@ -41,6 +41,9 @@ sudo chown -R "$USER":"$USER" ./ &>/dev/null || true
 . ~/.env.colors 2>/dev/null || . "${SCRIPT_DIR}.env.colors" 2>/dev/null || true
 . ~/logger.sh --no-exec &>/dev/null || . "${SCRIPT_DIR}logger.sh" --no-exec &>/dev/null || true
 . /etc/profile.d/custom-env.sh --no-exec &>/dev/null || true
+# Sets START_UTILS__PROJECT so the (project-agnostic) library reads
+# SMARTHOME_-prefixed env vars via bash indirection.
+export START_UTILS__PROJECT="SMARTHOME"
 . "${SCRIPT_DIR}start_utils.sh" || true   # repo-local startup library
 
 ########################################################################-########################################################################

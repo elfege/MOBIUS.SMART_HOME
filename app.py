@@ -674,8 +674,18 @@ async def lifespan(app: FastAPI):
     )
     await _tv_client.start()
 
+    # Phase C defensive layer: in-process event-loop watchdog. Ticks every
+    # 2s; /api/health returns 503 if no tick within 10s. Docker healthcheck
+    # surfaces that as unhealthy, and the autoheal sidecar restarts the
+    # container. This narrows the stall-detection window from "loop fully
+    # wedged, no HTTP at all" to "loop degraded for >10s" — well before a
+    # stall becomes visible in the UI.
+    from services.loop_watchdog import start_watchdog, stop_watchdog
+    start_watchdog()
+
     yield
 
+    stop_watchdog()
     stop_cache_refresh()
     stop_matter_discovery()
     await stop_eventsocket()
@@ -722,8 +732,32 @@ app.include_router(samsung_tv_router)
 
 @app.get("/api/health", tags=["health"])
 async def health():
-    """Health check endpoint."""
-    return {"status": "ok"}
+    """
+    Liveness probe. Returns 200 only if the event-loop watchdog has
+    ticked within the alive threshold (10s by default). Returns 503 when
+    the loop is wedged or degraded — Docker healthcheck picks that up
+    and the autoheal sidecar restarts the container. See
+    services/loop_watchdog.py for the rationale.
+    """
+    from services.loop_watchdog import (
+        is_loop_alive,
+        last_tick_age_seconds,
+        ALIVE_THRESHOLD_SECS,
+    )
+    age = last_tick_age_seconds()
+    if not is_loop_alive():
+        # 503 fails the Docker healthcheck → autoheal restarts. Body is
+        # informational; the status code is what the orchestrator reads.
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "degraded",
+                "reason": "event loop watchdog stale",
+                "loop_lag_seconds": age,
+                "alive_threshold_seconds": ALIVE_THRESHOLD_SECS,
+            },
+        )
+    return {"status": "ok", "loop_lag_seconds": age}
 
 
 @app.get("/api/status", tags=["health"])

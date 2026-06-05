@@ -9,6 +9,7 @@
  */
 
 import { api, utils } from '../main.js';
+import { makeDeviceRefreshButton } from './device-refresh-modal.js';
 
 /* =============================================================================
    Constants
@@ -87,9 +88,29 @@ export async function openDeviceTileModal(deviceId, deviceName) {
         // Extract current attribute values
         const attrs = _extractAttributes(device);
 
-        // Render tile content
+        // Render tile content. empty() also drops the close + refresh buttons
+        // we appended in _createBackdrop — re-create both pinned to the tile
+        // panel so they survive every re-render.
         const $tile = _renderTile(device, deviceType, attrs, deviceName);
         $modal.empty().append($tile);
+
+        const $close = $('<button class="dtm-close">&times;</button>').on('click', closeModal);
+        $modal.append($close);
+
+        // Refresh button prefilled with this device's id + label for one-click
+        // "I just changed THIS driver" refresh. deviceId is the Hubitat
+        // per-hub id (what the route /devices/{id} accepts); backend's
+        // refresh route also accepts it directly.
+        const refresh = makeDeviceRefreshButton({
+            prefillId: deviceId,
+            labelHint: (device && (device.label || device.name)) || deviceName,
+            title: `Refresh ${(device && (device.label || device.name)) || deviceName} from the hub`,
+        });
+        refresh.classList.add('dtm-refresh');
+        refresh.style.cssText += `
+            position: absolute; top: 0.75rem; right: 3.2rem;
+        `;
+        $modal.append(refresh);
 
         // Add hint text for dimmable devices
         if (deviceType === 'dimmer' || deviceType === 'color') {
@@ -126,8 +147,18 @@ function _createBackdrop() {
     const $close = $('<button class="dtm-close">&times;</button>')
         .on('click', closeModal);
 
+    // Refresh button — placed just left of close. Wires lazily: the
+    // openDeviceTileModal flow assigns the device id once it's known so
+    // clicking refresh prefills the device's current id (no typing).
+    const refreshBtn = makeDeviceRefreshButton({ title: 'Refresh this device from the hub' });
+    refreshBtn.classList.add('dtm-refresh');
+    refreshBtn.style.cssText += `
+        position: absolute; top: 0.75rem; right: 3.2rem;
+    `;
+
     const $modal = $('<div class="dtm-modal">')
-        .append($close);
+        .append($close)
+        .append(refreshBtn);
 
     $backdrop.append($modal);
     return $backdrop;

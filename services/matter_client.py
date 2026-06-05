@@ -30,6 +30,7 @@ import websockets
 import requests
 
 from services.supervised_tasks import supervised_spawn
+from services.circuit_breaker import get_breaker, CircuitBreakerOpen
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,17 @@ class MatterClient:
         self._listen_task = None
         self._connected = False
         self._nodes_cache: Dict[int, Dict] = {}
+        # Circuit breaker for matter-server commands. Only one matter-server
+        # instance per process, so a single named breaker. Tuned a touch
+        # looser than the Hubitat breakers: matter operations can be
+        # legitimately slow (commissioning is 60-90s) and we don't want
+        # one slow commission to trip the breaker for everyone else.
+        self._breaker = get_breaker(
+            "matter-server",
+            fail_threshold=5,
+            reset_timeout_secs=30.0,
+            fail_window_secs=120.0,
+        )
 
     # =========================================================================
     # Connection Management
@@ -263,18 +275,26 @@ class MatterClient:
         future = asyncio.get_event_loop().create_future()
         self._pending_responses[msg_id] = future
 
-        try:
-            await self._ws.send(json.dumps(message))
-            # Wait for response with timeout
-            # Commissioning can take 60-90s per device over network
-            result = await asyncio.wait_for(future, timeout=120)
-            return result
-        except asyncio.TimeoutError:
-            self._pending_responses.pop(msg_id, None)
-            raise TimeoutError(f"Timed out waiting for response to {command}")
-        except Exception as e:
-            self._pending_responses.pop(msg_id, None)
-            raise
+        async def _do_send() -> Dict[str, Any]:
+            try:
+                await self._ws.send(json.dumps(message))
+                # Wait for response with timeout
+                # Commissioning can take 60-90s per device over network
+                result = await asyncio.wait_for(future, timeout=120)
+                return result
+            except asyncio.TimeoutError:
+                self._pending_responses.pop(msg_id, None)
+                raise TimeoutError(f"Timed out waiting for response to {command}")
+            except Exception:
+                self._pending_responses.pop(msg_id, None)
+                raise
+
+        # Breaker-gated: a degraded matter-server (process hung, network
+        # blip, SDK protocol drift) now fails fast after 5 failures within
+        # 120s. Callers that catch matter-side exceptions will see
+        # CircuitBreakerOpen and naturally fall through to their Hubitat-
+        # fallback paths (device_commander already does this).
+        return await self._breaker.call_async(_do_send)
 
     async def _listen_loop(self) -> None:
         """

@@ -122,6 +122,17 @@ class DeviceCacheRefreshService:
         finally:
             loop.close()
 
+        # Piggyback: opportunistic device-name normalization. Strips a trailing
+        # " on <hub name>" suffix from device labels. Dry-run by default; gated
+        # by system_settings (device_name_normalizer_enabled / _apply). It is
+        # synchronous (plain requests) and self-contained — it must never break
+        # the refresh cycle, so swallow everything.
+        try:
+            from services.device_name_normalizer import run_normalizer_pass
+            run_normalizer_pass()
+        except Exception as e:
+            logger.debug(f"[CacheRefresh] device-name normalizer skipped: {e}")
+
     async def _refresh_all_devices(self) -> None:
         """
         Main refresh logic. For each cached device:

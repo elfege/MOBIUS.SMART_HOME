@@ -1258,22 +1258,61 @@ async def get_devices_by_categories(categories: str = Query(...)):
 
 
 @app.post("/api/devices/refresh", tags=["devices"])
-async def refresh_devices_from_hubitat():
+async def refresh_devices_from_hubitat(
+    device_id: Optional[str] = Query(
+        None,
+        description="Canonical devices.id OR Hubitat per-hub id. Omit or pass '0' to refresh the whole roster.",
+    ),
+):
     """
-    Force a fresh pull of all devices from Hubitat via Maker API → canonical
-    `devices` table. Use sparingly — the reconcile poll already keeps this
-    fresh in the background. Returns the count of devices refreshed.
+    Force a fresh pull of devices from Hubitat → canonical `devices` table.
+
+    - `device_id` omitted or '0' → full classifier sweep (every device on
+      every hub re-ingested). Slow; reconcile poll keeps it fresh anyway.
+    - `device_id` non-zero → just that device: fullJson roundtrip refreshes
+      capabilities + attributes, label/name/type updated from the roster,
+      upserted via the canonical RPC. Accepts EITHER the canonical id (the
+      #146 you see in chips) OR the Hubitat per-hub id (e.g. 2781) — looks
+      up canonical first, falls back to per-hub.
+
+    Returns the same shape on success in both modes; the single-device mode
+    adds a `resolved` block and `caps_count`. Errors surface as
+    `{ok: false, reason: ...}` with HTTP 200 (the operator triggered this
+    manually; loud-fail with detail rather than a bare 5xx). HTTP 5xx is
+    reserved for unhandled exceptions in the orchestrator itself.
     """
-    from services.device_to_hubs_classifier import run_classification, invalidate_cache
+    from services.device_to_hubs_classifier import (
+        run_classification, invalidate_cache, refresh_single_device,
+    )
+
+    # 'All' path: device_id absent, blank, or literal "0".
+    if not device_id or str(device_id).strip() in ("", "0"):
+        try:
+            # run_classification + invalidate_cache do blocking PostgREST
+            # roundtrips. Off the loop so a slow classifier doesn't stall
+            # other handlers.
+            result = await asyncio.to_thread(run_classification)
+            await asyncio.to_thread(invalidate_cache)
+            return {
+                "ok":    True,
+                "mode":  "all",
+                "total_native": (result or {}).get("total_native", 0),
+            }
+        except Exception as e:
+            logger.error(f"refresh_devices_from_hubitat (all): {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # Single-device path. refresh_single_device is sync (requests +
+    # admin client are sync); offload so the loop keeps spinning.
     try:
-        result = run_classification()
-        invalidate_cache()
-        return {
-            "ok": True,
-            "total_native": (result or {}).get("total_native", 0),
-        }
+        result = await asyncio.to_thread(refresh_single_device, device_id)
+        result["mode"] = "single"
+        return result
     except Exception as e:
-        logger.error(f"refresh_devices_from_hubitat: {e}", exc_info=True)
+        logger.error(
+            f"refresh_devices_from_hubitat (single id={device_id}): {e}",
+            exc_info=True,
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1462,6 +1501,72 @@ async def patch_system_setting(key: str, body: SystemSettingPatch):
     if not ok:
         raise HTTPException(status_code=400, detail=f"could not set {key!r}")
     return {"key": key, "value": body.value}
+
+
+# =============================================================================
+# Device Name Normalizer — global feature with a MANDATORY preview-confirm gate.
+# The UI calls /preview (a no-op scan) and shows the proposed renames in a modal;
+# only after the user confirms does it call /enable (which also runs one pass so
+# the previewed renames apply immediately).
+# =============================================================================
+
+
+@app.get("/api/device-name-normalizer/status", tags=["settings"])
+async def device_name_normalizer_status():
+    """Current on/off state of the device-name normalizer."""
+    from services import device_name_normalizer as dnn
+    from services.settings_resolver import get_resolver
+    dnn.seed_settings()
+    resolver = get_resolver()
+    resolver.invalidate_all()
+    return {
+        "enabled": bool(resolver.get_system(dnn.SETTING_ENABLED, False)),
+        "apply": bool(resolver.get_system(dnn.SETTING_APPLY, False)),
+    }
+
+
+@app.get("/api/device-name-normalizer/preview", tags=["settings"])
+async def device_name_normalizer_preview():
+    """
+    NO-OP dry-run: scan device labels and return the renames that WOULD be
+    applied, without changing any setting or touching any device. This backs
+    the mandatory confirmation modal shown before the feature is enabled.
+    """
+    from services import device_name_normalizer as dnn
+    return dnn.preview()
+
+
+@app.post("/api/device-name-normalizer/enable", tags=["settings"])
+async def device_name_normalizer_enable():
+    """
+    Turn the feature ON (sets enabled + apply true) and run one pass immediately
+    so the previewed renames are applied now. The frontend only calls this after
+    the user confirms the preview modal.
+    """
+    from services import device_name_normalizer as dnn
+    from services.settings_resolver import get_resolver
+    dnn.seed_settings()
+    resolver = get_resolver()
+    ok1 = resolver.set_system(dnn.SETTING_ENABLED, True)
+    ok2 = resolver.set_system(dnn.SETTING_APPLY, True)
+    if not (ok1 and ok2):
+        raise HTTPException(status_code=400, detail="could not enable normalizer")
+    resolver.invalidate_all()
+    dnn.trigger_pass_background()
+    return {"enabled": True, "apply": True}
+
+
+@app.post("/api/device-name-normalizer/disable", tags=["settings"])
+async def device_name_normalizer_disable():
+    """Turn the feature OFF (sets enabled + apply false). Safe; no preview needed."""
+    from services import device_name_normalizer as dnn
+    from services.settings_resolver import get_resolver
+    dnn.seed_settings()
+    resolver = get_resolver()
+    resolver.set_system(dnn.SETTING_ENABLED, False)
+    resolver.set_system(dnn.SETTING_APPLY, False)
+    resolver.invalidate_all()
+    return {"enabled": False, "apply": False}
 
 
 @app.get("/api/app_types/{type_name}/settings", tags=["settings"])

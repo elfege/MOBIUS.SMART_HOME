@@ -6,26 +6,30 @@ Multi-rule fan speed/on-off control. Each rule is independently toggleable
 in the instance settings; conflicts are resolved by a fixed priority
 (highest wins) so two enabled rules can't fight each other:
 
-    1. Mode in `exclusionModes` ............... fans OFF (hard override)
-    2. Any keep_off_switch is currently ON .... fans OFF (manual / safety)
-    3. Humidity over threshold (with hysteresis) fans ON @ humidityFanLevel
-       — this is INTENTIONALLY above presence/motion: humidity is a
-         moisture-damage / mold concern that should run regardless of
-         whether anyone is home or moving.
+    1. Mode in `exclusionModes` ........................ fans OFF (hard override)
+    2. Manual fan-level override switch currently ON ... fan @ manualOverrideOnLevel
+       (replaces the old "keep_off" rule; the override switch is a two-state
+       device the user toggles directly — see rule 6 for the OFF behavior.)
+    3. Humidity over threshold (with hysteresis) ....... fans ON @ humidityFanLevel
+       — INTENTIONALLY above presence/motion: humidity is a moisture-damage /
+         mold concern that should run regardless of who's home.
+       — SKIPPED during the humidity-suppress window opened by the override
+         switch transitioning ON→OFF (see rule 6).
     4. Presence rule (runWhenHome / runWhenAway):
          - If the rule says don't run, fans OFF.
     5. Motion rule:
          - Motion in last `motionTimeoutSeconds`  → fans ON @ motionActiveLevel
          - Otherwise                              → fans ON @ motionInactiveLevel
-       This is the inverse of motion lighting: the user wants higher fan
-       speed when nobody is in the room (less noise concern) and quieter
-       speed when someone is present.
-    6. None of the above apply (i.e. all rules disabled, no exclusion,
-       no humidity event, no presence trigger): fans ON @ alwaysOnLevel.
+       Inverse of motion lighting: higher fan when room empty (less noise
+       concern), quieter when someone is present.
+    6. Default:
+         - Inside the humidity-suppress window (the override switch just
+           went OFF) → fan @ manualOverrideOffBurstLevel.
+         - Otherwise → fan @ alwaysOnLevel.
 
 The master() decision is re-evaluated on:
     - every device webhook for a subscribed device (humidity / motion /
-      presence / fan switch / keep_off switch),
+      presence / fan switch / manual override switch),
     - mode changes,
     - timeout expiry (motion-inactive timer),
     - resume from pause.
@@ -45,7 +49,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from apps.base_app import BaseApp
@@ -182,14 +186,41 @@ class FanAutomationApp(BaseApp):
 
     def _on_switch(self, event: DeviceEvent) -> None:
         """
-        Detect manual-vs-app fan switch changes and update the memoization
-        source. Master() then knows to respect 'manual' overrides until a
-        mode change clears them.
+        Two paths:
+
+        1. Event from a manual-fan-level-override switch: track the previous
+           state; on an ON→OFF transition open a humidity-suppress window
+           (master() will see the timer and skip rule 3 + use the burst
+           level as the default for the duration). master() then re-runs
+           naturally and the cascade picks up the new state.
+
+        2. Event from one of the controlled fans: detect manual-vs-app
+           changes and update the memoization source — master() respects
+           'manual' overrides until a mode change clears them.
         """
-        fan_ids   = set(self.get_devices('fans'))
-        keep_off  = set(self.get_devices('keep_off_switches'))
-        if event.device_id in keep_off:
-            # keep_off triggers don't affect memo; master() reads them live.
+        fan_ids  = set(self.get_devices('fans'))
+        override = set(self.get_devices('manual_fan_level_override_switches'))
+        if event.device_id in override:
+            # Track previous state per device so we can detect a real ON→OFF
+            # edge. Stored on memoization (survives within an instance run).
+            last_states = self._memoization.setdefault(
+                'override_switch_last_state', {}
+            )
+            prev = last_states.get(str(event.device_id))
+            last_states[str(event.device_id)] = event.value
+            if prev == 'on' and event.value == 'off':
+                n = int(self.get_setting(
+                    'manualOverrideHumiditySuppressSeconds', 60
+                ))
+                self._runtime.humidity_suppress_until = (
+                    datetime.now(timezone.utc) + timedelta(seconds=n)
+                )
+                self.logger.info(
+                    f"Manual override {_C}{event.device_name}{_R} ON→OFF: "
+                    f"opening humidity-suppress window for {_Y}{n}s{_R} "
+                    f"(default level becomes manualOverrideOffBurstLevel)"
+                )
+            # Don't touch fan memo — master() reads override state live.
             return
         if event.device_id not in fan_ids:
             return
@@ -237,14 +268,30 @@ class FanAutomationApp(BaseApp):
         if current_mode and current_mode in excl:
             return {'action': 'off', 'reason': f'mode={current_mode} in exclusionModes'}
 
-        # -- Rule 2: keep_off switch tripped --
-        for sw in self.get_devices('keep_off_switches'):
-            state = self._read_switch_state(sw)
-            if state == 'on':
-                return {'action': 'off', 'reason': f'keep_off switch {sw} is on'}
+        # -- Rule 2: manual fan-level override switch currently ON --
+        # ON dictates a specific level (above humidity / motion / presence).
+        # OFF is handled in rule 6 via the humidity-suppress window timer
+        # — there is no "off action" path on this rule.
+        for sw in self.get_devices('manual_fan_level_override_switches'):
+            if self._read_switch_state(sw) == 'on':
+                level = int(self.get_setting('manualOverrideOnLevel', 50))
+                return {
+                    'action': 'on',
+                    'level': level,
+                    'reason': f'manual override switch {sw} is ON',
+                    'rule': 'manual_override_on',
+                }
 
-        # -- Rule 3: humidity safety override --
-        if self.get_setting('humidityEnabled', False) and self.get_devices('humidity_sensors'):
+        # -- Rule 3: humidity safety override (skipped during the suppress window) --
+        # The override switch ON→OFF transition opens an N-second window
+        # during which we skip humidity (see _on_switch). After the window,
+        # humidity is re-eligible.
+        humidity_suppressed = self._humidity_suppressed_now()
+        if (
+            self.get_setting('humidityEnabled', False)
+            and not humidity_suppressed
+            and self.get_devices('humidity_sensors')
+        ):
             humidity = self._max_humidity()
             threshold = float(self.get_setting('humidityThreshold', 60))
             hysteresis = float(self.get_setting('humidityHysteresis', 5))
@@ -314,7 +361,19 @@ class FanAutomationApp(BaseApp):
                 'reason': f'no motion in {timeout}s', 'rule': 'motion',
             }
 
-        # -- Rule 6: default — keep fans on at alwaysOnLevel --
+        # -- Rule 6: default --
+        # Inside the humidity-suppress window (override switch just went
+        # OFF), the burst level replaces alwaysOnLevel as the default. The
+        # window expires after manualOverrideHumiditySuppressSeconds and
+        # the regular alwaysOnLevel resumes.
+        if self._humidity_suppressed_now():
+            burst = int(self.get_setting('manualOverrideOffBurstLevel', 100))
+            return {
+                'action': 'on',
+                'level': burst,
+                'reason': 'manual override OFF burst (humidity suppress window)',
+                'rule': 'manual_override_off_burst',
+            }
         return {
             'action': 'on',
             'level': int(self.get_setting('alwaysOnLevel', 100)),
@@ -392,6 +451,17 @@ class FanAutomationApp(BaseApp):
         except Exception:
             pass
         return None
+
+    def _humidity_suppressed_now(self) -> bool:
+        """
+        True while the post-override-OFF humidity-suppress window is open.
+        The window is opened by _on_switch on every ON→OFF transition of
+        any manual_fan_level_override switch (timestamp on _runtime).
+        """
+        until = getattr(self._runtime, 'humidity_suppress_until', None)
+        if until is None:
+            return False
+        return datetime.now(timezone.utc) < until
 
     def _read_switch_state(self, device_id) -> Optional[str]:
         """Read 'on'/'off' state for a switch — cache first, attribute extract."""
@@ -565,6 +635,41 @@ class FanAutomationApp(BaseApp):
                     "title": "Default fan speed",
                     "description": "Used when no other rule applies",
                 },
+
+                # Manual fan-level override (the device category formerly known
+                # as "keep_off_switches"). The override switch is a two-state
+                # device: ON dictates the active level (rule 2); ON→OFF opens
+                # a humidity-suppress window and the burst level becomes the
+                # default for that window's duration.
+                "manualOverrideOnLevel": {
+                    "type": "integer", "minimum": 1, "maximum": 100, "default": 50,
+                    "title": "Manual override ON → fan level",
+                    "description": (
+                        "Fan level forced when any manual override switch is ON. "
+                        "Translates to fan speed on FanControl devices, level on "
+                        "SwitchLevel devices, or plain ON for switch-only devices."
+                    ),
+                },
+                "manualOverrideOffBurstLevel": {
+                    "type": "integer", "minimum": 1, "maximum": 100, "default": 100,
+                    "title": "Manual override OFF burst → fan level",
+                    "description": (
+                        "Fan level used as the default during the humidity-suppress "
+                        "window that opens when an override switch transitions "
+                        "ON→OFF. Other rules (motion / presence) still apply if "
+                        "their triggers fire during the window."
+                    ),
+                },
+                "manualOverrideHumiditySuppressSeconds": {
+                    "type": "integer", "minimum": 1, "maximum": 3600, "default": 60,
+                    "title": "Manual override OFF → humidity-suppress window (s)",
+                    "description": (
+                        "Duration of the humidity-suppress window opened by an "
+                        "override switch transitioning ON→OFF. The humidity rule "
+                        "is skipped for this many seconds; after the window the "
+                        "regular cascade resumes including humidity."
+                    ),
+                },
             },
         }
 
@@ -596,9 +701,18 @@ class FanAutomationApp(BaseApp):
                 "description": "Optional — used by the presence rule",
             },
             {
-                "key": "keep_off_switches", "label": "Keep-Off Triggers",
+                "key": "manual_fan_level_override_switches",
+                "label": "Manual Fan Level Override Switches (two-state)",
                 "capability": "Switch",
                 "multiple": True, "required": False,
-                "description": "Optional — when ANY of these is on, fans go OFF (manual / safety override)",
+                "description": (
+                    "Optional. Two-state switches the user toggles directly. "
+                    "When ANY is ON → fan is forced to manualOverrideOnLevel "
+                    "(above humidity / motion / presence). When ANY transitions "
+                    "ON→OFF → opens a humidity-suppress window for "
+                    "manualOverrideHumiditySuppressSeconds, during which the "
+                    "burst level (manualOverrideOffBurstLevel) is the default "
+                    "and the humidity rule is skipped."
+                ),
             },
         ]

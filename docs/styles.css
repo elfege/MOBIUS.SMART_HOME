@@ -1,0 +1,259 @@
+/* ============================================================================
+   docs/styles.css — Portfolio/docs hub styles for 0_MOBIUS.SMART_HOME
+   Based on canonical template: server:~/0_CLAUDE_IC/docs_shared_index_standard.css
+   ============================================================================ */
+
+:root {
+    --bg-color: #0f1119;
+    --card-bg: #1a1d2e;
+    --accent: #2a2d3e;
+    --highlight: #c9a84c;
+    --text: #e0e0e0;
+    --text-muted: #8a8fa0;
+    --link: #6cb4ee;
+    --link-hover: #9dd0ff;
+    --success: #4cc978;
+    --warning: #e6a930;
+    --danger: #e94560;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text);
+    line-height: 1.6;
+    min-height: 100vh;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem;
+}
+
+/* --- Header --- */
+header {
+    text-align: center;
+    margin-bottom: 3rem;
+    padding-bottom: 2rem;
+    border-bottom: 1px solid var(--accent);
+}
+
+header h1 {
+    font-size: 2.5rem;
+    margin-bottom: 0.5rem;
+    color: var(--text);
+}
+
+.subtitle {
+    color: var(--text-muted);
+    font-size: 1.1rem;
+}
+
+/* --- Status banner --- */
+.status-banner {
+    background: linear-gradient(135deg, var(--accent), var(--card-bg));
+    border: 1px solid var(--success);
+    border-radius: 8px;
+    padding: 1rem 1.5rem;
+    margin-bottom: 2rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.status-banner .icon { font-size: 1.5rem; }
+.status-banner .text { font-size: 0.95rem; color: var(--text-muted); }
+.status-banner .text strong { color: var(--success); }
+
+.status-banner.pending { border-color: var(--warning); }
+.status-banner.pending .text strong { color: var(--warning); }
+
+/* --- Stack info box --- */
+.stack-info {
+    background-color: var(--card-bg);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    padding: 2rem;
+    margin-bottom: 2.5rem;
+}
+
+.stack-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+}
+
+.stack-col h3 {
+    font-size: 1rem;
+    margin-bottom: 0.75rem;
+    color: var(--highlight);
+}
+
+.stack-col ul {
+    list-style: none;
+    padding-left: 0;
+}
+
+.stack-col ul li {
+    padding-left: 1.25rem;
+    position: relative;
+    margin-bottom: 0.4rem;
+    color: var(--text-muted);
+}
+
+.stack-col ul li::before {
+    content: "\2022";
+    position: absolute;
+    left: 0;
+    color: var(--highlight);
+    font-weight: bold;
+}
+
+/* --- Documentation section --- */
+.docs-section h2 {
+    margin-bottom: 1.5rem;
+    color: var(--highlight);
+}
+
+.section-label {
+    color: var(--text-muted);
+    margin: 2rem 0 1rem 0;
+    font-size: 1rem;
+}
+
+.docs-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+    gap: 1.5rem;
+}
+
+/* --- Document cards --- */
+.doc-card {
+    background-color: var(--card-bg);
+    border-radius: 8px;
+    padding: 1.5rem;
+    border-left: 4px solid var(--highlight);
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.doc-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(201, 168, 76, 0.15);
+}
+
+.doc-card.primary { border-left-color: var(--success); }
+.doc-card.pending { border-left-color: var(--warning); }
+
+.doc-card h3 { margin-bottom: 0.5rem; }
+.doc-card h3 a { color: var(--link); text-decoration: none; }
+.doc-card h3 a:hover { color: var(--link-hover); text-decoration: underline; }
+.doc-card p { color: var(--text-muted); font-size: 0.95rem; }
+
+.doc-card .tags { margin-top: 1rem; }
+
+.tag {
+    display: inline-block;
+    padding: 0.25rem 0.5rem;
+    background-color: var(--accent);
+    color: var(--text-muted);
+    border-radius: 4px;
+    font-size: 0.8rem;
+    margin-right: 0.5rem;
+    margin-bottom: 0.25rem;
+}
+
+.tag.new { background-color: var(--success); color: #000; }
+.tag.pending { background-color: var(--warning); color: #000; }
+
+/* --- Port table --- */
+.port-table {
+    width: 100%;
+    border-collapse: collapse;
+    background-color: var(--card-bg);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.port-table th,
+.port-table td {
+    padding: 0.75rem 1rem;
+    text-align: left;
+    border-bottom: 1px solid var(--accent);
+}
+
+.port-table th {
+    background-color: var(--accent);
+    color: var(--text);
+    font-weight: 600;
+}
+
+.port-table tr:last-child td { border-bottom: none; }
+.port-table tr:hover { background-color: rgba(108, 180, 238, 0.08); }
+
+/* --- References table --- */
+.section-divider {
+    margin: 3rem 0;
+    border: none;
+    border-top: 1px solid var(--accent);
+}
+
+.references-section h2 {
+    margin-bottom: 1.5rem;
+    color: var(--highlight);
+}
+
+.ref-table {
+    width: 100%;
+    border-collapse: collapse;
+    background-color: var(--card-bg);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.ref-table th,
+.ref-table td {
+    padding: 0.75rem 1rem;
+    text-align: left;
+    border-bottom: 1px solid var(--accent);
+}
+
+.ref-table th {
+    background-color: var(--accent);
+    color: var(--text);
+    font-weight: 600;
+}
+
+.ref-table tr:last-child td { border-bottom: none; }
+.ref-table tr:hover { background-color: rgba(108, 180, 238, 0.08); }
+.ref-table a { color: var(--link); text-decoration: none; }
+.ref-table a:hover { color: var(--link-hover); text-decoration: underline; }
+
+.ref-category {
+    background-color: rgba(201, 168, 76, 0.1);
+    font-weight: 600;
+    color: var(--highlight);
+}
+
+/* --- Footer --- */
+footer {
+    margin-top: 3rem;
+    padding-top: 2rem;
+    border-top: 1px solid var(--accent);
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+}
+
+footer a { color: var(--link); text-decoration: none; }
+footer a:hover { text-decoration: underline; }
+
+/* --- Responsive --- */
+@media (max-width: 768px) {
+    .container { padding: 1rem; }
+    header h1 { font-size: 1.8rem; }
+    .docs-grid { grid-template-columns: 1fr; }
+    .stack-grid { grid-template-columns: 1fr; }
+}

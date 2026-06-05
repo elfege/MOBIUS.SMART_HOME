@@ -1,0 +1,410 @@
+{% extends "base.html" %}
+
+{% block title %}Samsung TV — E2E Tests{% endblock %}
+
+{% block extra_css %}
+<style>
+/* ============================================================
+   Samsung TV E2E Tests — Component Styles
+   Two-column layout: test list + terminal log.
+   ============================================================ */
+
+.e2e-page {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 1.5rem;
+}
+
+.e2e-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.5rem;
+}
+
+.e2e-header h1 { font-size: 1.3rem; margin: 0; }
+
+.e2e-layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+}
+
+@media (max-width: 900px) {
+    .e2e-layout { grid-template-columns: 1fr; }
+}
+
+/* --- Test list --- */
+.test-list { display: flex; flex-direction: column; gap: 0.5rem; }
+
+.test-card {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 0.8rem;
+    background: #1a1a2e;
+    border: 1px solid #333;
+    border-radius: 6px;
+    font-size: 0.85rem;
+}
+
+.test-icon {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: bold;
+    flex-shrink: 0;
+}
+
+.test-icon.pending { background: #333; color: #888; }
+.test-icon.running { background: #1e40af; color: #93c5fd; animation: pulse 1s infinite; }
+.test-icon.pass    { background: #166534; color: #4ade80; }
+.test-icon.fail    { background: #991b1b; color: #fca5a5; }
+.test-icon.warn    { background: #92400e; color: #fcd34d; }
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.5; }
+}
+
+.test-info { flex: 1; }
+.test-name { font-weight: 600; color: #e2e8f0; }
+.test-msg  { color: #94a3b8; font-size: 0.75rem; margin-top: 2px; }
+.test-dur  { color: #64748b; font-size: 0.7rem; }
+
+.test-run-btn {
+    padding: 3px 8px;
+    font-size: 0.7rem;
+    background: #334155;
+    color: #cbd5e1;
+    border: 1px solid #475569;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.test-run-btn:hover { background: #475569; }
+
+/* --- Terminal log --- */
+.terminal {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 0.72rem;
+    line-height: 1.5;
+    height: 600px;
+    overflow-y: auto;
+    padding: 0.75rem;
+}
+
+.log-line { white-space: pre-wrap; word-break: break-word; }
+.log-time { color: #6e7681; }
+.log-test { color: #d2a8ff; font-weight: 600; }
+.log-info { color: #79c0ff; }
+.log-pass { color: #56d364; }
+.log-fail { color: #f85149; }
+.log-warn { color: #e3b341; }
+.log-detail { color: #8b949e; }
+
+/* --- Summary bar --- */
+.summary-bar {
+    display: flex;
+    gap: 1rem;
+    padding: 0.5rem 0.8rem;
+    background: #1a1a2e;
+    border: 1px solid #333;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    margin-bottom: 0.75rem;
+}
+
+.summary-pass  { color: #4ade80; }
+.summary-fail  { color: #f87171; }
+.summary-warn  { color: #fbbf24; }
+.summary-total { color: #94a3b8; }
+
+/* --- Buttons --- */
+.btn-run-all {
+    padding: 0.5rem 1.2rem;
+    background: #1d4ed8;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+.btn-run-all:hover { background: #2563eb; }
+.btn-run-all:disabled { background: #334155; cursor: not-allowed; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="e2e-page">
+
+    <!-- Header -->
+    <div class="e2e-header">
+        <h1><a href="/samsung-tv" style="color:#94a3b8;text-decoration:none">&larr; TV Remote</a> &nbsp; E2E Tests</h1>
+        <button class="btn-run-all" id="btn-run-all" onclick="runAllTests()">Run All Tests</button>
+    </div>
+
+    <!-- Summary -->
+    <div class="summary-bar">
+        <span class="summary-pass" id="sum-pass">0 pass</span>
+        <span class="summary-fail" id="sum-fail">0 fail</span>
+        <span class="summary-warn" id="sum-warn">0 warn</span>
+        <span class="summary-total" id="sum-total">0 / 0</span>
+    </div>
+
+    <!-- Two-column layout -->
+    <div class="e2e-layout">
+
+        <!-- Left: test cards -->
+        <div class="test-list" id="test-list"></div>
+
+        <!-- Right: terminal log -->
+        <div class="terminal" id="terminal"></div>
+    </div>
+
+</div>
+
+<script>
+(function() {
+    const API_BASE = '/samsung-tv';
+
+    // ===== Test definitions =====
+    const TESTS = [
+        {
+            id: 'health',
+            name: 'API Health',
+            endpoint: '/api/health',
+            method: 'GET',
+            validate: (d) => d.status === 'ok' ? 'pass' : 'fail',
+            msg: (d) => `status=${d.status}`,
+        },
+        {
+            id: 'tv-status',
+            name: 'TV Status Endpoint',
+            endpoint: `${API_BASE}/api/status`,
+            method: 'GET',
+            validate: (d) => d.tv_ip ? 'pass' : 'fail',
+            msg: (d) => `power=${d.power_state} conn=${d.conn_state} token=${d.token_set}`,
+        },
+        {
+            id: 'tv-http-poll',
+            name: 'TV HTTP Power Poll',
+            endpoint: `${API_BASE}/api/test/http-poll`,
+            method: 'GET',
+            validate: (d) => d.ok ? 'pass' : 'fail',
+            msg: (d) => `power_state=${d.power_state}`,
+        },
+        {
+            id: 'ws-state',
+            name: 'WebSocket Connection',
+            endpoint: `${API_BASE}/api/status`,
+            method: 'GET',
+            validate: (d) => d.conn_state === 'connected' ? 'pass' : d.conn_state === 'connecting' ? 'warn' : 'warn',
+            msg: (d) => `conn_state=${d.conn_state} retries=${d.retry_count} error=${d.last_error || 'none'}`,
+        },
+        {
+            id: 'token',
+            name: 'Token Pairing',
+            endpoint: `${API_BASE}/api/status`,
+            method: 'GET',
+            validate: (d) => d.token_set ? 'pass' : 'warn',
+            msg: (d) => d.token_set ? 'Token is set (paired)' : 'Not paired — TV requires Allow prompt',
+        },
+        {
+            id: 'callbacks',
+            name: 'Hubitat Callback Registry',
+            endpoint: `${API_BASE}/api/callbacks`,
+            method: 'GET',
+            validate: (d) => Object.keys(d.callbacks || {}).length > 0 ? 'pass' : 'warn',
+            msg: (d) => {
+                const cbs = Object.keys(d.callbacks || {});
+                return cbs.length > 0 ? `${cbs.length} hub(s): ${cbs.join(', ')}` : 'No hubs registered';
+            },
+        },
+        {
+            id: 'hub-69',
+            name: 'Hub 69 Reachable (port 39501)',
+            endpoint: `${API_BASE}/api/test/hub-reachable/<LAN_IP>`,
+            method: 'GET',
+            validate: (d) => d.ok && d.status_code === 200 ? 'pass' : 'fail',
+            msg: (d) => d.ok ? `HTTP ${d.status_code}` : `Error: ${d.error}`,
+        },
+        {
+            id: 'hub-70',
+            name: 'Hub 70 Reachable (port 39501)',
+            endpoint: `${API_BASE}/api/test/hub-reachable/<LAN_IP>`,
+            method: 'GET',
+            validate: (d) => d.ok && d.status_code === 200 ? 'pass' : 'fail',
+            msg: (d) => d.ok ? `HTTP ${d.status_code}` : `Error: ${d.error}`,
+        },
+        {
+            id: 'hub-71',
+            name: 'Hub 71 Reachable (port 39501)',
+            endpoint: `${API_BASE}/api/test/hub-reachable/<LAN_IP>`,
+            method: 'GET',
+            validate: (d) => d.ok && d.status_code === 200 ? 'pass' : 'fail',
+            msg: (d) => d.ok ? `HTTP ${d.status_code}` : `Error: ${d.error}`,
+        },
+        {
+            id: 'push-test',
+            name: 'Push State to Hubs',
+            endpoint: `${API_BASE}/api/test/push`,
+            method: 'POST',
+            validate: (d) => d.ok && d.pushed_to > 0 ? 'pass' : d.ok ? 'warn' : 'fail',
+            msg: (d) => d.ok ? `Pushed to ${d.pushed_to} hub(s)` : 'Push failed',
+        },
+        {
+            id: 'wol-test',
+            name: 'WoL Packet Send',
+            endpoint: `${API_BASE}/api/test/wol`,
+            method: 'POST',
+            validate: (d) => d.ok ? 'pass' : 'fail',
+            msg: (d) => d.ok ? `Sent to MAC ${d.mac}` : 'WoL failed',
+        },
+        {
+            id: 'configure-read',
+            name: 'Configure Endpoint',
+            endpoint: `${API_BASE}/api/configure`,
+            method: 'OPTIONS',
+            validate: (d, status) => status === 200 || status === 405 || status === 422 ? 'pass' : 'fail',
+            msg: (d, status) => `HTTP ${status} (endpoint exists)`,
+        },
+    ];
+
+    // ===== State =====
+    let results = {};
+    let logs = [];
+    let running = false;
+
+    // ===== DOM helpers =====
+    function now() {
+        return new Date().toLocaleTimeString('en-US', { hour12: false });
+    }
+
+    function addLog(test, type, text) {
+        const line = { time: now(), test, type, text };
+        logs.push(line);
+        const el = document.getElementById('terminal');
+        const span = document.createElement('div');
+        span.className = 'log-line';
+        span.innerHTML = `<span class="log-time">[${line.time}]</span> ` +
+            `<span class="log-test">[${line.test}]</span> ` +
+            `<span class="log-${line.type}">${escapeHtml(line.text)}</span>`;
+        el.appendChild(span);
+        el.scrollTop = el.scrollHeight;
+    }
+
+    function escapeHtml(s) {
+        return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    function iconChar(status) {
+        return { pending: '\u25CB', running: '\u21BB', pass: '\u2713', fail: '\u2717', warn: '\u26A0' }[status] || '?';
+    }
+
+    function renderTestCard(t) {
+        const r = results[t.id] || { status: 'pending', message: '', duration: null };
+        return `
+            <div class="test-card" id="card-${t.id}">
+                <div class="test-icon ${r.status}">${iconChar(r.status)}</div>
+                <div class="test-info">
+                    <div class="test-name">${t.name}</div>
+                    <div class="test-msg">${r.message || t.endpoint}</div>
+                    ${r.duration != null ? `<div class="test-dur">${r.duration}ms</div>` : ''}
+                </div>
+                <button class="test-run-btn" onclick="runSingleTest('${t.id}')" ${running ? 'disabled' : ''}>Run</button>
+            </div>`;
+    }
+
+    function renderAll() {
+        document.getElementById('test-list').innerHTML = TESTS.map(renderTestCard).join('');
+        let p = 0, f = 0, w = 0;
+        for (const r of Object.values(results)) {
+            if (r.status === 'pass') p++;
+            else if (r.status === 'fail') f++;
+            else if (r.status === 'warn') w++;
+        }
+        document.getElementById('sum-pass').textContent = `${p} pass`;
+        document.getElementById('sum-fail').textContent = `${f} fail`;
+        document.getElementById('sum-warn').textContent = `${w} warn`;
+        document.getElementById('sum-total').textContent = `${p + f + w} / ${TESTS.length}`;
+    }
+
+    // ===== Test runner =====
+    async function runTest(t) {
+        results[t.id] = { status: 'running', message: 'Running...', duration: null };
+        renderAll();
+        addLog(t.name, 'info', `${t.method} ${t.endpoint}`);
+
+        const start = performance.now();
+        try {
+            const opts = { method: t.method };
+            if (t.method === 'POST') {
+                opts.headers = { 'Content-Type': 'application/json' };
+            }
+            const resp = await fetch(t.endpoint, opts);
+            const dur = Math.round(performance.now() - start);
+
+            let data = {};
+            try { data = await resp.json(); } catch (e) { /* non-JSON */ }
+
+            const status = t.validate(data, resp.status);
+            const message = t.msg(data, resp.status);
+
+            results[t.id] = { status, message, duration: dur };
+            addLog(t.name, status, `${message}  (${dur}ms)`);
+
+            if (status === 'fail') {
+                addLog(t.name, 'detail', `HTTP ${resp.status} — ${JSON.stringify(data).slice(0, 200)}`);
+            }
+        } catch (err) {
+            const dur = Math.round(performance.now() - start);
+            results[t.id] = { status: 'fail', message: err.message, duration: dur };
+            addLog(t.name, 'fail', `Exception: ${err.message}  (${dur}ms)`);
+        }
+        renderAll();
+    }
+
+    // ===== Public API =====
+    window.runAllTests = async function() {
+        if (running) return;
+        running = true;
+        document.getElementById('btn-run-all').disabled = true;
+        results = {};
+        logs = [];
+        document.getElementById('terminal').innerHTML = '';
+        renderAll();
+
+        addLog('E2E', 'info', `Starting ${TESTS.length} tests...`);
+
+        for (const t of TESTS) {
+            await runTest(t);
+        }
+
+        const p = Object.values(results).filter(r => r.status === 'pass').length;
+        const f = Object.values(results).filter(r => r.status === 'fail').length;
+        addLog('E2E', p === TESTS.length ? 'pass' : f > 0 ? 'fail' : 'warn',
+            `Done: ${p} pass, ${f} fail, ${TESTS.length - p - f} warn`);
+
+        running = false;
+        document.getElementById('btn-run-all').disabled = false;
+        renderAll();
+    };
+
+    window.runSingleTest = async function(id) {
+        const t = TESTS.find(x => x.id === id);
+        if (t) await runTest(t);
+    };
+
+    // Initial render
+    renderAll();
+})();
+</script>
+{% endblock %}

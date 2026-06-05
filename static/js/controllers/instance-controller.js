@@ -925,9 +925,13 @@ export class InstanceWizardController {
             const rows = windows.map((w, i) => `
                 <div class="stp-win-row" data-scope="${scope}" data-idx="${i}"
                      style="display:flex;align-items:center;gap:.4rem;margin:.25rem 0;">
-                    <input type="time" lang="en-GB" class="stp-win-start" value="${w.start || '08:00'}">
+                    <input type="text" inputmode="numeric" maxlength="5" class="stp-win-start"
+                           value="${w.start || '08:00'}" placeholder="HH:MM" title="24-hour, HH:MM"
+                           style="width:4.4em;text-align:center;font-variant-numeric:tabular-nums;">
                     <span style="opacity:.6;">&rarr;</span>
-                    <input type="time" lang="en-GB" class="stp-win-end" value="${w.end || '20:30'}">
+                    <input type="text" inputmode="numeric" maxlength="5" class="stp-win-end"
+                           value="${w.end || '20:30'}" placeholder="HH:MM" title="24-hour, HH:MM"
+                           style="width:4.4em;text-align:center;font-variant-numeric:tabular-nums;">
                     <button type="button" class="stp-win-remove" data-scope="${scope}" data-idx="${i}"
                             title="Remove window" style="padding:.05rem .55rem;">&times;</button>
                 </div>`).join('');
@@ -977,8 +981,28 @@ export class InstanceWizardController {
             const idx = Number(row.dataset.idx);
             const s = row.querySelector('.stp-win-start');
             const e = row.querySelector('.stp-win-end');
-            s.addEventListener('change', () => { if (list[idx]) list[idx].start = s.value || '08:00'; });
-            e.addEventListener('change', () => { if (list[idx]) list[idx].end = e.value || '20:30'; });
+            // 24-hour HH:MM normalizer: accepts "1600" / "16:0" / "16:00",
+            // validates ranges, reverts the field on garbage. We use a typed
+            // field because native <input type=time> renders AM/PM in en-US
+            // locales and can't be reliably forced to 24h (the `lang` attr is
+            // honored inconsistently across browsers).
+            const norm = (v) => {
+                const m = String(v).trim().match(/^(\d{1,2}):?(\d{2})$/);
+                if (!m) return null;
+                const h = +m[1], mi = +m[2];
+                if (h > 23 || mi > 59) return null;
+                return String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0');
+            };
+            s.addEventListener('change', () => {
+                const nv = norm(s.value);
+                if (nv && list[idx]) { list[idx].start = nv; s.value = nv; }
+                else { s.value = (list[idx] && list[idx].start) || '08:00'; }
+            });
+            e.addEventListener('change', () => {
+                const nv = norm(e.value);
+                if (nv && list[idx]) { list[idx].end = nv; e.value = nv; }
+                else { e.value = (list[idx] && list[idx].end) || '20:30'; }
+            });
         });
     }
 

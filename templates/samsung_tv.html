@@ -1,0 +1,1328 @@
+{% extends "base.html" %}
+
+{% block title %}Samsung TV{% endblock %}
+
+{% block extra_css %}
+<style>
+/* ============================================================
+   Samsung TV Remote — Component Styles
+   Scoped to .tv-page to avoid polluting global CSS.
+   ============================================================ */
+
+.tv-page {
+    max-width: 100%;
+    margin: 0 auto;
+    padding: 1.5rem;
+}
+
+/* ---- Tile grid: 4 cols desktop → 1 col mobile ---- */
+.tv-tile-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+}
+
+@media (max-width: 1200px) {
+    .tv-tile-grid { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 900px) {
+    .tv-tile-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 600px) {
+    .tv-tile-grid { grid-template-columns: 1fr; }
+}
+
+/* Terminal pair stacks on narrow screens */
+@media (max-width: 900px) {
+    .tv-terminals-grid { grid-template-columns: 1fr !important; }
+}
+
+/* Terminal tile: full-width row, 2D resizable */
+.tv-tile-terminal {
+    grid-column: 1 / -1;
+    min-height: 220px;
+    resize: both;
+    overflow: auto;           /* required for CSS resize to work */
+    display: flex;
+    flex-direction: column;
+    padding: 0 !important;    /* override .tv-section padding; bar + terminal handle their own */
+}
+
+.tv-terminal {
+    flex: 1;                  /* fill remaining height after terminal-bar */
+    min-height: 160px;
+    background: #0d1117;
+    border: none;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.72rem;
+    line-height: 1.5;
+    overflow-y: auto;
+    padding: 0.75rem;
+    box-sizing: border-box;
+}
+.tv-terminal .log-line { white-space: pre-wrap; word-break: break-word; }
+.tv-terminal .log-time { color: #6e7681; }
+.tv-terminal .log-src  { color: #d2a8ff; font-weight: 600; }
+.tv-terminal .log-info { color: #79c0ff; }
+.tv-terminal .log-ok   { color: #56d364; }
+.tv-terminal .log-err  { color: #f85149; }
+.tv-terminal .log-warn { color: #e3b341; }
+.tv-terminal .log-dim  { color: #8b949e; }
+
+/* Terminal header bar */
+.terminal-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.4rem 0.75rem;
+    background: #161b22;
+    border-bottom: 1px solid #30363d;
+    font-size: 0.75rem;
+    color: #8b949e;
+}
+.terminal-bar button {
+    padding: 2px 8px;
+    font-size: 0.7rem;
+    background: #21262d;
+    color: #c9d1d9;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.terminal-bar button:hover { background: #30363d; }
+
+/* ---- Page header ---- */
+.tv-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 2rem;
+}
+.tv-header h2 {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 600;
+}
+.back-link {
+    color: var(--color-muted, #888);
+    text-decoration: none;
+    font-size: 0.9rem;
+}
+.back-link:hover { color: var(--color-text, #eee); }
+
+/* ---- Connection / power badges ---- */
+.tv-badges {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    margin-bottom: 1.75rem;
+    flex-wrap: wrap;
+}
+.badge {
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.badge-conn-connected    { background: #1a3a1a; color: #4caf50; border: 1px solid #4caf50; }
+.badge-conn-connecting   { background: #2a2a1a; color: #ffc107; border: 1px solid #ffc107; }
+.badge-conn-disconnected { background: #2a1a1a; color: #f44336; border: 1px solid #f44336; }
+.badge-power-on  { background: #1a3a1a; color: #66bb6a; border: 1px solid #66bb6a; }
+.badge-power-off { background: #2a1a1a; color: #ef5350; border: 1px solid #ef5350; }
+.badge-power-unknown { background: #1e1e1e; color: #888; border: 1px solid #555; }
+.badge-token-set { background: #1a2a3a; color: #42a5f5; border: 1px solid #42a5f5; }
+.queue-badge { background: #1e1e1e; color: #bbb; border: 1px solid #555; font-family: monospace; }
+
+/* ---- Status detail bar ---- */
+.tv-status-bar {
+    background: var(--color-card-bg, #1e1e1e);
+    border: 1px solid var(--color-border, #333);
+    border-radius: 0.5rem;
+    padding: 0.9rem 1.2rem;
+    font-size: 0.83rem;
+    color: var(--color-muted, #888);
+    margin-bottom: 1.75rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.2rem;
+}
+.tv-status-bar span { white-space: nowrap; }
+.tv-status-bar .error-text { color: #ef5350; }
+
+/* ---- Power section ---- */
+.tv-section {
+    background: var(--color-card-bg, #1e1e1e);
+    border: 1px solid var(--color-border, #333);
+    border-radius: 0.6rem;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.5rem;
+}
+.tv-section h3 {
+    margin: 0 0 1rem 0;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--color-text, #eee);
+    border-bottom: 1px solid var(--color-border, #333);
+    padding-bottom: 0.6rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+/* ---- Copy-to-clipboard button (tile headers & terminal bars) ---- */
+.btn-copy-tile {
+    padding: 2px 8px;
+    font-size: 0.68rem;
+    background: #21262d;
+    color: #6e7681;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    flex-shrink: 0;
+    margin-left: 0.5rem;
+}
+.btn-copy-tile:hover  { background: #30363d; color: #c9d1d9; }
+.btn-copy-tile.copied { background: #1a3a1a; color: #56d364; border-color: #56d364; }
+
+/* ---- Big power button row ---- */
+.power-row {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.btn-power-on {
+    flex: 1;
+    min-width: 120px;
+    padding: 0.75rem 1.5rem;
+    border: none;
+    border-radius: 0.45rem;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    background: #2e7d32;
+    color: #fff;
+    transition: background 0.15s, transform 0.1s;
+}
+.btn-power-on:hover  { background: #388e3c; }
+.btn-power-on:active { transform: scale(0.97); }
+
+.btn-power-off {
+    flex: 1;
+    min-width: 120px;
+    padding: 0.75rem 1.5rem;
+    border: none;
+    border-radius: 0.45rem;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    background: #c62828;
+    color: #fff;
+    transition: background 0.15s, transform 0.1s;
+}
+.btn-power-off:hover  { background: #d32f2f; }
+.btn-power-off:active { transform: scale(0.97); }
+
+/* ---- Key grid ---- */
+.key-grid {
+    display: grid;
+    gap: 0.55rem;
+}
+.key-grid-row {
+    display: flex;
+    gap: 0.55rem;
+    justify-content: center;
+}
+.btn-key {
+    min-width: 3rem;
+    height: 2.5rem;
+    padding: 0 0.6rem;
+    border: 1px solid var(--color-border, #444);
+    border-radius: 0.4rem;
+    background: var(--color-bg, #2a2a2a);
+    color: var(--color-text, #ddd);
+    font-size: 0.82rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s, transform 0.08s;
+    white-space: nowrap;
+}
+.btn-key:hover  { background: var(--color-hover, #3a3a3a); border-color: #666; }
+.btn-key:active { transform: scale(0.93); background: #444; }
+.btn-key.wide   { min-width: 6rem; }
+.btn-key.nav    { font-size: 1rem; }
+
+/* ---- Volume / channel dpad ---- */
+.dpad-container {
+    display: grid;
+    grid-template-columns: repeat(3, 2.8rem);
+    grid-template-rows: repeat(3, 2.8rem);
+    gap: 0.35rem;
+    justify-content: center;
+    margin: 0 auto;
+}
+.dpad-up    { grid-column: 2; grid-row: 1; }
+.dpad-left  { grid-column: 1; grid-row: 2; }
+.dpad-ok    { grid-column: 2; grid-row: 2; background: #1a1a3a; border-color: #42a5f5; color: #42a5f5; font-weight: 700; }
+.dpad-right { grid-column: 3; grid-row: 2; }
+.dpad-down  { grid-column: 2; grid-row: 3; }
+.btn-dpad {
+    width: 2.8rem;
+    height: 2.8rem;
+    border: 1px solid var(--color-border, #444);
+    border-radius: 0.4rem;
+    background: var(--color-bg, #2a2a2a);
+    color: var(--color-text, #ddd);
+    font-size: 1.1rem;
+    cursor: pointer;
+    transition: background 0.12s, transform 0.08s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.btn-dpad:hover  { background: #3a3a3a; }
+.btn-dpad:active { transform: scale(0.9); }
+
+/* ---- Tab navigation ---- */
+.tv-tabs {
+    display: flex;
+    gap: 0;
+    margin-bottom: 1.25rem;
+    border-bottom: 2px solid #333;
+}
+.tv-tab {
+    padding: 0.5rem 1.2rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #8b949e;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+}
+.tv-tab:hover { color: #c9d1d9; }
+.tv-tab.active {
+    color: #58a6ff;
+    border-bottom-color: #58a6ff;
+}
+.tv-tab-panel { display: none; }
+.tv-tab-panel.active { display: block; }
+
+/* ---- Diagram tab ---- */
+.tv-diagram-container {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 1.5rem;
+    overflow-x: auto;
+}
+.tv-diagram-container pre {
+    margin: 0;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 0.75rem;
+    line-height: 1.6;
+    color: #c9d1d9;
+    white-space: pre;
+}
+.tv-diagram-container .d-label { color: #58a6ff; font-weight: 600; }
+.tv-diagram-container .d-arrow { color: #8b949e; }
+.tv-diagram-container .d-proto { color: #56d364; }
+.tv-diagram-container .d-port  { color: #ffa657; }
+.tv-diagram-container .d-note  { color: #6e7681; font-style: italic; }
+
+/* ---- Feedback toast ---- */
+#tv-toast {
+    position: fixed;
+    bottom: 1.5rem;
+    right: 1.5rem;
+    padding: 0.6rem 1.2rem;
+    border-radius: 0.4rem;
+    font-size: 0.85rem;
+    font-weight: 500;
+    z-index: 9999;
+    opacity: 0;
+    transition: opacity 0.2s;
+    pointer-events: none;
+}
+#tv-toast.show          { opacity: 1; }
+#tv-toast.toast-ok      { background: #2e7d32; color: #fff; }
+#tv-toast.toast-error   { background: #b71c1c; color: #fff; }
+#tv-toast.toast-info    { background: #1565c0; color: #fff; }
+
+/* ---- Configure section ---- */
+.configure-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.6rem 1rem;
+    align-items: center;
+    font-size: 0.88rem;
+}
+.configure-grid label { color: var(--color-muted, #888); white-space: nowrap; }
+.configure-grid input[type="text"],
+.configure-grid input[type="checkbox"] {
+    width: 100%;
+    background: #111;
+    border: 1px solid #444;
+    border-radius: 0.35rem;
+    color: #eee;
+    padding: 0.35rem 0.6rem;
+    font-size: 0.88rem;
+}
+.configure-grid input[type="checkbox"] { width: auto; }
+.btn-configure {
+    grid-column: 1 / -1;
+    padding: 0.55rem 1.2rem;
+    border: none;
+    border-radius: 0.4rem;
+    background: #1565c0;
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: background 0.15s;
+}
+.btn-configure:hover { background: #1976d2; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="tv-page">
+
+    <!-- Header -->
+    <div class="tv-header">
+        <a href="/" class="back-link">&larr; Dashboard</a>
+        <h2>&#128250; Samsung TV Remote</h2>
+        <a href="/samsung-tv/tests" style="color:#94a3b8;font-size:0.8rem;text-decoration:none;margin-left:auto">E2E Tests &rarr;</a>
+    </div>
+
+    <!-- Live badges (updated by JS) -->
+    <div class="tv-badges" id="tv-badges">
+        <span class="badge badge-conn-{{ status.conn_state }}" id="badge-conn">
+            WS: {{ status.conn_state }}
+        </span>
+        <span class="badge badge-power-{{ status.power_state }}" id="badge-power">
+            TV: {{ status.power_state }}
+        </span>
+        {% if status.token_set %}
+        <span class="badge badge-token-set" id="badge-token">&#128273; Paired</span>
+        {% else %}
+        <span class="badge badge-power-unknown" id="badge-token">&#128273; Unpaired</span>
+        {% endif %}
+        <span class="badge queue-badge" id="badge-queue">Queue: {{ status.queued_commands }}</span>
+    </div>
+
+    <!-- Status bar -->
+    <div class="tv-status-bar" id="tv-status-bar">
+        <span>IP: <strong>{{ tv_ip }}</strong></span>
+        <span>MAC: <strong>{{ status.mac }}</strong></span>
+        <span>SSL: <strong id="stat-ssl">{{ 'yes' if status.use_ssl else 'no' }}</strong></span>
+        <span>Retries: <strong id="stat-retries">{{ status.retry_count }}</strong></span>
+        <span id="stat-error" class="{{ 'error-text' if status.last_error else '' }}" style="{{ 'display:none' if not status.last_error else '' }}">
+            &#9888; <span id="stat-error-msg">{{ status.last_error or '' }}</span>
+        </span>
+    </div>
+
+    <!-- Hubitat hub panel -->
+    <div class="tv-status-bar" id="tv-hub-bar" style="font-size:0.78rem;flex-direction:column;gap:0.5rem;">
+        <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;">
+            <span style="color:#94a3b8;font-weight:600;">Hubitat Hubs:</span>
+            <span id="hub-links" style="color:#64748b;">loading...</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+            <label for="hub-select" style="color:#6e7681;font-size:0.75rem;">Register hub:</label>
+            <select id="hub-select" style="background:#111;color:#c9d1d9;border:1px solid #444;border-radius:4px;padding:2px 6px;font-size:0.75rem;">
+                <option value="<LAN_IP>">Hub 1 — <LAN_IP></option>
+                <option value="<LAN_IP>">Hub 2 — <LAN_IP></option>
+                <option value="<LAN_IP>">Hub 3 — <LAN_IP></option>
+            </select>
+            <button id="btn-hub-register" style="padding:2px 10px;font-size:0.72rem;background:#1d4ed8;color:#fff;border:none;border-radius:4px;cursor:pointer;">Register</button>
+            <button id="btn-hub-test" style="padding:2px 10px;font-size:0.72rem;background:#334155;color:#cbd5e1;border:1px solid #475569;border-radius:4px;cursor:pointer;">Test Push</button>
+        </div>
+    </div>
+
+    <!-- ══ Tabs ══ -->
+    <div class="tv-tabs">
+        <button class="tv-tab active" data-tab="remote">Remote</button>
+        <button class="tv-tab" data-tab="diagram">Diagram</button>
+        <button class="tv-tab" data-tab="tests">Tests</button>
+    </div>
+
+    <!-- ══ Tab: Remote ══ -->
+    <div class="tv-tab-panel active" id="tab-remote">
+    <div class="tv-tile-grid">
+
+        <!-- ── Power ── -->
+        <div class="tv-section">
+            <h3>Power</h3>
+            <div class="power-row">
+                <button class="btn-power-on"  id="btn-on"  title="Wake-on-LAN + KEY_POWER">&#9654; ON</button>
+                <button class="btn-power-off" id="btn-off" title="KEY_POWER (standby toggle)">&#9646;&#9646; OFF</button>
+            </div>
+        </div>
+
+        <!-- ── Navigation D-pad ── -->
+        <div class="tv-section">
+            <h3>Navigation</h3>
+            <div class="dpad-container">
+                <button class="btn-dpad dpad-up"    data-key="UP">&#9650;</button>
+                <button class="btn-dpad dpad-left"  data-key="LEFT">&#9664;</button>
+                <button class="btn-dpad dpad-ok"    data-key="ENTER">OK</button>
+                <button class="btn-dpad dpad-right" data-key="RIGHT">&#9654;</button>
+                <button class="btn-dpad dpad-down"  data-key="DOWN">&#9660;</button>
+            </div>
+            <div class="key-grid" style="margin-top:0.75rem;">
+                <div class="key-grid-row">
+                    <button class="btn-key wide" data-key="RETURN">&#8617; Back</button>
+                    <button class="btn-key wide" data-key="EXIT">&#10005; Exit</button>
+                    <button class="btn-key wide" data-key="HOME">&#8962; Home</button>
+                </div>
+                <div class="key-grid-row">
+                    <button class="btn-key wide" data-key="MENU">Menu</button>
+                    <button class="btn-key wide" data-key="SOURCE">Source</button>
+                    <button class="btn-key wide" data-key="GUIDE">Guide</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Volume & Channel ── -->
+        <div class="tv-section">
+            <h3>Volume &amp; Channel</h3>
+            <div class="key-grid">
+                <div class="key-grid-row">
+                    <button class="btn-key" data-key="MUTE">Mute</button>
+                    <button class="btn-key" data-key="VOLUMEUP">Vol +</button>
+                    <button class="btn-key" data-key="VOLUMEDOWN">Vol -</button>
+                </div>
+                <div class="key-grid-row">
+                    <button class="btn-key" data-key="CHUP">Ch +</button>
+                    <button class="btn-key" data-key="CHDOWN">Ch -</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Inputs ── -->
+        <div class="tv-section">
+            <h3>Inputs</h3>
+            <div class="key-grid">
+                <div class="key-grid-row">
+                    <button class="btn-key" data-key="HDMI1">HDMI 1</button>
+                    <button class="btn-key" data-key="HDMI2">HDMI 2</button>
+                </div>
+                <div class="key-grid-row">
+                    <button class="btn-key" data-key="HDMI3">HDMI 3</button>
+                    <button class="btn-key" data-key="HDMI4">HDMI 4</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Number pad ── -->
+        <div class="tv-section">
+            <h3>Number Pad</h3>
+            <div class="key-grid">
+                <div class="key-grid-row">
+                    <button class="btn-key" data-key="1">1</button>
+                    <button class="btn-key" data-key="2">2</button>
+                    <button class="btn-key" data-key="3">3</button>
+                </div>
+                <div class="key-grid-row">
+                    <button class="btn-key" data-key="4">4</button>
+                    <button class="btn-key" data-key="5">5</button>
+                    <button class="btn-key" data-key="6">6</button>
+                </div>
+                <div class="key-grid-row">
+                    <button class="btn-key" data-key="7">7</button>
+                    <button class="btn-key" data-key="8">8</button>
+                    <button class="btn-key" data-key="9">9</button>
+                </div>
+                <div class="key-grid-row">
+                    <button class="btn-key wide" data-key="MINUS">-/--</button>
+                    <button class="btn-key" data-key="0">0</button>
+                    <button class="btn-key wide" data-key="PRECH">Pre-Ch</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Playback ── -->
+        <div class="tv-section">
+            <h3>Playback</h3>
+            <div class="key-grid">
+                <div class="key-grid-row">
+                    <button class="btn-key" data-key="REWIND">Rew</button>
+                    <button class="btn-key" data-key="PLAY">Play</button>
+                    <button class="btn-key" data-key="PAUSE">Pause</button>
+                    <button class="btn-key" data-key="FF">FF</button>
+                    <button class="btn-key" data-key="STOP">Stop</button>
+                </div>
+                <div class="key-grid-row">
+                    <button class="btn-key" style="color:#f44336" data-key="RED">Red</button>
+                    <button class="btn-key" style="color:#4caf50" data-key="GREEN">Green</button>
+                    <button class="btn-key" style="color:#ffeb3b" data-key="YELLOW">Yellow</button>
+                    <button class="btn-key" style="color:#2196f3" data-key="BLUE">Blue</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Configure ── -->
+        <div class="tv-section">
+            <h3>Configure Connection</h3>
+            <div class="configure-grid">
+                <label for="cfg-ip">TV IP</label>
+                <input type="text" id="cfg-ip" value="{{ tv_ip }}" placeholder="<LAN_IP>">
+
+                <label for="cfg-mac">MAC Address</label>
+                <input type="text" id="cfg-mac" value="{{ status.mac }}" placeholder="AABBCCDDEEFF">
+
+                <label for="cfg-ssl">Use WSS (SSL)</label>
+                <input type="checkbox" id="cfg-ssl" {{ 'checked' if status.use_ssl else '' }}>
+
+                <button class="btn-configure" id="btn-configure">Apply &amp; Reconnect</button>
+            </div>
+        </div>
+
+    </div><!-- .tv-tile-grid -->
+    </div><!-- #tab-remote -->
+
+    <!-- ══ Tab: Diagram ══ -->
+    <div class="tv-tab-panel" id="tab-diagram">
+        <div class="tv-diagram-container"><pre>
+<span class="d-label">Samsung TV</span> (<LAN_IP>)
+<span class="d-arrow">    │</span>
+<span class="d-arrow">    │</span> <span class="d-proto">WSS :8002</span> <span class="d-note">— persistent, token auth, key commands</span>
+<span class="d-arrow">    │</span> <span class="d-proto">HTTP :8001</span> <span class="d-note">— power poll every 30s (200=on, timeout=off)</span>
+<span class="d-arrow">    │</span> <span class="d-proto">UDP  :9</span>    <span class="d-note">— WoL magic packet (unicast + broadcast)</span>
+<span class="d-arrow">    ▼</span>
+<span class="d-label">SamsungTVClient</span> <span class="d-note">(Python async service)</span>
+<span class="d-arrow">    │</span>
+<span class="d-arrow">    │</span> <span class="d-note">on_power_change</span>  <span class="d-arrow">──▶</span>  <span class="d-label">push_state_changes()</span>
+<span class="d-arrow">    │</span> <span class="d-note">on_conn_change</span>   <span class="d-arrow">──▶</span>  <span class="d-label">push_state_changes()</span>
+<span class="d-arrow">    │</span> <span class="d-note">on_token_save</span>    <span class="d-arrow">──▶</span>  <span class="d-label">AWS Secrets Manager</span>
+<span class="d-arrow">    ▼</span>
+<span class="d-label">FastAPI Blueprint</span> <span class="d-port">/samsung-tv/api/*</span>
+<span class="d-arrow">    │</span>
+<span class="d-arrow">    ├──▶</span> <span class="d-proto">HTTP POST</span> <span class="d-port">:39501</span> <span class="d-arrow">──▶</span> <span class="d-label">Hubitat Hub 69</span> <span class="d-note">(parse() → sendEvent)</span>
+<span class="d-arrow">    ├──▶</span> <span class="d-proto">HTTP POST</span> <span class="d-port">:39501</span> <span class="d-arrow">──▶</span> <span class="d-label">Hubitat Hub 70</span> <span class="d-note">(parse() → sendEvent)</span>
+<span class="d-arrow">    ├──▶</span> <span class="d-proto">HTTP POST</span> <span class="d-port">:39501</span> <span class="d-arrow">──▶</span> <span class="d-label">Hubitat Hub 71</span> <span class="d-note">(parse() → sendEvent)</span>
+<span class="d-arrow">    │</span>
+<span class="d-arrow">    ▲</span>
+<span class="d-arrow">    │</span> <span class="d-proto">HTTP GET/POST</span> <span class="d-note">— status, on, off, key, register, configure</span>
+<span class="d-arrow">    │</span>
+<span class="d-label">Browser UI</span> <span class="d-note">(this page, polls /api/status every 5s)</span>
+
+<span class="d-arrow">───────────────────────────────────────────────────────</span>
+
+<span class="d-label">Hubitat Driver</span> <span class="d-note">(Samsung_TV_Remote_Driver.groovy)</span>
+<span class="d-arrow">    │</span>
+<span class="d-arrow">    ├──</span> <span class="d-note">updated()</span>     <span class="d-arrow">──▶</span> <span class="d-proto">POST</span> <span class="d-port">/api/register</span>  <span class="d-note">{callback_url, device_id}</span>
+<span class="d-arrow">    ├──</span> <span class="d-note">on()</span>          <span class="d-arrow">──▶</span> <span class="d-proto">POST</span> <span class="d-port">/api/on</span>        <span class="d-note">WoL + KEY_POWER if WS open</span>
+<span class="d-arrow">    ├──</span> <span class="d-note">off()</span>         <span class="d-arrow">──▶</span> <span class="d-proto">POST</span> <span class="d-port">/api/off</span>       <span class="d-note">KEY_POWER toggle</span>
+<span class="d-arrow">    ├──</span> <span class="d-note">refresh()</span>     <span class="d-arrow">──▶</span> <span class="d-proto">GET</span>  <span class="d-port">/api/status</span>    <span class="d-note">one-shot fallback</span>
+<span class="d-arrow">    └──</span> <span class="d-note">parse()</span>       <span class="d-arrow">◀──</span> <span class="d-proto">POST from server</span> <span class="d-note">real-time push (port 39501)</span>
+</pre></div>
+    </div><!-- #tab-diagram -->
+
+    <!-- ══ Tab: Tests ══ -->
+    <div class="tv-tab-panel" id="tab-tests">
+        <p style="color:#8b949e;margin-bottom:1rem;">
+            Full E2E test suite available at
+            <a href="/samsung-tv/tests" style="color:#58a6ff">/samsung-tv/tests</a>
+        </p>
+        <iframe src="/samsung-tv/tests" style="width:100%;height:80vh;border:1px solid #333;border-radius:6px;background:#0d1117;"></iframe>
+    </div><!-- #tab-tests -->
+
+    <!-- ══ Terminals (always visible, below tabs) ══ -->
+    <div class="tv-terminals-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:1.25rem;">
+
+        <!-- Server terminal -->
+        <div class="tv-section tv-tile-terminal">
+            <div class="terminal-bar">
+                <span>Server &mdash; <span id="term-count">0</span> events</span>
+                <div style="display:flex;gap:4px;">
+                    <button id="btn-term-copy"  class="btn-copy-tile" title="Copy terminal text">Copy</button>
+                    <button id="btn-term-clear" title="Clear terminal">Clear</button>
+                </div>
+            </div>
+            <div class="tv-terminal" id="tv-terminal"></div>
+        </div>
+
+        <!-- Hub log terminal -->
+        <div class="tv-section tv-tile-terminal">
+            <div class="terminal-bar" style="flex-wrap:wrap;gap:0.35rem 0.5rem;">
+                <div style="display:flex;align-items:center;gap:0.5rem;flex:1;flex-wrap:wrap;">
+                    <span>Hub Logs</span>
+                    <select id="hub-log-select" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:3px;padding:1px 4px;font-size:0.7rem;">
+                        <option value="<LAN_IP>">Hub 1 (.69)</option>
+                        <option value="<LAN_IP>">Hub 2 (.70)</option>
+                        <option value="<LAN_IP>">Hub 3 (.71)</option>
+                    </select>
+                    <span id="hub-ws-status" style="font-size:0.65rem;color:#6e7681;">disconnected</span>
+                    <span style="white-space:nowrap;">&mdash; <span id="hub-term-count">0</span> shown / <span id="hub-term-total">0</span> total</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
+                    <!-- Device filter: auto-populated as devices appear in the log stream -->
+                    <select id="hub-log-filter"
+                            title="Filter log to a specific device. Options are added automatically as devices appear."
+                            style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:3px;
+                                   padding:1px 6px;font-size:0.7rem;max-width:200px;outline:none;">
+                        <option value="">All devices</option>
+                    </select>
+                    <button id="btn-hub-copy"    class="btn-copy-tile" title="Copy hub log text">Copy</button>
+                    <button id="btn-hub-connect" title="Connect to hub log socket">Connect</button>
+                    <button id="btn-hub-clear"   title="Clear hub logs">Clear</button>
+                </div>
+            </div>
+            <div class="tv-terminal" id="hub-terminal"></div>
+        </div>
+
+    </div>
+
+</div><!-- .tv-page -->
+
+<!-- Toast notification -->
+<div id="tv-toast"></div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+/**
+ * Samsung TV Remote — UI Controller
+ *
+ * Handles:
+ *  - Status polling every 5 seconds (badge + status-bar updates)
+ *  - Power on / off buttons
+ *  - All key-grid buttons (delegates via event delegation)
+ *  - D-pad buttons
+ *  - Configure form (POST /samsung-tv/api/configure)
+ *  - Toast feedback for every action
+ */
+(function () {
+    "use strict";
+
+    const API_BASE      = "/samsung-tv/api";
+    const POLL_INTERVAL = 5000;   // ms — status refresh frequency
+    let   _pollTimer    = null;
+    let   _termCount    = 0;
+
+    // ── Virtual terminal ──────────────────────────────────────────────────────
+
+    function termLog(src, type, text) {
+        const el  = document.getElementById("tv-terminal");
+        const ts  = new Date().toLocaleTimeString("en-US", { hour12: false });
+        const div = document.createElement("div");
+        div.className = "log-line";
+        div.innerHTML =
+            `<span class="log-time">[${ts}]</span> ` +
+            `<span class="log-src">[${_esc(src)}]</span> ` +
+            `<span class="log-${type}">${_esc(text)}</span>`;
+        el.appendChild(div);
+        el.scrollTop = el.scrollHeight;
+        _termCount++;
+        document.getElementById("term-count").textContent = _termCount;
+    }
+
+    function _esc(s) {
+        return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    document.getElementById("btn-term-clear").addEventListener("click", () => {
+        document.getElementById("tv-terminal").innerHTML = "";
+        _termCount = 0;
+        document.getElementById("term-count").textContent = "0";
+    });
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    function toast(msg, type = "ok") {
+        const el = document.getElementById("tv-toast");
+        el.textContent = msg;
+        el.className   = `show toast-${type}`;
+        clearTimeout(el._timer);
+        el._timer = setTimeout(() => { el.className = ""; }, 2200);
+    }
+
+    async function apiPost(path, body = null) {
+        try {
+            const opts = { method: "POST" };
+            if (body) {
+                opts.headers = { "Content-Type": "application/json" };
+                opts.body    = JSON.stringify(body);
+            }
+            const resp = await fetch(`${API_BASE}${path}`, opts);
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                throw new Error(err.detail || `HTTP ${resp.status}`);
+            }
+            return await resp.json();
+        } catch (e) {
+            throw e;
+        }
+    }
+
+    // ── Status polling ───────────────────────────────────────────────────────
+
+    function connClass(state) {
+        return `badge badge-conn-${state}`;
+    }
+    function powerClass(state) {
+        return `badge badge-power-${state}`;
+    }
+
+    let _lastPower = null, _lastConn = null, _lastError = null;
+
+    async function refreshStatus() {
+        try {
+            const s = await fetch(`${API_BASE}/status`).then(r => r.json());
+
+            // Log state transitions to terminal (not every poll, only changes)
+            if (_lastPower !== null && s.power_state !== _lastPower) {
+                termLog("power", s.power_state === "on" ? "ok" : "warn",
+                    `Power: ${_lastPower} -> ${s.power_state}`);
+            }
+            if (_lastConn !== null && s.conn_state !== _lastConn) {
+                const t = s.conn_state === "connected" ? "ok" : s.conn_state === "connecting" ? "info" : "err";
+                termLog("ws", t, `WS: ${_lastConn} -> ${s.conn_state}`);
+            }
+            if (s.last_error && s.last_error !== _lastError) {
+                termLog("error", "err", s.last_error);
+            }
+            _lastPower = s.power_state;
+            _lastConn  = s.conn_state;
+            _lastError = s.last_error;
+
+            // Badges
+            const bc = document.getElementById("badge-conn");
+            bc.className   = connClass(s.conn_state);
+            bc.textContent = `WS: ${s.conn_state}`;
+
+            const bp = document.getElementById("badge-power");
+            bp.className   = powerClass(s.power_state);
+            bp.textContent = `TV: ${s.power_state}`;
+
+            const bt = document.getElementById("badge-token");
+            if (s.token_set) {
+                bt.className   = "badge badge-token-set";
+                bt.textContent = "🔑 Paired";
+            } else {
+                bt.className   = "badge badge-power-unknown";
+                bt.textContent = "🔑 Unpaired";
+            }
+
+            document.getElementById("badge-queue").textContent = `Queue: ${s.queued_commands}`;
+
+            // Status bar
+            document.getElementById("stat-ssl").textContent     = s.use_ssl ? "yes" : "no";
+            document.getElementById("stat-retries").textContent = s.retry_count;
+
+            const errEl = document.getElementById("stat-error");
+            if (s.last_error) {
+                document.getElementById("stat-error-msg").textContent = s.last_error;
+                errEl.style.display = "";
+                errEl.classList.add("error-text");
+            } else {
+                errEl.style.display = "none";
+            }
+        } catch (e) {
+            console.warn("Status poll failed:", e.message);
+        }
+    }
+
+    // Known hub names for display.
+    const HUB_NAMES = {
+        "<LAN_IP>": "Hub 1",
+        "<LAN_IP>": "Hub 2",
+        "<LAN_IP>": "Hub 3",
+        "<LAN_IP>": "MAIN",
+    };
+
+    // Fetch and display registered Hubitat hub callback links.
+    async function refreshHubLinks() {
+        try {
+            const data = await fetch(`${API_BASE}/callbacks`).then(r => r.json());
+            const cbs  = data.callbacks || {};
+            const urls = Object.keys(cbs);
+            const el   = document.getElementById("hub-links");
+            if (urls.length === 0) {
+                el.innerHTML = '<span style="color:#64748b">No hubs registered</span>';
+                return;
+            }
+            el.innerHTML = urls.map(url => {
+                const match = url.match(/\/\/(\d+\.\d+\.\d+\.\d+):/);
+                const ip    = match ? match[1] : url;
+                const name  = HUB_NAMES[ip] || ip;
+                return `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:0.75rem;">` +
+                    `<a href="http://${ip}/device/list" target="_blank" ` +
+                    `style="color:#42a5f5;text-decoration:none;" title="${url}">` +
+                    `${name} (${ip}) &#8599;</a>` +
+                    `<button onclick="deregisterHub('${url}')" ` +
+                    `style="background:none;border:none;color:#f85149;cursor:pointer;font-size:0.85rem;padding:0 2px;" ` +
+                    `title="Deregister ${ip}">&#10005;</button></span>`;
+            }).join("");
+        } catch (e) { /* silent */ }
+    }
+
+    // Manual hub registration from the UI dropdown.
+    document.getElementById("btn-hub-register").addEventListener("click", async () => {
+        const ip = document.getElementById("hub-select").value;
+        const callbackUrl = `http://${ip}:39501`;
+        const serverIp = "<LAN_IP>";
+        // Build DNI hex like the Groovy driver does.
+        const hexIp   = serverIp.split(".").map(n => parseInt(n).toString(16).padStart(2, "0").toUpperCase()).join("");
+        const hexPort = (5001).toString(16).padStart(4, "0").toUpperCase();
+        const dni     = `${hexIp}:${hexPort}`;
+
+        termLog("hub", "info", `Registering ${ip} → callback ${callbackUrl}`);
+        try {
+            const resp = await fetch(`${API_BASE}/register`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ callback_url: callbackUrl, device_id: dni })
+            });
+            const data = await resp.json();
+            if (resp.ok) {
+                toast(`${HUB_NAMES[ip] || ip} registered`, "ok");
+                termLog("hub", "ok", `Registered: ${ip} (total=${data.registered})`);
+                refreshHubLinks();
+            } else {
+                throw new Error(data.detail || `HTTP ${resp.status}`);
+            }
+        } catch (e) {
+            toast(`Register failed: ${e.message}`, "error");
+            termLog("hub", "err", `Register ${ip} failed: ${e.message}`);
+        }
+    });
+
+    // Deregister a hub by callback URL (✕ button next to each hub link).
+    window.deregisterHub = async function(url) {
+        const match = url.match(/\/\/(\d+\.\d+\.\d+\.\d+):/);
+        const ip    = match ? match[1] : url;
+        termLog("hub", "info", `Deregistering ${ip}...`);
+        try {
+            const resp = await fetch(`${API_BASE}/unregister-url`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ callback_url: url })
+            });
+            const data = await resp.json();
+            if (data.ok) {
+                toast(`${HUB_NAMES[ip] || ip} deregistered`, "ok");
+                termLog("hub", "ok", `Deregistered: ${ip} (remaining=${data.remaining})`);
+                refreshHubLinks();
+            } else {
+                throw new Error(data.detail || "not found");
+            }
+        } catch (e) {
+            toast(`Deregister failed: ${e.message}`, "error");
+            termLog("hub", "err", `Deregister ${ip} failed: ${e.message}`);
+        }
+    };
+
+    // Test push to all registered hubs.
+    document.getElementById("btn-hub-test").addEventListener("click", async () => {
+        termLog("hub", "info", "Testing push to all registered hubs...");
+        try {
+            const resp = await fetch(`${API_BASE}/test/push`, { method: "POST" });
+            const data = await resp.json();
+            if (data.ok) {
+                toast(`Pushed to ${data.pushed_to} hub(s)`, "ok");
+                termLog("hub", "ok", `Push test: sent to ${data.pushed_to} hub(s): ${(data.callbacks || []).join(", ")}`);
+            } else {
+                throw new Error("Push failed");
+            }
+        } catch (e) {
+            toast(`Push test failed: ${e.message}`, "error");
+            termLog("hub", "err", `Push test failed: ${e.message}`);
+        }
+    });
+
+    function startPolling() {
+        refreshStatus();
+        refreshHubLinks();
+        _pollTimer = setInterval(refreshStatus, POLL_INTERVAL);
+        // Hub links don't change often — poll every 30s.
+        setInterval(refreshHubLinks, 30000);
+    }
+
+    // ── Power buttons ────────────────────────────────────────────────────────
+
+    document.getElementById("btn-on").addEventListener("click", async () => {
+        toast("Sending WoL…", "info");
+        termLog("cmd", "info", "turn_on() — WoL + KEY_POWER if WS open");
+        try {
+            await apiPost("/on");
+            toast("ON command sent", "ok");
+            termLog("cmd", "ok", "turn_on() accepted");
+        } catch (e) {
+            toast(`ON failed: ${e.message}`, "error");
+            termLog("cmd", "err", `turn_on() failed: ${e.message}`);
+        }
+    });
+
+    document.getElementById("btn-off").addEventListener("click", async () => {
+        toast("Sending KEY_POWER…", "info");
+        termLog("cmd", "info", "turn_off() — KEY_POWER");
+        try {
+            await apiPost("/off");
+            toast("OFF command sent", "ok");
+            termLog("cmd", "ok", "turn_off() accepted");
+        } catch (e) {
+            toast(`OFF failed: ${e.message}`, "error");
+            termLog("cmd", "err", `turn_off() failed: ${e.message}`);
+        }
+    });
+
+    // ── Key grid (event delegation on .tv-page) ───────────────────────────
+
+    document.querySelector(".tv-page").addEventListener("click", async (evt) => {
+        const btn = evt.target.closest("[data-key]");
+        if (!btn) return;
+
+        const key = btn.dataset.key;
+        termLog("key", "dim", `KEY_${key}`);
+        try {
+            await apiPost(`/key/${key}`);
+            toast(`KEY_${key}`, "ok");
+        } catch (e) {
+            toast(`${key} failed: ${e.message}`, "error");
+            termLog("key", "err", `KEY_${key} failed: ${e.message}`);
+        }
+    });
+
+    // ── Configure ────────────────────────────────────────────────────────────
+
+    document.getElementById("btn-configure").addEventListener("click", async () => {
+        const body = {
+            tv_ip:       document.getElementById("cfg-ip").value.trim()  || undefined,
+            mac_address: document.getElementById("cfg-mac").value.trim() || undefined,
+            use_ssl:     document.getElementById("cfg-ssl").checked,
+        };
+        // Remove undefined keys
+        Object.keys(body).forEach(k => body[k] === undefined && delete body[k]);
+
+        toast("Applying config…", "info");
+        try {
+            await apiPost("/configure", body);
+            toast("Config applied — reconnecting", "ok");
+            setTimeout(refreshStatus, 1500);
+        } catch (e) {
+            toast(`Configure failed: ${e.message}`, "error");
+        }
+    });
+
+    // ── Hub log WebSocket + per-device filter ─────────────────────────────────
+    //
+    // Filter syntax (comma-separated terms in #hub-log-filter):
+    //   "hallway"        → show only lines whose src contains "hallway" (case-insensitive)
+    //   "2510"           → show only lines from device ID 2510
+    //   "!2798"          → exclude device 2798
+    //   "hallway, !2798" → show hallway devices, but not 2798 specifically
+    //   "" (empty)       → show everything
+    //
+    // All received frames are stored in _hubBuffer; the filter is applied
+    // live (re-renders the terminal instantly when the filter input changes).
+
+    let _hubWs        = null;
+    let _hubBuffer    = [];   // [{src, type, text, ts}] — full history for re-filter
+    let _hubTotal     = 0;   // total frames received (unfiltered)
+    let _hubDevices   = new Set(); // "Name:ID" keys already added to the dropdown
+
+    /**
+     * Register a device src in the filter dropdown if it hasn't been seen before.
+     * Only srcs that contain ":" (i.e. "DeviceName:DeviceID") are treated as
+     * named devices — system sources like "ws", "proxy", "raw" are skipped.
+     */
+    function _registerDevice(src) {
+        if (!src.includes(":") || _hubDevices.has(src)) return;
+        _hubDevices.add(src);
+
+        const sel = document.getElementById("hub-log-filter");
+        const opt = document.createElement("option");
+        opt.value       = src;
+        opt.textContent = src; // e.g. "Office Motion:2798"
+        sel.appendChild(opt);
+    }
+
+    /**
+     * Returns true if this log entry should be shown given the current filter.
+     * An empty selection (value "") means "All devices" — show everything.
+     * Otherwise only entries whose src exactly matches the selected value pass.
+     */
+    function _matchesFilter(src) {
+        const selected = document.getElementById("hub-log-filter").value;
+        if (!selected) return true;          // "All devices" — show everything
+        return src === selected;             // exact match on "Name:ID"
+    }
+
+    /**
+     * Re-render the hub terminal from _hubBuffer applying the current filter.
+     * Called whenever the filter changes.
+     */
+    function _hubRerender() {
+        const el      = document.getElementById("hub-terminal");
+        const frag    = document.createDocumentFragment();
+        let   shown   = 0;
+
+        _hubBuffer.forEach(({ src, type, text, ts }) => {
+            if (!_matchesFilter(src)) return;
+            const div = document.createElement("div");
+            div.className = "log-line";
+            div.innerHTML =
+                `<span class="log-time">[${_esc(ts)}]</span> ` +
+                `<span class="log-src">[${_esc(src)}]</span> ` +
+                `<span class="log-${type}">${_esc(text)}</span>`;
+            frag.appendChild(div);
+            shown++;
+        });
+
+        el.innerHTML = "";
+        el.appendChild(frag);
+        el.scrollTop = el.scrollHeight;
+
+        document.getElementById("hub-term-count").textContent = shown;
+        document.getElementById("hub-term-total").textContent  = _hubTotal;
+    }
+
+    /**
+     * Append one log line to the buffer and to the DOM (if it passes the filter).
+     * Registers the source device in the dropdown if it is a new named device.
+     */
+    function hubLog(src, type, text) {
+        const ts = new Date().toLocaleTimeString("en-US", { hour12: false });
+        _hubBuffer.push({ src, type, text, ts });
+        _hubTotal++;
+        document.getElementById("hub-term-total").textContent = _hubTotal;
+
+        // Add device to dropdown on first appearance.
+        _registerDevice(src);
+
+        if (!_matchesFilter(src)) return;  // filtered out — buffer only
+
+        const el  = document.getElementById("hub-terminal");
+        const div = document.createElement("div");
+        div.className = "log-line";
+        div.innerHTML =
+            `<span class="log-time">[${_esc(ts)}]</span> ` +
+            `<span class="log-src">[${_esc(src)}]</span> ` +
+            `<span class="log-${type}">${_esc(text)}</span>`;
+        el.appendChild(div);
+        el.scrollTop = el.scrollHeight;
+
+        const shownEl = document.getElementById("hub-term-count");
+        shownEl.textContent = parseInt(shownEl.textContent || "0") + 1;
+    }
+
+    // Re-render from buffer whenever the device selection changes.
+    document.getElementById("hub-log-filter").addEventListener("change", _hubRerender);
+
+    function hubWsConnect() {
+        if (_hubWs) {
+            _hubWs.close();
+            _hubWs = null;
+        }
+        const ip = document.getElementById("hub-log-select").value;
+        // The page is served over HTTPS — browser blocks plain ws:// (mixed-content).
+        // We connect to a server-side WS proxy that relays to the hub over plain WS.
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        const url   = `${proto}//${location.host}/samsung-tv/ws/hub-logs/${ip}`;
+        const statusEl = document.getElementById("hub-ws-status");
+
+        statusEl.textContent = "connecting...";
+        statusEl.style.color = "#ffa657";
+        hubLog("ws", "info", `Connecting to ws://${ip}/logsocket (via server proxy)...`);
+
+        try {
+            _hubWs = new WebSocket(url);
+        } catch (e) {
+            statusEl.textContent = "error";
+            statusEl.style.color = "#f85149";
+            hubLog("ws", "err", `WebSocket error: ${e.message}`);
+            return;
+        }
+
+        _hubWs.onopen = () => {
+            statusEl.textContent = "connected";
+            statusEl.style.color = "#56d364";
+            hubLog("ws", "ok", `Connected to ${ip}`);
+        };
+
+        _hubWs.onclose = () => {
+            statusEl.textContent = "disconnected";
+            statusEl.style.color = "#6e7681";
+            hubLog("ws", "warn", `Disconnected from ${ip}`);
+            _hubWs = null;
+        };
+
+        _hubWs.onerror = () => {
+            statusEl.textContent = "error";
+            statusEl.style.color = "#f85149";
+            hubLog("ws", "err", `WebSocket error`);
+        };
+
+        _hubWs.onmessage = (evt) => {
+            try {
+                const msg = JSON.parse(evt.data);
+                // Proxy error frame
+                if (msg._proxy_error) {
+                    hubLog("proxy", "err", `Server-side error: ${msg.message}`);
+                    return;
+                }
+                // Normal Hubitat log frame: {name, msg, id, time, type, level}
+                const level   = msg.level || "info";
+                const typeMap = { info: "info", warn: "warn", error: "err", debug: "dim" };
+                const logType = typeMap[level] || "info";
+                const devName = msg.name || "?";
+                const text    = msg.msg || JSON.stringify(msg);
+                hubLog(`${devName}:${msg.id || "?"}`, logType, text);
+            } catch (e) {
+                // Non-JSON message — show raw.
+                hubLog("raw", "dim", evt.data.substring(0, 200));
+            }
+        };
+    }
+
+    document.getElementById("btn-hub-connect").addEventListener("click", hubWsConnect);
+
+    document.getElementById("btn-hub-clear").addEventListener("click", () => {
+        document.getElementById("hub-terminal").innerHTML = "";
+        _hubBuffer  = [];
+        _hubTotal   = 0;
+        _hubDevices.clear();
+        document.getElementById("hub-term-count").textContent = "0";
+        document.getElementById("hub-term-total").textContent  = "0";
+        // Reset dropdown back to "All devices" only.
+        const sel = document.getElementById("hub-log-filter");
+        sel.innerHTML = '<option value="">All devices</option>';
+    });
+
+    // Reconnect when hub selection changes.
+    document.getElementById("hub-log-select").addEventListener("change", () => {
+        if (_hubWs) hubWsConnect();
+    });
+
+    // ── Tab switching ────────────────────────────────────────────────────────
+
+    document.querySelectorAll(".tv-tab").forEach(btn => {
+        btn.addEventListener("click", () => {
+            document.querySelectorAll(".tv-tab").forEach(t => t.classList.remove("active"));
+            document.querySelectorAll(".tv-tab-panel").forEach(p => p.classList.remove("active"));
+            btn.classList.add("active");
+            document.getElementById(`tab-${btn.dataset.tab}`).classList.add("active");
+        });
+    });
+
+    // ── Copy-to-clipboard helpers ─────────────────────────────────────────────
+
+    /**
+     * Copy text to the clipboard and give the triggering button a brief
+     * "Copied!" visual flash.
+     */
+    function copyText(text, btn) {
+        navigator.clipboard.writeText(text).then(() => {
+            const orig = btn.textContent;
+            btn.textContent = "Copied!";
+            btn.classList.add("copied");
+            setTimeout(() => {
+                btn.textContent = orig;
+                btn.classList.remove("copied");
+            }, 1500);
+        }).catch(() => {
+            toast("Copy failed — check permissions", "error");
+        });
+    }
+
+    /**
+     * Extract plain text from a .tv-terminal element: one log line per row,
+     * timestamp + source + message stripped of HTML tags.
+     */
+    function terminalPlainText(termEl) {
+        return Array.from(termEl.querySelectorAll(".log-line"))
+            .map(line => line.textContent.trim())
+            .join("\n");
+    }
+
+    /**
+     * Extract copyable text from a regular tile section:
+     * - Section title
+     * - All data-key button values (key codes), OR
+     * - All visible input values (for the Configure tile)
+     * - Fallback: all button labels
+     */
+    function tileCopyText(section) {
+        const title   = section.querySelector("h3")?.firstChild?.textContent?.trim() || "";
+        const keyBtns = section.querySelectorAll("[data-key]");
+        if (keyBtns.length) {
+            const keys = Array.from(keyBtns).map(b => b.dataset.key);
+            return `${title}\n${keys.join("  ")}`;
+        }
+        // Configure section: collect label:value pairs
+        const inputs = section.querySelectorAll("input[type='text']");
+        if (inputs.length) {
+            const pairs = Array.from(inputs).map(inp => {
+                const label = section.querySelector(`label[for="${inp.id}"]`)?.textContent?.trim() || inp.id;
+                return `${label}: ${inp.value}`;
+            });
+            return `${title}\n${pairs.join("\n")}`;
+        }
+        // Power section: collect button labels
+        const btns = section.querySelectorAll("button:not(.btn-copy-tile)");
+        const labels = Array.from(btns).map(b => b.textContent.trim()).filter(Boolean);
+        return `${title}\n${labels.join("  ")}`;
+    }
+
+    /**
+     * Inject a copy button into every regular tile header (.tv-section h3).
+     * Terminals get their copy buttons wired separately (they're already in the HTML).
+     */
+    function initTileCopyButtons() {
+        document.querySelectorAll(".tv-tile-grid .tv-section h3").forEach(h3 => {
+            const btn = document.createElement("button");
+            btn.className   = "btn-copy-tile";
+            btn.textContent = "Copy";
+            btn.title       = "Copy tile content";
+            btn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                const section = h3.closest(".tv-section");
+                copyText(tileCopyText(section), btn);
+            });
+            h3.appendChild(btn);
+        });
+    }
+
+    // Wire the two terminal copy buttons.
+    document.getElementById("btn-term-copy").addEventListener("click", function () {
+        copyText(terminalPlainText(document.getElementById("tv-terminal")), this);
+    });
+    document.getElementById("btn-hub-copy").addEventListener("click", function () {
+        copyText(terminalPlainText(document.getElementById("hub-terminal")), this);
+    });
+
+    // Inject copy buttons into all regular tiles now that the DOM is ready.
+    initTileCopyButtons();
+
+    // ── Boot ──────────────────────────────────────────────────────────────────
+
+    termLog("init", "info", "Samsung TV Remote loaded");
+    termLog("init", "dim", `TV IP: {{ tv_ip }}  MAC: {{ status.mac }}  SSL: {{ 'yes' if status.use_ssl else 'no' }}`);
+    termLog("init", _lastPower === "on" ? "ok" : "warn",
+        `Initial state: power={{ status.power_state }} conn={{ status.conn_state }} token={{ 'yes' if status.token_set else 'no' }}`);
+
+    startPolling();
+
+    // Clean up interval on page hide (avoids orphan timers on SPA navigation)
+    document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+            clearInterval(_pollTimer);
+        } else {
+            startPolling();
+        }
+    });
+
+}());
+</script>
+{% endblock %}

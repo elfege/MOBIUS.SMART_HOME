@@ -6,6 +6,8 @@
  * Matter device discovery with auto-commissioning.
  */
 
+import { openDeviceRefreshModal } from '../components/device-refresh-modal.js';
+
 $(document).ready(function () {
     // =========================================================================
     // State
@@ -29,6 +31,11 @@ $(document).ready(function () {
     $('#btn-scan-hubs').on('click', scanHubs);
     $('#btn-commission-all').on('click', function () { commissionAll(); });
     $('#btn-refresh-discovered').on('click', loadDiscoveredDevices);
+
+    // Canonical device-cache refresh (separate from the Matter-side
+    // 'Refresh' which reloads the discovered-devices list). Opens the
+    // global refresh modal — operator enters a device # or 0 for all.
+    $('#btn-refresh-canonical').on('click', () => openDeviceRefreshModal());
 
     // =========================================================================
     // Data Loading

@@ -20,6 +20,7 @@
  */
 
 import { api, utils } from '../main.js';
+import { openDeviceRefreshModal } from '../components/device-refresh-modal.js';
 
 // Per-hub EventSocket — one WebSocket per distinct hub the instance's
 // devices live on. The previous hardcoded HUB4_WS_URL only ever saw
@@ -261,7 +262,11 @@ export class E2ETestModal {
                     </div>
                     <div class="e2e-modal-body">
                         <div class="e2e-panel e2e-devices-panel">
-                            <h3>Devices</h3>
+                            <div class="e2e-panel-toolbar">
+                                <h3>Devices</h3>
+                                <button class="btn btn-secondary btn-small e2e-refresh-devices"
+                                        title="Refresh a device's capabilities from the hub (or all)">↻</button>
+                            </div>
                             <div class="e2e-device-groups" id="e2e-devices-${this.instanceId}">
                                 <p class="e2e-loading">Loading devices...</p>
                             </div>
@@ -312,6 +317,13 @@ export class E2ETestModal {
 
         // Clear Log — wipe the terminal pane (does NOT cancel a run)
         $modal.find('.e2e-clear-log').on('click', () => this._clearLog());
+
+        // ↻ in the Devices panel toolbar — opens the global refresh-modal
+        // with no prefill (blank input, "0 = all"). Operator can refresh
+        // any device by number or hit Enter on empty for a full sweep.
+        $modal.find('.e2e-refresh-devices').on('click', () => {
+            openDeviceRefreshModal();
+        });
 
         // Backdrop click intentionally disabled — prevents accidental
         // loss of test results. Use the Close button or Escape key instead.

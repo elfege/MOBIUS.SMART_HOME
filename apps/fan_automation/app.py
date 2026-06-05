@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time as _monotonic_time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -115,6 +116,21 @@ class FanAutomationApp(BaseApp):
         """
         Route the incoming event by type. After any state-changing event,
         re-evaluate master() so the fan reflects current world state.
+
+        Feedback-loop guard
+        -------------------
+        Sub-handlers can return ``False`` to signal "this event was an echo
+        of our own command — do NOT re-run master()". Without this guard the
+        cycle is: app sends ``setLevel`` → hub echoes back a ``switch=on``
+        event → master() re-decides identically → app re-sends ``setLevel``
+        → … at the hub's roundtrip rate. The 2026-06-05 storm on the Fan
+        Bathroom instance was exactly this — 6–9 cycles per second, sync
+        ``requests`` calls in the eventsocket coroutine choking the asyncio
+        loop, app went unresponsive. Belt-and-suspenders idempotency in
+        ``_apply`` is the second layer.
+
+        Every handler exception is caught at the outer ``try`` so one bad
+        event can never abort the dispatch loop or kill the instance.
         """
         try:
             if self.is_paused:
@@ -124,6 +140,7 @@ class FanAutomationApp(BaseApp):
             self.update_last_activity()
 
             etype = event.event_type
+            run_master = True
             if etype == 'humidity':
                 self._on_humidity(event)
             elif etype == 'motion':
@@ -131,14 +148,18 @@ class FanAutomationApp(BaseApp):
             elif etype == 'presence':
                 self._on_presence(event)
             elif etype == 'switch':
-                self._on_switch(event)
+                # _on_switch returns False on confirmed echo so we can
+                # break the feedback loop here before re-running master().
+                if self._on_switch(event) is False:
+                    run_master = False
             else:
                 # Unknown / unsubscribed event_type — should not happen
                 # if subscriptions are correct, but log + ignore is safe.
                 self.logger.debug(f"Ignoring unhandled event type: {etype}")
                 return
 
-            self.master()
+            if run_master:
+                self.master()
         except Exception as e:
             self.logger.error(
                 f"on_event failed: {event}: {e}", exc_info=True
@@ -184,19 +205,31 @@ class FanAutomationApp(BaseApp):
             f"Presence {_C}{event.device_name}{_R}: {event.value}"
         )
 
-    def _on_switch(self, event: DeviceEvent) -> None:
+    def _on_switch(self, event: DeviceEvent) -> bool:
         """
-        Two paths:
+        Two paths. Return value matters: ``False`` means "skip the master()
+        re-run that ``on_event`` does by default" — used to break feedback
+        loops on echo events.
 
         1. Event from a manual-fan-level-override switch: track the previous
            state; on an ON→OFF transition open a humidity-suppress window
            (master() will see the timer and skip rule 3 + use the burst
-           level as the default for the duration). master() then re-runs
-           naturally and the cascade picks up the new state.
+           level as the default for the duration). Returns True so master()
+           re-runs and the cascade picks up the new state.
 
-        2. Event from one of the controlled fans: detect manual-vs-app
-           changes and update the memoization source — master() respects
-           'manual' overrides until a mode change clears them.
+        2. Event from one of the controlled fans:
+             - If the value matches what we last commanded (source='app'):
+               echo → return ``False``. Without this short-circuit the
+               cycle is: send setLevel → hub echoes switch=on → master()
+               re-decides → send setLevel → … (2026-06-05 storm).
+             - Otherwise: real manual change → memoize source='manual' so
+               _apply will skip the fan until a mode change clears the
+               override, and return True so master() re-decides (which
+               will then no-op on this fan but may affect others).
+
+        3. Event from a device that's neither override nor fan: never
+           subscribed in the first place, but be defensive — return True
+           so master() still runs (no harm: _apply is per-fan).
         """
         fan_ids  = set(self.get_devices('fans'))
         override = set(self.get_devices('manual_fan_level_override_switches'))
@@ -221,31 +254,60 @@ class FanAutomationApp(BaseApp):
                     f"(default level becomes manualOverrideOffBurstLevel)"
                 )
             # Don't touch fan memo — master() reads override state live.
-            return
+            return True
         if event.device_id not in fan_ids:
-            return
+            return True
         # If the value matches what we last set, it's our own command echo.
         memo = self._memoization.setdefault('switch_state', {})
         last = memo.get(str(event.device_id))
         if last and last.get('state') == event.value and last.get('source') == 'app':
-            # Echo of our last command — don't flip to manual.
-            return
+            # Echo of our last command — don't flip to manual AND don't
+            # let on_event re-run master(). This is THE feedback-loop kill.
+            self.logger.debug(
+                f"Echo on fan {_C}{event.device_name}{_R}: {event.value} "
+                f"matches last-app command — skipping master() re-run"
+            )
+            return False
         memo[str(event.device_id)] = {'state': event.value, 'source': 'manual'}
         self.logger.info(
             f"Manual override on fan {_C}{event.device_name}{_R}: {event.value}"
         )
+        return True
 
     # =========================================================================
     # Master decision
     # =========================================================================
 
+    # Minimum spacing between consecutive master() runs for a single instance.
+    # Belt-and-suspenders against future feedback loops: even if a handler
+    # forgets to short-circuit, master() won't fire at the hub's roundtrip
+    # rate. Tuned so legitimate fast user actions (toggle override switch
+    # ON then OFF) still both reach master(): 250ms is well under human
+    # double-tap timing and well above the typical echo cycle (~50ms).
+    _MASTER_DEBOUNCE_SECS = 0.25
+
     def master(self, **kwargs) -> None:
         """
         Decide and execute the fan state. See module docstring for priority.
+
+        Rate-limited at ``_MASTER_DEBOUNCE_SECS`` per instance via a
+        monotonic-clock guard on ``_runtime``. Runs closer than that are
+        silently coalesced — the next real event re-arms the timer.
         """
         try:
             if self.is_paused:
                 return
+
+            now_mono = _monotonic_time.monotonic()
+            last_mono = getattr(self._runtime, 'last_master_monotonic', 0.0)
+            if (now_mono - last_mono) < self._MASTER_DEBOUNCE_SECS:
+                self.logger.debug(
+                    "master() debounced "
+                    f"({(now_mono - last_mono) * 1000:.0f}ms < "
+                    f"{self._MASTER_DEBOUNCE_SECS * 1000:.0f}ms floor)"
+                )
+                return
+            self._runtime.last_master_monotonic = now_mono
 
             decision = self._decide()
             self.logger.debug(
@@ -476,14 +538,43 @@ class FanAutomationApp(BaseApp):
     # Apply
     # =========================================================================
 
+    # If we've issued the same (cmd, level) target to a fan within this
+    # cooldown, _apply skips the re-send. Forced overrides land via the
+    # next user-driven event (which trips through _decide and finds a
+    # different target). Picked so real cascading re-decisions (humidity
+    # crosses threshold then motion fires) don't stall, but echo storms
+    # at 6–9 Hz can't pump send_command at all.
+    _APPLY_SAME_TARGET_COOLDOWN_SECS = 5.0
+
     def _apply(self, decision: Dict[str, Any]) -> None:
-        """Send commands to fans. Memoize source='app' on success."""
+        """
+        Send commands to fans. Memoize ``source='app'`` on success.
+
+        Idempotency layer
+        -----------------
+        Every successful send stamps ``_runtime.last_apply_by_fan[fan_id]``
+        with ``(target_str, monotonic_ts)`` where ``target_str`` is one of
+        ``'off'`` or ``'on:<level>'``. A second _apply call with the same
+        target within ``_APPLY_SAME_TARGET_COOLDOWN_SECS`` skips the send.
+        This is the second layer behind the echo guard in ``_on_switch``:
+        if a future loop source bypasses the echo guard (different code
+        path, mode change, scheduler tick), the cooldown still keeps
+        send_command rates bounded.
+        """
         rule = decision.get('rule', 'default')
         self._memoization['rule_in_effect'] = rule
         memo_switch = self._memoization.setdefault('switch_state', {})
+        # Runtime-scoped (not persisted): a fresh process boot can re-send
+        # once on first event, which is what we want — no stale cooldown
+        # blocking the initial sync.
+        last_apply_by_fan = getattr(self._runtime, 'last_apply_by_fan', None)
+        if last_apply_by_fan is None:
+            last_apply_by_fan = {}
+            self._runtime.last_apply_by_fan = last_apply_by_fan
 
         action = decision['action']
         level = decision.get('level')
+        now_mono = _monotonic_time.monotonic()
 
         for fan_id in self.get_devices('fans'):
             # Respect manual override until next mode change clears memo.
@@ -498,13 +589,31 @@ class FanAutomationApp(BaseApp):
             if action == 'off':
                 cmd = 'off'
                 args = None
+                target = 'off'
             else:
                 # Variable speed: prefer setLevel when supported, else 'on'.
                 use_level = bool(level) and self._fan_supports_level(fan_id)
                 if use_level:
                     cmd, args = 'setLevel', [int(level)]
+                    target = f'on:{int(level)}'
                 else:
                     cmd, args = 'on', None
+                    target = 'on:any'
+
+            # Idempotency cooldown — skip if same target was just applied.
+            prev = last_apply_by_fan.get(str(fan_id))
+            if prev is not None:
+                prev_target, prev_ts = prev
+                if (
+                    prev_target == target
+                    and (now_mono - prev_ts) < self._APPLY_SAME_TARGET_COOLDOWN_SECS
+                ):
+                    self.logger.debug(
+                        f"Skip fan {fan_id} {cmd} — same target "
+                        f"{target!r} applied {(now_mono - prev_ts) * 1000:.0f}ms ago "
+                        f"(<{self._APPLY_SAME_TARGET_COOLDOWN_SECS * 1000:.0f}ms cooldown)"
+                    )
+                    continue
 
             try:
                 result = self.send_command(fan_id, cmd, args=args, verify=True)
@@ -514,11 +623,14 @@ class FanAutomationApp(BaseApp):
                         f"err={result.error} expected={result.expected_state} "
                         f"actual={result.actual_state}"
                     )
+                    # Don't stamp last_apply — we want the next event to
+                    # try again, not get cooldown-blocked on a failed send.
                     continue
                 memo_switch[str(fan_id)] = {
                     'state': 'off' if action == 'off' else 'on',
                     'source': 'app',
                 }
+                last_apply_by_fan[str(fan_id)] = (target, now_mono)
                 self.logger.info(
                     f"Fan {_C}{fan_id}{_R} → {_G}{cmd}{_R}"
                     f"{f' lvl={level}' if level and action == 'on' else ''}"

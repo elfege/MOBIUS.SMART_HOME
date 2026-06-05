@@ -8,6 +8,25 @@ without giving up local-only operation.
 > home). Public source release under BSL-1.1 (see [License](#license)). The
 > installation workflow is being reworked — see [Installation](#installation).
 
+## Currently shipped apps
+
+| App                        | Released in | App version | Status   | Notes |
+|----------------------------|-------------|-------------|----------|-------|
+| Advanced Motion Lighting   | v3.3.11     | 2.0.0       | Shipped  | Python port of the Hubitat Groovy app [Advanced Motion Lighting Management V2][aml-groovy] (same author): motion-driven control, memoization of user overrides, mode-specific timeouts/dim levels, illuminance gating, pause/resume. |
+| Fan Automation             | v3.3.11     | 1.0.0       | Shipped  | Temp/humidity-driven exhaust/ceiling-fan control with manual fan-level override switches and a post-override humidity-suppress window. |
+| Screen Time Planner        | v4.8.0      | 2.0.0       | Shipped  | TV allowed only inside daily time windows (per-day, cross-midnight aware). Turning it on outside a window is cut in real time; optional delayed cut of a secondary power switch, plus wake-on-power suppression for TVs that boot on mains restore. |
+| Samsung FastAPI router     | v3.3.11     | —           | Shipped  | Standalone FastAPI router + Jinja2 page mounted under `/samsung-tv` (Wake-on-LAN, WebSocket remote, token-paired SmartView). Not a multi-instance app type. |
+
+Hubitat Safety Monitor (HSM) and a handful of hub-native pieces intentionally
+stay on the hub.
+
+The **Released in** column is the platform tag in which the app first appeared
+(see [Releases](https://github.com/elfege/MOBIUS.SMART_HOME/releases)). The
+**App version** column is the app's own internal `VERSION` constant — bumped
+independently of platform versions when the app itself changes.
+
+[aml-groovy]: <!-- TODO: replace with the public Hubitat Groovy repo URL for Advanced Motion Lighting Management V2 -->
+
 ## Why
 
 Hubitat's strengths are its radios and its local-first ethos. Its weaknesses

@@ -53,6 +53,20 @@ import websockets
 
 from services.supervised_tasks import supervised_spawn
 
+# Maximum concurrent in-flight raw_events POSTs across all hubs. The cap
+# prevents storm conditions from spawning unbounded threadpool tasks (which
+# would compete with the asyncio loop for CPU and balloon memory). 32 is
+# loose enough to absorb realistic bursts (a 4-hub mesh re-handshake) but
+# tight enough that a runaway loop drops cleanly to zero added latency.
+_RAW_EVENTS_INFLIGHT_CAP = 32
+
+# Minimum spacing between hub_health 'ws_last_event_at' PATCHes per hub.
+# The event-loop blocking from a sync requests.patch() at 6–9 Hz under DB
+# load was a root cause of the 2026-06-05 Fan Bathroom storm "app
+# unresponsive" symptom. 5s is dense enough for the dashboard health badge
+# to show fresh data and sparse enough to never compete with the WS drain.
+_HUB_HEALTH_MARK_INTERVAL_SECS = 5.0
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -92,6 +106,16 @@ class HubitatEventsocketClient:
         # PostgREST client session for hub_health writes — reused across calls
         # to amortize TCP/TLS handshake. Created lazily in _update_health.
         self._http_session: Optional[requests.Session] = None
+        # Monotonic timestamp (per hub_id) of the last ws_last_event_at PATCH.
+        # Used by _mark_event_throttled to coalesce writes during event storms
+        # — see _HUB_HEALTH_MARK_INTERVAL_SECS.
+        self._last_mark_event_at: Dict[int, float] = {}
+        # In-flight counter for raw_events fire-and-forget POSTs. Capped by
+        # _RAW_EVENTS_INFLIGHT_CAP so a storm can't spawn unbounded background
+        # tasks; events past the cap are dropped from forensic capture only.
+        # The router path is unaffected.
+        self._raw_events_inflight: int = 0
+        self._raw_events_dropped: int = 0
 
     async def start(self) -> None:
         if not self._hubs:
@@ -169,10 +193,42 @@ class HubitatEventsocketClient:
         })
 
     def _mark_event(self, hub_id: int) -> None:
+        """Stamp ws_last_event_at. Synchronous — callers in the WS coroutine
+        should prefer ``_mark_event_throttled`` which both rate-limits AND
+        offloads the PATCH to a thread."""
         # Bump events_received_24h counter via raw SQL would need a function;
         # for v1 we just stamp last_event_at and let a scheduled job roll
         # the counter from event_log. Cheap, correct, easy to query.
         self._patch_health(hub_id, {'ws_last_event_at': _now_iso()})
+
+    async def _mark_event_throttled(self, hub_id: int) -> None:
+        """
+        Async, rate-limited, off-loop variant of ``_mark_event`` for the WS
+        drain loop. Two layers of defense against asyncio event-loop
+        starvation during event storms:
+
+          1. **Rate limit** — at most one health write per
+             ``_HUB_HEALTH_MARK_INTERVAL_SECS`` per hub. A 9 Hz storm
+             collapses to ~0.2 Hz of DB writes.
+
+          2. **Off-loop** — the actual PATCH is wrapped in
+             ``asyncio.to_thread`` and fired-and-forgotten so the WS drain
+             never waits for DB latency. Without this, a slow PostgREST
+             window would stall every WS frame for the duration.
+        """
+        now = _monotonic_now()
+        last = self._last_mark_event_at.get(hub_id, 0.0)
+        if (now - last) < _HUB_HEALTH_MARK_INTERVAL_SECS:
+            return
+        self._last_mark_event_at[hub_id] = now
+        try:
+            asyncio.create_task(asyncio.to_thread(
+                self._patch_health, hub_id, {'ws_last_event_at': _now_iso()}
+            ))
+        except Exception as e:
+            # No running loop or threadpool refused — non-fatal, the next
+            # tick will retry. Don't ever raise into the WS drain.
+            logger.debug(f'_mark_event_throttled spawn failed: {e}')
 
     def _mark_failure(self, hub_id: int, reason: str) -> None:
         # Increment consecutive_failures atomically via PostgREST rpc would
@@ -269,22 +325,14 @@ class HubitatEventsocketClient:
                 continue
 
             # 2026-05-17 — capture every frame regardless of source/mesh into
-            # raw_events for forensic replay. Fire-and-forget; if the DB is
-            # slow we don't block the event loop. Errors swallowed.
-            try:
-                self._http().post(
-                    f'{POSTGREST_URL}/raw_events',
-                    json={
-                        'hub_ip': ip,
-                        'source': ev.get('source', 'unknown')[:30],
-                        'frame': ev,
-                    },
-                    headers={'Prefer': 'return=minimal'},
-                    timeout=2,
-                )
-            except Exception:
-                # Best-effort capture — never block the WS loop.
-                pass
+            # raw_events for forensic replay. Originally a sync requests.post
+            # right here in the WS coroutine; that worked at low rate but
+            # during the 2026-06-05 Fan Bathroom storm (9 Hz on this hub),
+            # the 2s requests timeout × ~9 calls/s stalled the asyncio loop
+            # and the whole app went unresponsive. Now offloaded via
+            # asyncio.to_thread with a bounded in-flight cap so a storm can
+            # drop forensic-capture frames cleanly instead of cascading.
+            self._fire_raw_event_capture(ip, ev)
 
             # Hubitat eventsocket emits multiple 'source' types. We consume:
             #   DEVICE   — device-state events (motion, switch, etc.)
@@ -294,7 +342,10 @@ class HubitatEventsocketClient:
             if src not in ('DEVICE', 'LOCATION'):
                 continue
 
-            self._mark_event(hub_id)
+            # Rate-limited + off-loop: at most one PATCH per
+            # _HUB_HEALTH_MARK_INTERVAL_SECS per hub, and the PATCH itself
+            # runs on a thread so DB latency never blocks the WS drain.
+            await self._mark_event_throttled(hub_id)
 
             # LOCATION → mode change goes through a dedicated router method.
             # Same shape (name='mode', value='Night') from the eventsocket
@@ -358,6 +409,80 @@ class HubitatEventsocketClient:
             self._router = get_webhook_router()
         return self._router
 
+    # ------------------------------------------------------------------
+    # raw_events forensic capture — off-loop fire-and-forget
+    # ------------------------------------------------------------------
+
+    def _fire_raw_event_capture(self, ip: str, ev: Dict) -> None:
+        """
+        Schedule the raw_events POST on a thread and return immediately.
+
+        Bounded by ``_RAW_EVENTS_INFLIGHT_CAP`` — when an event arrives and
+        the cap is already reached, we DROP the capture for that frame and
+        bump ``_raw_events_dropped``. The router path is unaffected; we
+        just lose a forensic-log row, which is the correct trade during a
+        storm (don't drag down the live system to preserve audit trail).
+        """
+        if self._raw_events_inflight >= _RAW_EVENTS_INFLIGHT_CAP:
+            self._raw_events_dropped += 1
+            # Log occasionally so a long storm is visible. Avoid one-log-
+            # per-drop to prevent the storm from also storming the logger.
+            if self._raw_events_dropped % 100 == 1:
+                logger.warning(
+                    f'raw_events capture saturated '
+                    f'(in-flight={self._raw_events_inflight}, '
+                    f'dropped={self._raw_events_dropped})'
+                )
+            return
+        self._raw_events_inflight += 1
+        try:
+            task = asyncio.create_task(asyncio.to_thread(
+                self._post_raw_event_sync, ip, ev
+            ))
+            task.add_done_callback(self._on_raw_event_done)
+        except Exception as e:
+            # No running loop, threadpool refused, etc. — release the
+            # in-flight slot and continue. Best-effort capture only.
+            self._raw_events_inflight -= 1
+            logger.debug(f'raw_events spawn failed: {e}')
+
+    def _on_raw_event_done(self, task: 'asyncio.Task') -> None:
+        """Decrement the in-flight counter when a capture POST completes."""
+        try:
+            # Surface the exception (if any) so it's not silently swallowed
+            # by add_done_callback — but at debug level, this is forensic
+            # capture not user-facing data.
+            exc = task.exception()
+            if exc is not None:
+                logger.debug(f'raw_events capture exc: {exc}')
+        except Exception:
+            pass
+        finally:
+            if self._raw_events_inflight > 0:
+                self._raw_events_inflight -= 1
+
+    def _post_raw_event_sync(self, ip: str, ev: Dict) -> None:
+        """
+        Synchronous PostgREST POST — designed to be run via asyncio.to_thread
+        from the WS coroutine. NEVER call directly from the asyncio loop:
+        a slow PostgREST window would block the loop for the full timeout.
+        """
+        try:
+            self._http().post(
+                f'{POSTGREST_URL}/raw_events',
+                json={
+                    'hub_ip': ip,
+                    'source': ev.get('source', 'unknown')[:30],
+                    'frame': ev,
+                },
+                headers={'Prefer': 'return=minimal'},
+                timeout=2,
+            )
+        except Exception:
+            # Best-effort capture — never raise. Errors are visible at
+            # debug via _on_raw_event_done's task.exception() probe.
+            pass
+
 
 # ---------------------------------------------------------------------------
 # Module helpers
@@ -368,6 +493,12 @@ def _now_iso() -> str:
     """UTC ISO-8601 timestamp PostgREST accepts as TIMESTAMPTZ."""
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
+
+
+def _monotonic_now() -> float:
+    """Monotonic seconds for rate-limit interval math. Module-level so
+    tests can patch it without touching the class."""
+    return time.monotonic()
 
 
 def _load_hub_list() -> List[Dict]:

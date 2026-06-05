@@ -302,6 +302,78 @@ class HubitatAdminClient:
             )
             return False
 
+    def get_location_name(self) -> Optional[str]:
+        """
+        The hub's location name — what Hub Mesh appends to linked-device labels
+        as " on <name>" (e.g. "Home 2"). Read from the admin UI's hub-data
+        endpoint, which the Vue UI uses. Data-driven: whatever the user named
+        the hub, NOT a hardcoded value.
+
+        GET /hub2/hubData → JSON with `locationName` (and `name`).
+        """
+        try:
+            r = self._request("GET", "/hub2/hubData")
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, dict):
+                    name = data.get("locationName") or data.get("name")
+                    if name and str(name).strip():
+                        return str(name).strip()
+        except Exception as e:
+            logger.debug(
+                f"hubitat_admin [{self.hub_name}] get_location_name failed: {e}"
+            )
+        return None
+
+    def set_device_label(self, device_id: int, new_label: str) -> bool:
+        """
+        Rename a device on the hub (changes its user-facing label).
+
+        VERIFIED endpoint — taken from the hub's own Vue UI (/ui2/js/vue-hub2.min.js):
+            updateDeviceLabel(id, label, cb):
+                fetch("/device/updateLabel?" + new URLSearchParams({deviceId, label}))
+                    .then(r => r.json()).then(r => { r === true && cb() })
+        i.e. a GET with query params `deviceId` and `label`; the hub answers the
+        JSON literal `true` on success. Same call the web UI fires on a manual
+        rename, so it persists exactly like one.
+
+        Args:
+            device_id: The device's PER-HUB Hubitat id (not the canonical PK).
+            new_label: The desired label.
+
+        Returns:
+            True only when the hub confirms success (HTTP 200 + body `true`).
+        """
+        try:
+            r = self._request(
+                "GET", "/device/updateLabel",
+                params={"deviceId": str(device_id), "label": new_label},
+                allow_redirects=False,
+            )
+            ok = r.status_code == 200
+            if ok:
+                try:
+                    ok = r.json() is True
+                except ValueError:
+                    ok = False
+            if ok:
+                logger.info(
+                    f"hubitat_admin [{self.hub_name}] device {device_id} "
+                    f"renamed -> {new_label!r}"
+                )
+            else:
+                logger.warning(
+                    f"hubitat_admin [{self.hub_name}] updateLabel({device_id}) "
+                    f"not OK: HTTP {r.status_code} body={r.text[:120]!r}"
+                )
+            return ok
+        except Exception as e:
+            logger.warning(
+                f"hubitat_admin [{self.hub_name}] set_device_label({device_id}) "
+                f"failed: {e}"
+            )
+            return False
+
     @staticmethod
     def _build_runmethod_args(argument: Optional[str]) -> List[Dict[str, Any]]:
         """

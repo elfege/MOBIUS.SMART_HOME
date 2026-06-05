@@ -70,6 +70,9 @@ def initialize_registry(instance_manager=None) -> None:
     from apps.fan_automation.app import FanAutomationApp
     register_app_type(FanAutomationApp)
 
+    from apps.screen_time_planner.app import ScreenTimePlannerApp
+    register_app_type(ScreenTimePlannerApp)
+
     # Register with instance manager if provided
     if instance_manager:
         for type_name, app_class in _app_types.items():

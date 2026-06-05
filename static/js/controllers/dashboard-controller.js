@@ -33,6 +33,41 @@ export class DashboardController {
         const saved = JSON.parse(localStorage.getItem('debugPanels') || '{}');
         this.openDebugPanels = new Set(saved.open || []);
         this.debugSizes = saved.sizes || {};
+        // Collapsible-group state. ALL groups default collapsed on page load
+        // (Apps section, Drivers section, any future section). The user's
+        // explicit expand/collapse choice is persisted to localStorage so a
+        // re-render triggered by Run / Update / Pause / Resume / Delete
+        // does NOT pop closed groups back open. Stored as the set of group
+        // ids that are CURRENTLY EXPANDED — empty set = everything wrapped.
+        // (See memory: feedback-dashboard-groups-collapsed-default.)
+        let savedExpanded;
+        try {
+            savedExpanded = JSON.parse(
+                localStorage.getItem('dashboardExpandedGroups') || '[]'
+            );
+        } catch (_) {
+            savedExpanded = [];
+        }
+        this.expandedGroups = new Set(savedExpanded);
+        // App-type id → display name (e.g. "Screen Time Planner"). Loaded from
+        // /api/app-types in init() so groups/cards never show a hardcoded value.
+        this.appTypeNames = {};
+    }
+
+    /**
+     * Persist the expanded-groups set to localStorage. Called whenever
+     * `toggleGroup` flips a group's state.
+     */
+    _saveExpandedGroups() {
+        try {
+            localStorage.setItem(
+                'dashboardExpandedGroups',
+                JSON.stringify([...this.expandedGroups])
+            );
+        } catch (_) {
+            // Storage full / disabled — non-fatal, the page just won't
+            // remember choice across re-renders this session.
+        }
     }
 
     /**
@@ -43,6 +78,9 @@ export class DashboardController {
      * blocked by a WebSocket connection failure.
      */
     async init() {
+        // Load app-type names first so the first render shows real names
+        // (e.g. "Screen Time Planner") instead of the 'Automation' fallback.
+        await this.loadAppTypes();
         // Render immediately from HTTP — never gate the UI on WebSocket
         await this.loadInstances();
 
@@ -315,15 +353,24 @@ export class DashboardController {
             const cards = insts.map(inst => this.renderCard(inst)).join('');
             const n = insts.length;
             const gridId = `app-group-${typeId}`;
+            // Default-collapsed. Only render expanded if the user has
+            // explicitly opened this group earlier in the session (state
+            // persisted via toggleGroup → _saveExpandedGroups). Re-renders
+            // triggered by Run/Update/Pause/etc. preserve the user's choice
+            // — closed stays closed, open stays open.
+            const isExpanded = this.expandedGroups.has(gridId);
+            const ariaExp = isExpanded ? 'true' : 'false';
+            const caret = isExpanded ? '▾' : '▸';
+            const gridStyle = isExpanded ? '' : ' style="display:none;"';
             return `
                 <div class="app-group" data-app="${typeId}">
-                    <button class="app-group-header" aria-expanded="true"
+                    <button class="app-group-header" aria-expanded="${ariaExp}"
                             onclick="dashboard.toggleGroup(this, '${gridId}')">
-                        <span class="app-group-caret">▾</span>
+                        <span class="app-group-caret">${caret}</span>
                         <span class="app-group-name">${utils.escapeHtml(name)}</span>
                         <span class="app-group-count">${n} instance${n !== 1 ? 's' : ''}</span>
                     </button>
-                    <div class="instances-grid app-group-instances" id="${gridId}">${cards}</div>
+                    <div class="instances-grid app-group-instances" id="${gridId}"${gridStyle}>${cards}</div>
                 </div>`;
         }).join('');
 
@@ -465,10 +512,26 @@ export class DashboardController {
      * @returns {string} Display name
      */
     getAppTypeName(typeId) {
-        const types = {
-            1: 'Motion Lighting'
-        };
-        return types[typeId] || 'Automation';
+        // Data-driven: real display_name from /api/app-types (loaded in init).
+        // 'Automation' is only a last-resort fallback (map not yet loaded, or an
+        // unknown type id created after this page loaded).
+        return this.appTypeNames[typeId] || 'Automation';
+    }
+
+    /**
+     * Load the app-type id → display_name map from /api/app-types so groups and
+     * card badges show the actual app name (e.g. "Screen Time Planner") instead
+     * of a hardcoded value.
+     */
+    async loadAppTypes() {
+        try {
+            const types = await api.get('/app-types');
+            const map = {};
+            for (const t of (types || [])) map[t.id] = t.display_name;
+            this.appTypeNames = map;
+        } catch (e) {
+            console.warn('Failed to load app types:', e);
+        }
     }
 
     /**
@@ -493,6 +556,12 @@ export class DashboardController {
     /**
      * Toggle a collapsible group (app group or driver group). `btn` is the
      * clicked header button; `gridId` is the instances grid it controls.
+     *
+     * Persists the new state to ``this.expandedGroups`` (saved to
+     * localStorage) so re-renders triggered by Run/Update/Pause/Resume/
+     * Delete preserve the user's choice. Without this persistence the next
+     * instance-action click would re-render every group back to the default
+     * (collapsed) — the original bug Elfege flagged.
      */
     toggleGroup(btn, gridId) {
         const grid = document.getElementById(gridId);
@@ -502,6 +571,15 @@ export class DashboardController {
         btn.setAttribute('aria-expanded', String(!open));
         const caret = btn.querySelector('.app-group-caret');
         if (caret) caret.textContent = open ? '▸' : '▾';
+        // After toggle: open=true means "was open, now closed", so the
+        // NEW state is collapsed → remove from the expanded set. open=false
+        // means "was closed, now open" → add.
+        if (open) {
+            this.expandedGroups.delete(gridId);
+        } else {
+            this.expandedGroups.add(gridId);
+        }
+        this._saveExpandedGroups();
     }
 
     /**

@@ -7,6 +7,7 @@
 
 import { api, utils } from '../main.js';
 import { openDeviceTileModal } from '../components/device-tile-modal.js';
+import { openDeviceRefreshModal } from '../components/device-refresh-modal.js';
 
 export class InstanceWizardController {
     /**
@@ -379,6 +380,14 @@ export class InstanceWizardController {
             input.addEventListener('input', (e) => this.filterDevices(e));
         });
 
+        // Per-category refresh button (↻). Opens the global refresh modal
+        // with no prefill — the operator types the device number (or 0 for
+        // all). stopPropagation is in the inline onclick so the surrounding
+        // category-header click (which toggles expand/collapse) doesn't fire.
+        container.querySelectorAll('.device-category-refresh').forEach(btn => {
+            btn.addEventListener('click', () => openDeviceRefreshModal());
+        });
+
         // Update selected tags for all categories
         for (const category of categories) {
             this._updateCategoryTags(category.key);
@@ -441,6 +450,15 @@ export class InstanceWizardController {
                     </div>
                     <div class="device-category-meta">
                         <span class="device-count" id="count-${category.key}">${selectedCount} selected</span>
+                        <button type="button"
+                                class="device-category-refresh"
+                                title="Refresh device cache from the hub (after a driver change)"
+                                onclick="event.stopPropagation();"
+                                style="background:transparent; color:inherit;
+                                       border:1px solid var(--color-border,#3a3f4b);
+                                       border-radius:4px; padding:0.1rem 0.45rem;
+                                       margin-left:0.4rem; cursor:pointer;
+                                       font:inherit; font-size:0.95rem; line-height:1;">↻</button>
                         <span class="expand-icon" id="icon-${category.key}">&#9660;</span>
                     </div>
                 </div>
@@ -721,6 +739,16 @@ export class InstanceWizardController {
             keys: ['exclusionModes']
         },
         {
+            // Screen Time Planner — only appears for that app type, since
+            // group keys are filtered to those present in the schema.
+            id: 'screen_time',
+            title: 'Allowed Windows & Enforcement',
+            description: 'When the TV is allowed, and how it is cut outside those windows',
+            keys: ['weeklyWindows', 'awaitPrimaryOff', 'offConfirmTimeoutSeconds',
+                   'secondaryUnconditional', 'secondaryDelaySeconds',
+                   'suppressTvWakeOnPowerSeconds', 'timezone']
+        },
+        {
             id: 'advanced',
             title: 'Advanced',
             description: 'Memoization and fail-safe options',
@@ -821,6 +849,165 @@ export class InstanceWizardController {
         // noMotionTime + modeTimeouts against system_settings floor; surface
         // a warning banner with an "I acknowledge" opt-out.
         this._wireMotionFloorEnforcement(container);
+
+        // Screen Time Planner: per-day allowed-windows widget + conditional
+        // field show/hide (both no-op if those fields aren't present).
+        this._bindWeeklyWindows(container);
+        this._bindScreenTimeConditionalFields(container);
+    }
+
+    /**
+     * Day-of-week order + labels for the Screen Time Planner schedule grid.
+     */
+    static WEEKDAYS = [
+        ['monday', 'Monday'], ['tuesday', 'Tuesday'], ['wednesday', 'Wednesday'],
+        ['thursday', 'Thursday'], ['friday', 'Friday'], ['saturday', 'Saturday'],
+        ['sunday', 'Sunday']
+    ];
+
+    /**
+     * Render the Screen Time Planner ALLOWED-WINDOWS widget shell. The dynamic
+     * contents (uniform toggle + add/remove window ranges) are painted in
+     * _bindWeeklyWindows(). Value stored in this.settings[key]:
+     *   { uniform: bool,
+     *     uniformWindows: [{start:"HH:MM", end:"HH:MM"}, ...],
+     *     days: { monday: [{start,end}, ...], ... } }
+     *
+     * @param {string} key - Schema key (always 'weeklyWindows')
+     * @param {object} prop - Schema property (title/description/default)
+     * @returns {string} Full form-group HTML
+     */
+    _renderWeeklyWindowsField(key, prop) {
+        return `
+            <div class="form-group">
+                <label>${utils.escapeHtml(prop.title || key)}</label>
+                ${prop.description ? `<p class="help-text">${utils.escapeHtml(prop.description)}</p>` : ''}
+                <div class="weekly-windows-widget" data-key="${key}"></div>
+            </div>
+        `;
+    }
+
+    /**
+     * Initialize + paint the allowed-windows widget. No-op when absent.
+     * @param {HTMLElement} container - Settings form container
+     */
+    _bindWeeklyWindows(container) {
+        const root = container.querySelector('.weekly-windows-widget');
+        if (!root) return;
+        const key = root.dataset.key;
+
+        // Owned, normalized object (deep-clone the schema default).
+        if (!this.settings[key] || typeof this.settings[key] !== 'object') {
+            const prop = (this.appTypeSchema.settings_schema?.properties || {})[key] || {};
+            this.settings[key] = JSON.parse(JSON.stringify(
+                prop.default || { uniform: true, uniformWindows: [], days: {} }
+            ));
+        }
+        const ww = this.settings[key];
+        if (ww.uniform === undefined) ww.uniform = true;
+        if (!Array.isArray(ww.uniformWindows)) ww.uniformWindows = [];
+        if (!ww.days || typeof ww.days !== 'object') ww.days = {};
+        for (const [dk] of InstanceWizardController.WEEKDAYS) {
+            if (!Array.isArray(ww.days[dk])) ww.days[dk] = [];
+        }
+        this._paintWeeklyWindows(root, ww);
+    }
+
+    /**
+     * (Re)render the windows widget from `ww` and rebind handlers. Structural
+     * changes (toggle/add/remove) repaint; time edits mutate in place so the
+     * input keeps focus.
+     * @param {HTMLElement} root - the .weekly-windows-widget element
+     * @param {object} ww - this.settings.weeklyWindows
+     */
+    _paintWeeklyWindows(root, ww) {
+        const listBlock = (windows, scope) => {
+            const rows = windows.map((w, i) => `
+                <div class="stp-win-row" data-scope="${scope}" data-idx="${i}"
+                     style="display:flex;align-items:center;gap:.4rem;margin:.25rem 0;">
+                    <input type="time" lang="en-GB" class="stp-win-start" value="${w.start || '08:00'}">
+                    <span style="opacity:.6;">&rarr;</span>
+                    <input type="time" lang="en-GB" class="stp-win-end" value="${w.end || '20:30'}">
+                    <button type="button" class="stp-win-remove" data-scope="${scope}" data-idx="${i}"
+                            title="Remove window" style="padding:.05rem .55rem;">&times;</button>
+                </div>`).join('');
+            return `${rows || '<p class="help-text" style="margin:.2rem 0;">No windows — TV not allowed.</p>'}
+                <button type="button" class="stp-win-add" data-scope="${scope}"
+                        style="padding:.15rem .6rem;margin-top:.2rem;">+ Add window</button>`;
+        };
+
+        const uniform = ww.uniform !== false;
+        let html = `
+            <label class="checkbox-group" style="margin:.25rem 0;">
+                <input type="checkbox" class="stp-uniform" ${uniform ? 'checked' : ''}>
+                <span>Same windows every day</span>
+            </label>`;
+        if (uniform) {
+            html += `<div class="stp-uniform-windows">
+                <p class="help-text" style="margin:.2rem 0;">TV allowed every day during:</p>
+                ${listBlock(ww.uniformWindows, 'uniform')}
+            </div>`;
+        } else {
+            html += '<div class="stp-per-day">' + InstanceWizardController.WEEKDAYS.map(([dk, label]) => `
+                <div class="stp-day-block" style="border-top:1px solid var(--color-border,#333);padding:.45rem 0;">
+                    <strong style="font-size:.85rem;">${label}</strong>
+                    ${listBlock(ww.days[dk] || [], dk)}
+                </div>`).join('') + '</div>';
+        }
+        root.innerHTML = html;
+
+        const listFor = (scope) =>
+            scope === 'uniform' ? ww.uniformWindows : (ww.days[scope] = ww.days[scope] || []);
+        const repaint = () => this._paintWeeklyWindows(root, ww);
+
+        root.querySelector('.stp-uniform').addEventListener('change', (e) => {
+            ww.uniform = e.target.checked;
+            repaint();
+        });
+        root.querySelectorAll('.stp-win-add').forEach(b => b.addEventListener('click', () => {
+            listFor(b.dataset.scope).push({ start: '08:00', end: '20:30' });
+            repaint();
+        }));
+        root.querySelectorAll('.stp-win-remove').forEach(b => b.addEventListener('click', () => {
+            listFor(b.dataset.scope).splice(Number(b.dataset.idx), 1);
+            repaint();
+        }));
+        root.querySelectorAll('.stp-win-row').forEach(row => {
+            const list = listFor(row.dataset.scope);
+            const idx = Number(row.dataset.idx);
+            const s = row.querySelector('.stp-win-start');
+            const e = row.querySelector('.stp-win-end');
+            s.addEventListener('change', () => { if (list[idx]) list[idx].start = s.value || '08:00'; });
+            e.addEventListener('change', () => { if (list[idx]) list[idx].end = e.value || '20:30'; });
+        });
+    }
+
+    /**
+     * Screen Time Planner conditional field visibility:
+     *   - offConfirmTimeoutSeconds shown only when "Confirm the TV is off" is on.
+     *   - secondaryDelaySeconds shown when NOT confirming off, OR when "Always
+     *     cut the power device" is on (hidden only when confirming + not-always).
+     * No-op for other app types.
+     * @param {HTMLElement} container - Settings form container
+     */
+    _bindScreenTimeConditionalFields(container) {
+        const awaitCb = container.querySelector('[name="awaitPrimaryOff"]');
+        const delayEl = container.querySelector('[name="secondaryDelaySeconds"]');
+        if (!awaitCb || !delayEl) return;  // not screen_time_planner
+        const uncondCb = container.querySelector('[name="secondaryUnconditional"]');
+        const timeoutEl = container.querySelector('[name="offConfirmTimeoutSeconds"]');
+        const delayGroup = delayEl.closest('.form-group');
+        const timeoutGroup = timeoutEl ? timeoutEl.closest('.form-group') : null;
+
+        const update = () => {
+            const awaitOff = awaitCb.checked;
+            const uncond = uncondCb ? uncondCb.checked : false;
+            if (timeoutGroup) timeoutGroup.style.display = awaitOff ? '' : 'none';
+            if (delayGroup) delayGroup.style.display = ((!awaitOff) || uncond) ? '' : 'none';
+        };
+        awaitCb.addEventListener('change', update);
+        if (uncondCb) uncondCb.addEventListener('change', update);
+        update();
     }
 
     /**
@@ -1266,6 +1453,13 @@ export class InstanceWizardController {
                        ${prop.minimum !== undefined ? `min="${prop.minimum}"` : ''}
                        ${prop.maximum !== undefined ? `max="${prop.maximum}"` : ''}>
             `;
+        } else if (prop.type === 'object' && key === 'weeklyWindows') {
+            // Screen Time Planner per-day ALLOWED-WINDOWS widget. Self-contained:
+            // uniform toggle + add/remove window ranges (uniform or per-day),
+            // writing { uniform, uniformWindows:[{start,end}], days:{dow:[...]} }
+            // into this.settings.weeklyWindows. Painted/bound in
+            // _bindWeeklyWindows(), called from renderSettingsForm().
+            return this._renderWeeklyWindowsField(key, prop);
         } else if (prop.type === 'object' && key === 'modeTimeouts') {
             // Per-mode timeout widget (shown/hidden by timeWithMode toggle)
             input = `
@@ -1318,6 +1512,9 @@ export class InstanceWizardController {
     handleSettingChange(e) {
         const el = e.target;
         const key = el.name;
+        // Custom-widget inputs (e.g. the weeklyWindows time pickers) have no
+        // name and manage their own state — never write settings[''].
+        if (!key) return;
 
         if (el.type === 'checkbox') {
             this.settings[key] = el.checked;

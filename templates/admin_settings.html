@@ -52,6 +52,9 @@
             <button type="button" class="settings-tab"
                     role="tab" aria-selected="false"
                     data-section="maker_api">Maker API</button>
+            <button type="button" class="settings-tab"
+                    role="tab" aria-selected="false"
+                    data-section="device_naming">Device naming</button>
         </nav>
 
         {# Right pane — one panel per section. system_settings rows
@@ -90,7 +93,11 @@
                             invalidated on save.
                         </p>
                     </div>
-                    <button class="btn btn-primary" id="btn-add-hub">+ Add hub</button>
+                    <div style="display:flex; gap:0.5rem; align-items:center;">
+                        <button class="btn btn-secondary" id="btn-refresh-device-cache"
+                                title="Refresh the canonical device cache from the hub (after a driver change). 0 = all devices.">↻ Refresh device</button>
+                        <button class="btn btn-primary" id="btn-add-hub">+ Add hub</button>
+                    </div>
                 </div>
 
                 {# Maker API explanation + toggle — left here because it
@@ -193,6 +200,36 @@
                 </div>
             </div>
 
+            {# ---------- Device naming ---------- #}
+            <div class="settings-panel" data-section="device_naming"
+                 role="tabpanel" aria-labelledby="tab-device_naming">
+                <h3 class="settings-panel-title">Device naming</h3>
+                <p class="settings-panel-desc">
+                    Automatically strip a trailing &ldquo; on &lt;hub name&gt;&rdquo;
+                    suffix from device labels (e.g. <em>&ldquo;Kitchen Light on Home 2&rdquo;</em>
+                    &rarr; <em>&ldquo;Kitchen Light&rdquo;</em>). Hub names come from your
+                    Hubs configuration &mdash; nothing is hardcoded. Default OFF.
+                </p>
+                <div id="dnn-panel"
+                     style="background:var(--color-surface);border:1px solid var(--color-border);border-radius:8px;padding:1rem;">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;flex-wrap:wrap;">
+                        <div style="flex:1;min-width:240px;">
+                            <strong>Device Name Normalizer: <span id="dnn-state">...</span></strong>
+                            <p style="opacity:.7;font-size:.85rem;margin:.4rem 0 0;">
+                                When enabled, each device sync (~2&nbsp;min) cleans matching
+                                labels by renaming the device on its hub (persists like a
+                                manual rename). <strong>Enabling first shows you exactly what
+                                it would rename and asks you to confirm.</strong> You can
+                                disable it again at any time.
+                            </p>
+                        </div>
+                        <button type="button" id="btn-toggle-dnn" class="btn btn-secondary">
+                            ...
+                        </button>
+                    </div>
+                </div>
+            </div>
+
         </section>
     </div>
 </div>
@@ -272,6 +309,29 @@
         <div class="motion-floor-modal-actions">
             <button type="button" class="btn motion-floor-close"
                     id="btn-maker-api-modal-close">Close</button>
+        </div>
+    </div>
+</div>
+
+{# Device Name Normalizer — MANDATORY preview/confirm modal. Shown before the
+   feature is enabled; body is populated from /api/device-name-normalizer/preview
+   (a no-op scan). The feature is only enabled if the user clicks Confirm. #}
+<div id="dnn-preview-modal" class="motion-floor-modal" style="display:none;">
+    <div class="motion-floor-modal-body">
+        <h3>Enable Device Name Normalizer?</h3>
+        <p>
+            This removes a trailing &ldquo; on &lt;hub name&gt;&rdquo; suffix from
+            device labels and renames the device <strong>on its hub</strong>.
+            Review exactly what it would do right now:
+        </p>
+        <div id="dnn-preview-body">
+            <p class="loading-placeholder">Scanning devices&hellip;</p>
+        </div>
+        <div class="motion-floor-modal-actions">
+            <button type="button" class="btn" id="dnn-preview-cancel">Cancel</button>
+            <button type="button" class="btn btn-primary" id="dnn-preview-confirm" disabled>
+                Enable &amp; apply
+            </button>
         </div>
     </div>
 </div>
@@ -905,14 +965,131 @@
     }
 
     /* -------------------------------------------------------------------
+       Device Name Normalizer — dedicated toggle with a MANDATORY preview
+       modal before enabling. Disabling is immediate (it's the safe direction).
+       ------------------------------------------------------------------- */
+    async function refreshDnnPanel() {
+        const stateEl = document.getElementById('dnn-state');
+        const btn = document.getElementById('btn-toggle-dnn');
+        if (!stateEl || !btn) return;
+        try {
+            const s = await api.get('/device-name-normalizer/status');
+            const on = (s.enabled === true || s.enabled === 'true');
+            stateEl.textContent = on ? 'ENABLED' : 'DISABLED';
+            stateEl.style.color = on ? 'var(--color-warning)' : 'var(--color-success)';
+            btn.textContent = on ? 'Disable' : 'Enable…';
+            btn.dataset.on = String(on);
+        } catch (err) {
+            stateEl.textContent = `error: ${err.message}`;
+        }
+    }
+
+    function initDnnToggle() {
+        const btn = document.getElementById('btn-toggle-dnn');
+        if (!btn) return;
+        btn.addEventListener('click', async (e) => {
+            const on = e.currentTarget.dataset.on === 'true';
+            if (on) {
+                // Disable — safe direction, no preview needed.
+                try {
+                    await api.request('/device-name-normalizer/disable',
+                        { method: 'POST', body: JSON.stringify({}) });
+                    utils.notify('Device Name Normalizer disabled.', 'success');
+                } catch (err) {
+                    utils.notify(`Disable failed: ${err.message}`, 'error');
+                }
+                refreshDnnPanel();
+                return;
+            }
+            // Enable — MANDATORY preview/confirm first.
+            openDnnPreview();
+        });
+    }
+
+    async function openDnnPreview() {
+        const modal = document.getElementById('dnn-preview-modal');
+        const body = document.getElementById('dnn-preview-body');
+        const confirmBtn = document.getElementById('dnn-preview-confirm');
+        if (!modal || !body || !confirmBtn) return;
+        body.innerHTML = '<p class="loading-placeholder">Scanning devices…</p>';
+        confirmBtn.disabled = true;
+        modal.style.display = 'flex';
+
+        let data;
+        try {
+            data = await api.get('/device-name-normalizer/preview');
+        } catch (err) {
+            body.innerHTML =
+                `<p class="error">Preview failed: ${utils.escapeHtml(err.message)}</p>`;
+            return;
+        }
+
+        const n = data.count || 0;
+        const hubs = (data.hubs || []).join(', ');
+        let listHtml;
+        if (n === 0) {
+            listHtml = '<p>No device labels currently match the &ldquo; on &lt;hub&gt;&rdquo; '
+                + 'pattern, so <strong>nothing would be renamed right now</strong>. '
+                + 'Enabling still arms it for future devices that gain a matching suffix.</p>';
+        } else {
+            const rows = (data.proposals || []).map(p =>
+                `<tr>
+                    <td style="opacity:.55;padding:.25rem .5rem;white-space:nowrap;">${utils.escapeHtml(p.hub_name || '')} #${p.device_id}</td>
+                    <td style="padding:.25rem .5rem;"><code>${utils.escapeHtml(p.old)}</code></td>
+                    <td style="padding:.25rem .4rem;opacity:.6;">&rarr;</td>
+                    <td style="padding:.25rem .5rem;"><code>${utils.escapeHtml(p.new)}</code></td>
+                 </tr>`).join('');
+            listHtml = `<p><strong>${n}</strong> device${n === 1 ? '' : 's'} would be renamed now:</p>
+                <div style="max-height:40vh;overflow:auto;border:1px solid var(--color-border);border-radius:6px;margin:.4rem 0;">
+                    <table style="width:100%;border-collapse:collapse;font-size:.85rem;">${rows}</table>
+                </div>`;
+        }
+
+        body.innerHTML = `
+            ${listHtml}
+            <p style="opacity:.7;font-size:.82rem;margin-top:.8rem;">
+                Hub names used for matching: <code>${utils.escapeHtml(hubs || '(none)')}</code>.
+                Once enabled, this runs on every device sync (~2&nbsp;min) and will also
+                rename <em>future</em> devices that gain a matching suffix.
+            </p>`;
+        confirmBtn.disabled = false;
+    }
+
+    function initDnnModal() {
+        const modal = document.getElementById('dnn-preview-modal');
+        const cancel = document.getElementById('dnn-preview-cancel');
+        const confirm = document.getElementById('dnn-preview-confirm');
+        if (!modal) return;
+        const close = () => { modal.style.display = 'none'; };
+        if (cancel) cancel.addEventListener('click', close);
+        modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+        if (confirm) {
+            confirm.addEventListener('click', async () => {
+                try {
+                    await api.request('/device-name-normalizer/enable',
+                        { method: 'POST', body: JSON.stringify({}) });
+                    utils.notify('Device Name Normalizer enabled.', 'success');
+                } catch (err) {
+                    utils.notify(`Enable failed: ${err.message}`, 'error');
+                }
+                close();
+                refreshDnnPanel();
+            });
+        }
+    }
+
+    /* -------------------------------------------------------------------
        Boot.
        ------------------------------------------------------------------- */
     function boot() {
         initTabs();
         initMakerApiToggle();
         initModals();
+        initDnnToggle();
+        initDnnModal();
         loadSettings();
         refreshMakerApiPanel();
+        refreshDnnPanel();
     }
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', boot);

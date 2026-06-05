@@ -208,11 +208,22 @@ smarthome_publish__write_filter_rules() {
 	# consumes via --replace-text. Kept in /tmp (separate from the build dir) so
 	# the cleanup trap doesn't lose it before filter-repo reads it.
 	# Format: `regex:PATTERN==>REPLACEMENT` (filter-repo's --replace-text syntax).
-	# Real LAN subnet 192.168.10.x → <LAN_IP>; common-example 192.168.1.x is left
-	# alone (often appears in docs as a generic placeholder).
+	#
+	# Rules:
+	#   - Real LAN subnet 192.168.10.x → <LAN_IP>; common-example 192.168.1.x is
+	#     left alone (often appears in docs as a generic placeholder).
+	#   - Personal device MAC addresses with no colons (Hubitat / WoL form):
+	#     samsung-tv living-room MAC AABBCCDDEEFF → AABBCCDDEEFF (standard fake MAC).
+	#     A generic MAC-pattern regex would have too many false positives
+	#     (12-char hex strings show up in commit shas, UUID fragments, etc.) so
+	#     we list specific known-personal MACs explicitly. Future personal MACs
+	#     should be added here, NOT solved by a generic hex regex.
 	local rt
 	rt="$(mktemp /tmp/smarthome_public_build.replace.XXXX)"
-	printf 'regex:192\\.168\\.10\\.[0-9]{1,3}==><LAN_IP>\n' > "$rt"
+	{
+	    printf 'regex:192\\.168\\.10\\.[0-9]{1,3}==><LAN_IP>\n'
+	    printf 'regex:[Dd]0[Cc]24[Ee][Ee]93390==>AABBCCDDEEFF\n'
+	} > "$rt"
 	echo "$rt"
 }
 
@@ -238,6 +249,22 @@ smarthome_publish__run_filter_repo() {
 	# The .hubitat/_SYNCAPP/postgres_data entries are defensive — not tracked
 	# today, but TILES learned the hard way that zombie-tracked operator paths
 	# can survive .gitignore (PITFALL_8 / MSG-300 of the canonical).
+
+	# ── Python-source LAN-IP gate (PRE-FILTER) ───────────────────────────────
+	# Real LAN IPs (192.168.10.x) must NOT be hardcoded in Python source — they
+	# belong in .env / the database. Unlike .env / .sh / .html / config (which we
+	# redact via --replace-text), a real LAN IP baked into a .py file is a code
+	# smell we refuse to publish AT ALL. Abort with file:line so it gets moved
+	# out. Runs on the un-filtered build clone, before --replace-text rewrites
+	# the IPs. (.env / .sh / other extensions are intentionally exempt.)
+	local py_ip_leaks
+	py_ip_leaks="$(git grep -nE '192\.168\.10\.[0-9]{1,3}' -- '*.py' 2>/dev/null || true)"
+	if [[ -n "$py_ip_leaks" ]]; then
+		echo -e "${RED:-}✗ ABORT — real LAN IP hardcoded in Python source (move to .env / DB):${NC:-}" >&2
+		echo "$py_ip_leaks" | sed 's/^/    /' >&2
+		safe_exit 1
+	fi
+
 	local rt
 	rt="$(smarthome_publish__write_filter_rules)"
 	echo -e "${BOLD:-}→ filter-repo (strip private paths + redact LAN subnet)${NC:-}"
@@ -317,6 +344,18 @@ smarthome_publish__leak_gate() {
 	if [[ -n "$ip_leaks" ]]; then
 		echo -e "${RED:-}✗ ABORT — real LAN IPs survived redaction in:${NC:-}" >&2
 		echo "$ip_leaks" >&2
+		safe_exit 1
+	fi
+
+	# Personal MAC leak gate — same case-insensitive form as the replace-text
+	# rule above. Lists explicit personal MACs only (generic 12-char hex would
+	# false-positive on commit shas and UUID fragments). Add new personal MACs
+	# here in lockstep with the replace-text rules.
+	local mac_leaks
+	mac_leaks="$(git grep -lE '[Dd]0[Cc]24[Ee][Ee]93390' -- . 2>/dev/null || true)"
+	if [[ -n "$mac_leaks" ]]; then
+		echo -e "${RED:-}✗ ABORT — personal MAC(s) survived redaction in:${NC:-}" >&2
+		echo "$mac_leaks" >&2
 		safe_exit 1
 	fi
 

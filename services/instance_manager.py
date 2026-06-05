@@ -810,9 +810,23 @@ class InstanceManager:
         # Button event type is configurable (default: held)
         button_event = (settings or {}).get('buttonEventType', 'held')
 
-        # Map device categories to event types
-        # keep_off/keep_on switches need subscriptions so _handle_switch()
-        # can detect manual overrides via webhook events
+        # Map device categories to event types.
+        #
+        # Each entry says "when this category is in an instance's
+        # device_selections, auto-subscribe the instance to events of THIS
+        # type from THOSE devices". The map intentionally has gaps — output
+        # devices we control but don't want to listen to ourselves must NOT
+        # be listed, or every command we send echoes back as an event and
+        # the next master() re-issues it (2026-06-05 Fan Bathroom storm,
+        # see apps/fan_automation/app.py docstring).
+        #
+        # Rule of thumb: list a category here only when reacting to its
+        # state changes is part of the app's input model. Pure outputs
+        # (fans, AML-controlled main 'switches' would arguably qualify but
+        # AML's manual-override convention depends on the subscription
+        # remaining wired) stay off the map. Explicit user-override
+        # categories (keep_off/keep_on, manual_fan_level_override) DO
+        # belong here — they ARE control inputs masquerading as switches.
         category_events = {
             'motion_sensors': 'motion',
             'switches': 'switch',
@@ -821,8 +835,12 @@ class InstanceManager:
             'pause_buttons': button_event,
             'keep_off_switches': 'switch',
             'keep_on_switches': 'switch',
-            # Fan Automation app (and any future fan/humidity-driven app):
-            'fans': 'switch',
+            # 'fans': 'switch' — DELIBERATELY UNMAPPED. The fan is a
+            # pure output of fan_automation; subscribing creates a
+            # send-command-echo-back-as-event feedback loop. Manual user
+            # override is expressed via the dedicated
+            # 'manual_fan_level_override_switches' category instead.
+            'manual_fan_level_override_switches': 'switch',
             'humidity_sensors': 'humidity',
             'presence_sensors': 'presence',
         }

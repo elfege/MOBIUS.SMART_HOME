@@ -8,6 +8,8 @@
  *   DELETE /api/hubs/{id}      → delete (refused if devices reference it)
  */
 
+import { openDeviceRefreshModal } from '../components/device-refresh-modal.js';
+
 const $ = window.jQuery || window.$;
 
 async function fetchJSON(url, opts = {}) {
@@ -209,5 +211,11 @@ $(function () {
             hub_name: '', hub_ip: '', maker_api_app_number: '',
             maker_api_token_env: '', is_primary: false, is_enabled: true,
         }));
+    });
+    // ↻ device-cache refresh — pops the modal (operator types device # or
+    // 0 for all). Lives next to the hubs panel because hub-side driver
+    // changes are the canonical reason you'd want to invalidate one row.
+    $('#btn-refresh-device-cache').on('click', function () {
+        openDeviceRefreshModal();
     });
 });

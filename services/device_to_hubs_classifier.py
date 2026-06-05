@@ -977,6 +977,157 @@ def get_device_by_canonical_id(canonical_id: Any) -> Optional[Dict[str, Any]]:
 
     _canonical_id_cache[key] = None
     return None
+
+
+def refresh_single_device(device_id: Any) -> Dict[str, Any]:
+    """
+    Force a fresh pull of ONE device from the hub that natively owns it,
+    re-fetching its capabilities + attributes via admin fullJson and
+    upserting the result into the canonical `devices` table.
+
+    Accepts either a canonical devices.id PK or a Hubitat per-hub id —
+    canonical is tried first via get_device_by_canonical_id; if that
+    misses, falls back to get_hub_for_device (per-hub id lookup).
+
+    Use after changing a driver on the hub side (the cached caps/attrs
+    are now stale and the lazy reuse path in _ingest_into_devices would
+    keep the old caps). This forces a fullJson roundtrip.
+
+    Returns:
+        {
+            "ok":         bool,
+            "device_id":  <as passed in>,
+            "resolved": {
+                "canonical_id": int,
+                "hub_ip":       str,
+                "hubitat_id":   str,
+                "label":        str,
+            } or None,
+            "caps_count": int,
+            "reason":     str  # only set on failure paths
+        }
+
+    Errors are surfaced in the return dict (ok=False + reason) rather
+    than raised — the route handler can map to HTTP status codes from
+    the result.
+    """
+    if device_id is None or device_id == 0 or device_id == "0":
+        return {"ok": False, "device_id": device_id,
+                "reason": "device_id must be non-zero (0 = refresh all is handled by run_classification)"}
+
+    # Try canonical id first, then per-hub id. fetch_device_live uses the
+    # same two-step resolution; we mirror it so the upsert has the right
+    # (hub_ip, hubitat_id) tuple to write against.
+    row = get_device_by_canonical_id(device_id) or get_hub_for_device(device_id)
+    if not row or not row.get("hub_ip"):
+        return {"ok": False, "device_id": device_id, "resolved": None,
+                "reason": "no devices row matches that id (try the canonical # or the per-hub Hubitat id)"}
+
+    hub_ip      = row["hub_ip"]
+    hub_name    = row.get("hub_name") or ""
+    hub_id      = row.get("hub_id")
+    hubitat_id  = str(row.get("hubitat_id") or "")
+    canonical_id = row.get("id")
+
+    # 1. Pull live admin-side metadata. _fetch_caps_attrs hits fullJson and
+    #    returns ([], {}) on any error so we don't half-update with junk.
+    caps, attrs = _fetch_caps_attrs(hub_ip, hub_name, hubitat_id)
+    if not caps:
+        # No caps from the admin path — either the hub is unreachable, the
+        # device was removed, or the admin client isn't configured. Surface
+        # the failure rather than silently wiping the cached caps to [].
+        return {
+            "ok": False, "device_id": device_id,
+            "resolved": {"canonical_id": canonical_id, "hub_ip": hub_ip,
+                         "hubitat_id": hubitat_id, "label": row.get("label")},
+            "reason": "fullJson fetch returned empty capabilities — hub unreachable or device missing",
+        }
+
+    # 2. We also want the latest label / name / device_type / protocol from
+    #    the hub roster (a driver change usually doesn't move these but the
+    #    operator may have renamed at the same time). One roster pull per
+    #    refresh is acceptable — same cost as the existing reconcile poll
+    #    does every minute, but scoped to one device's hub.
+    try:
+        from services.hubitat_admin_client import get_client, to_maker_shape
+        raw = get_client(hub_ip, hub_name).get_device(int(hubitat_id))
+    except Exception as e:
+        logger.debug(f"refresh_single_device: roster fetch failed: {e}")
+        raw = None
+    shaped = to_maker_shape(raw) if raw else {}
+    inner  = (raw or {}).get("device", raw or {}) if isinstance(raw, dict) else {}
+    label   = (shaped or {}).get("label") or row.get("label") or ""
+    name    = (shaped or {}).get("name") or inner.get("name") or label or ""
+    dtype   = inner.get("type") or ""
+    # Protocol is "zwave" / "zigbee" / "lan" / "unknown" — keep whatever the
+    # admin shape exposes (the classifier sets it from the same field).
+    protocol = inner.get("deviceTypeName") or "unknown"
+
+    # 3. Upsert directly via the canonical RPC (the same one
+    #    _ingest_into_devices uses). p_is_name_duplicate left None so the
+    #    DB function preserves whatever the classifier last set — we're not
+    #    re-running the cross-hub dedup, just refreshing one row's data.
+    postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    try:
+        # RPC signature matches _ingest_into_devices' canonical call: 10 args,
+        # no p_linked_device. p_is_name_duplicate left as False so a single-
+        # device refresh never accidentally flips the dedup verdict — that's
+        # the classifier's job during a full sweep.
+        r = requests.post(
+            f"{postgrest_url}/rpc/upsert_device",
+            json={
+                "p_hub_ip":            hub_ip,
+                "p_hubitat_id":        hubitat_id,
+                "p_hub_id":            hub_id,
+                "p_name":              name,
+                "p_label":             label,
+                "p_device_type":       dtype,
+                "p_protocol":          protocol,
+                "p_capabilities":      caps,
+                "p_attributes":        attrs or {},
+                "p_is_name_duplicate": False,
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        ok = r.status_code in (200, 201, 204)
+        if not ok:
+            return {"ok": False, "device_id": device_id,
+                    "resolved": {"canonical_id": canonical_id, "hub_ip": hub_ip,
+                                 "hubitat_id": hubitat_id, "label": label},
+                    "reason": f"upsert RPC returned {r.status_code}: {r.text[:200]}"}
+    except Exception as e:
+        return {"ok": False, "device_id": device_id,
+                "resolved": {"canonical_id": canonical_id, "hub_ip": hub_ip,
+                             "hubitat_id": hubitat_id, "label": label},
+                "reason": f"upsert failed: {e}"}
+
+    # 4. Invalidate the in-process resolution caches for this device so a
+    #    subsequent fetch sees the new row.
+    try:
+        if canonical_id is not None and int(canonical_id) in _canonical_id_cache:
+            _canonical_id_cache.pop(int(canonical_id), None)
+        if hubitat_id in _device_lookup_cache:
+            _device_lookup_cache.pop(hubitat_id, None)
+    except Exception:
+        pass
+
+    logger.info(
+        f"refresh_single_device: canonical={canonical_id} hub={hub_ip} "
+        f"hubitat_id={hubitat_id} label={label!r} caps={len(caps)}"
+    )
+    return {
+        "ok": True,
+        "device_id": device_id,
+        "resolved": {
+            "canonical_id": canonical_id,
+            "hub_ip":       hub_ip,
+            "hubitat_id":   hubitat_id,
+            "label":        label,
+        },
+        "caps_count": len(caps),
+    }
 # reload-canonical-devices
 # reload-resolve-fix
 # reload-main-sweep
+# reload-single-device-refresh

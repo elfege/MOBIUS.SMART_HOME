@@ -254,6 +254,14 @@ strip_dirs = (
     b".hubitat/",
     b"_SYNCAPP/",
     b"postgres_data/",
+    # GitHub Actions workflows are dev-side only. autotag.yml + publish-
+    # public-mirror.yml both ran on the PUBLIC mirror after publish, where
+    # autotag tried to bump tags independently of dev (divergence risk) and
+    # publish tried to re-publish-from-public-to-public (no deploy key
+    # available; the runs failed loudly on every push). Stripping the
+    # whole .github/workflows/ tree from public history makes the public
+    # mirror a pure static target — all CI lives on the dev side.
+    b".github/workflows/",
 )
 strip_files = {
     b"docs/README_handoff.md",

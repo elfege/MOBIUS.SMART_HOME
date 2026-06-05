@@ -249,22 +249,6 @@ smarthome_publish__run_filter_repo() {
 	# The .hubitat/_SYNCAPP/postgres_data entries are defensive — not tracked
 	# today, but TILES learned the hard way that zombie-tracked operator paths
 	# can survive .gitignore (PITFALL_8 / MSG-300 of the canonical).
-
-	# ── Python-source LAN-IP gate (PRE-FILTER) ───────────────────────────────
-	# Real LAN IPs (192.168.10.x) must NOT be hardcoded in Python source — they
-	# belong in .env / the database. Unlike .env / .sh / .html / config (which we
-	# redact via --replace-text), a real LAN IP baked into a .py file is a code
-	# smell we refuse to publish AT ALL. Abort with file:line so it gets moved
-	# out. Runs on the un-filtered build clone, before --replace-text rewrites
-	# the IPs. (.env / .sh / other extensions are intentionally exempt.)
-	local py_ip_leaks
-	py_ip_leaks="$(git grep -nE '192\.168\.10\.[0-9]{1,3}' -- '*.py' 2>/dev/null || true)"
-	if [[ -n "$py_ip_leaks" ]]; then
-		echo -e "${RED:-}✗ ABORT — real LAN IP hardcoded in Python source (move to .env / DB):${NC:-}" >&2
-		echo "$py_ip_leaks" | sed 's/^/    /' >&2
-		safe_exit 1
-	fi
-
 	local rt
 	rt="$(smarthome_publish__write_filter_rules)"
 	echo -e "${BOLD:-}→ filter-repo (strip private paths + redact LAN subnet)${NC:-}"

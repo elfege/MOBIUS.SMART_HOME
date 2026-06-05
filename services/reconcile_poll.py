@@ -44,6 +44,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 
+from services.supervised_tasks import supervised_spawn
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -96,7 +98,11 @@ class ReconcilePoll:
     async def start(self) -> None:
         if self._task is not None:
             return
-        self._task = asyncio.create_task(self._run(), name='reconcile_poll')
+        # Supervised: reconcile_poll is a long-lived sentinel that runs
+        # every 60s (10s in aggressive mode). A crash used to silently
+        # kill the poller and the WS-only intake would lose its safety
+        # net. Now any crash surfaces as ERROR with the task name.
+        self._task = supervised_spawn(self._run(), name='reconcile_poll')
         logger.info(
             f'reconcile_poll: started normal={RECONCILE_INTERVAL_SECS}s '
             f'aggressive={RECONCILE_AGGRESSIVE_SECS}s '

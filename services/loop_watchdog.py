@@ -129,10 +129,16 @@ def start_watchdog() -> None:
     if _watchdog_task is not None and not _watchdog_task.done():
         logger.debug("loop_watchdog: start_watchdog called but already running")
         return
-    _watchdog_task = asyncio.create_task(
+    # Migrated to the canonical Phase D wrapper (was a hand-rolled
+    # add_done_callback). supervised_spawn does the same job — logs
+    # ERROR on uncaught exception, INFO on cancel — plus keeps a strong
+    # ref in _BACKGROUND_TASKS so the per-process count surfaced on
+    # /api/health is accurate. The local _log_if_failed below is now
+    # unused but kept as documentation of the pattern's origin.
+    from services.supervised_tasks import supervised_spawn
+    _watchdog_task = supervised_spawn(
         _watchdog_loop(), name="loop_watchdog"
     )
-    _watchdog_task.add_done_callback(_log_if_failed)
 
 
 def stop_watchdog() -> None:

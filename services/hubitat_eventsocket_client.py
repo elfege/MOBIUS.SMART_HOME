@@ -51,6 +51,8 @@ from typing import Dict, List, Optional
 import requests
 import websockets
 
+from services.supervised_tasks import supervised_spawn
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -103,7 +105,12 @@ class HubitatEventsocketClient:
         self._tasks.clear()
         for hub in self._hubs:
             name = hub['hub_name']
-            self._tasks[name] = asyncio.create_task(
+            # Supervised: each per-hub eventsocket listener is a long-lived
+            # task. A crash (typical cause: a websockets library exception
+            # for an unhandled close code) used to silently kill the
+            # listener and that hub would stop delivering events. Now
+            # logs ERROR with the task name.
+            self._tasks[name] = supervised_spawn(
                 self._run_hub(hub), name=f'eventsocket:{name}'
             )
         logger.info(f'hubitat_eventsocket: started for hubs={list(self._tasks)}')

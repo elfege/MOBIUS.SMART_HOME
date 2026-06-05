@@ -761,6 +761,63 @@ async def health():
     return {"status": "ok", "loop_lag_seconds": age}
 
 
+@app.get("/api/health/breakers", tags=["health"])
+async def health_breakers():
+    """
+    Observable state of every circuit breaker registered in the
+    process. Deliberately NOT gated on liveness — a breaker being
+    OPEN is degraded operation, not unhealthy: autoheal should not
+    restart the container just because (say) the matter-server is
+    down. This endpoint exists so the operator can see the breakers'
+    state without waiting for an ERROR log to appear.
+
+    Returns:
+      {
+        "breakers": [
+          {
+            "name": "hubitat:<LAN_IP>",
+            "state": "closed" | "open" | "half_open",
+            "failure_count": 0,
+            "fail_threshold": 5,
+            "reset_timeout_secs": 30.0,
+            "fail_window_secs": 60.0,
+            "last_failure_reason": "...",
+            "secs_until_half_open": null | float,
+            ...
+          },
+          ...
+        ],
+        "any_open": bool   # convenience for dashboards
+      }
+    """
+    from services.circuit_breaker import all_breakers
+    snapshots = [b.snapshot() for b in all_breakers().values()]
+    return {
+        "breakers": snapshots,
+        "any_open": any(s["state"] != "closed" for s in snapshots),
+    }
+
+
+@app.post("/api/health/breakers/{name}/reset", tags=["health"])
+async def health_breaker_reset(name: str):
+    """
+    Manually reset a breaker back to CLOSED (clears the failure
+    count). For operator use after fixing the downstream — saves the
+    30s cooldown wait. Returns 404 if the breaker doesn't exist (i.e.
+    nothing has tried to use it yet under that name).
+    """
+    from services.circuit_breaker import all_breakers
+    breakers = all_breakers()
+    breaker = breakers.get(name)
+    if breaker is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no breaker named '{name}' (try one of: {sorted(breakers)})",
+        )
+    breaker.reset()
+    return {"status": "reset", "snapshot": breaker.snapshot()}
+
+
 @app.get("/api/status", tags=["health"])
 async def status():
     """Detailed status endpoint."""

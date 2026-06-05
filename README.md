@@ -45,6 +45,10 @@ versioned, and reasoned about.
 - **Contract-drift watcher.** Polls Hubitat's platform version on a schedule
   and runs a canary against the admin API; surfaces deltas as soon as a hub
   firmware update changes a wire format.
+- **Device name normalizer.** Optional, default-off maintenance pass that strips
+  a trailing " on &lt;hub name&gt;" suffix from Hub Mesh linked-device labels
+  directly on the hubs. Data-driven from the hubs' own location names, with a
+  mandatory dry-run preview before anything is renamed.
 
 ## Currently shipped apps
 
@@ -52,6 +56,7 @@ versioned, and reasoned about.
 |----------------------------|----------|---------------------------------------------------------------|
 | Advanced Motion Lighting   | Shipped  | Full-parity port of the Groovy app: motion-driven control, memoization of user overrides, mode-specific timeouts/dim levels, illuminance gating, pause/resume. |
 | Fan Automation             | Shipped  | Temp/humidity-driven exhaust/ceiling-fan control.             |
+| Screen Time Planner        | Shipped  | TV allowed only inside daily time windows (per-day, cross-midnight aware). Turning it on outside a window is cut in real time; optional delayed cut of a secondary power switch, plus wake-on-power suppression for TVs that boot on mains restore. |
 | Samsung TV (driver)        | Shipped  | Standalone driver/controller, not a multi-instance app type.  |
 
 Hubitat Safety Monitor (HSM) and a handful of hub-native pieces intentionally
@@ -98,7 +103,8 @@ stay on the hub.
 .
 ├── app.py                            # FastAPI entry point
 ├── apps/                             # app types (advanced_motion_lighting,
-│                                     #            fan_automation, samsung_tv)
+│                                     #            fan_automation, screen_time_planner,
+│                                     #            samsung_tv)
 ├── services/                         # transport + infra
 │   ├── hubitat_admin_client.py       #   primary transport (web-UI admin API)
 │   ├── hubitat_eventsocket_client.py #   live event ingress

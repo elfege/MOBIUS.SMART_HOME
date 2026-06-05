@@ -27,6 +27,7 @@ _MESH_SUFFIX_RE = re.compile(r" on Home \d+$")
 from models.event import DeviceEvent
 from services.instance_manager import get_instance_manager
 from services.device_cache import DeviceCache
+from services.supervised_tasks import supervised_spawn
 
 # ANSI colors for log output (matches Hubitat event log style)
 _CYAN = "\033[96m"     # device name
@@ -215,9 +216,14 @@ class WebhookRouter:
         if queue is None:
             queue = asyncio.Queue()
             self._instance_queues[instance_id] = queue
-            self._instance_workers[instance_id] = asyncio.create_task(
+            # Supervised spawn: a crash inside _instance_worker (e.g. a bug
+            # in master() of a specific app type) now surfaces as an ERROR
+            # log with the task name + traceback. Without supervision the
+            # worker would silently die and that instance would stop
+            # processing events.
+            self._instance_workers[instance_id] = supervised_spawn(
                 self._instance_worker(instance_id, queue),
-                name=f"instance_worker_{instance_id}"
+                name=f"instance_worker_{instance_id}",
             )
         return queue
 
@@ -479,10 +485,14 @@ class WebhookRouter:
                     "event_value": event_value
                 }
                 try:
-                    loop = asyncio.get_running_loop()
+                    # supervised_spawn keeps a strong ref so these
+                    # fire-and-forget broadcasts can't be GC-collected
+                    # mid-flight, and any failure surfaces as an ERROR
+                    # log line with the per-instance task name.
                     for inst_id in routed_to:
-                        loop.create_task(
-                            broadcaster.broadcast(inst_id, e2e_event)
+                        supervised_spawn(
+                            broadcaster.broadcast(inst_id, e2e_event),
+                            name=f"e2e-broadcast-inst{inst_id}",
                         )
                 except RuntimeError:
                     pass  # No event loop (shouldn't happen in FastAPI)
@@ -506,8 +516,11 @@ class WebhookRouter:
                     "event_value": event_value
                 }
                 try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(dash_broadcaster.broadcast(dash_event))
+                    # Supervised: dashboard broadcast fire-and-forget.
+                    supervised_spawn(
+                        dash_broadcaster.broadcast(dash_event),
+                        name="dash-broadcast",
+                    )
                 except RuntimeError:
                     pass
         except Exception:

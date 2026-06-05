@@ -79,6 +79,8 @@ import requests
 import websockets
 import websockets.exceptions
 
+from services.supervised_tasks import supervised_spawn
+
 logger = logging.getLogger(__name__)
 
 
@@ -326,10 +328,13 @@ class SamsungTVClient:
             self.config.name, self.config.tv_ip, self.config.mac_address, self._use_ssl
         )
 
-        self._connect_task = asyncio.create_task(
+        # Supervised: connect_loop and poll_loop are long-lived background
+        # tasks. A crash in either used to silently kill the task; now
+        # surfaces as ERROR with the task name.
+        self._connect_task = supervised_spawn(
             self._connect_loop(), name=f"tv_ws_{self.config.name}"
         )
-        self._poll_task = asyncio.create_task(
+        self._poll_task = supervised_spawn(
             self._poll_loop(), name=f"tv_poll_{self.config.name}"
         )
 
@@ -399,7 +404,8 @@ class SamsungTVClient:
             await self.send_key("KEY_POWER")
 
         # Step 3: Fast poll to detect TV boot (every 2 s, max 30 s).
-        asyncio.create_task(
+        # Supervised: fire-and-forget; no caller ref needed.
+        supervised_spawn(
             self._post_wol_poll(), name=f"tv_wol_poll_{self.config.name}"
         )
 
@@ -483,8 +489,13 @@ class SamsungTVClient:
                     self._conn_state = TVConnectionState.DISCONNECTED
                     self._connected_event.clear()
         # Fire conn change callback outside the lock to avoid holding it during I/O.
+        # Supervised: a crash in the callback (which lives in the blueprint)
+        # used to vanish silently — now surfaces as ERROR.
         if self._conn_state == TVConnectionState.DISCONNECTED and self._on_conn_change:
-            asyncio.create_task(self._fire_conn_change(TVConnectionState.DISCONNECTED))
+            supervised_spawn(
+                self._fire_conn_change(TVConnectionState.DISCONNECTED),
+                name=f"tv_fire_conn_change_disc_{self.config.name}",
+            )
 
             # WS not ready — enqueue and let the reconnect loop handle it.
             if self._cmd_queue.full():

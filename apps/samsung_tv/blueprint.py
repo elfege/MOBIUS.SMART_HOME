@@ -28,6 +28,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from services.supervised_tasks import supervised_spawn
+
 logger = logging.getLogger(__name__)
 
 router     = APIRouter(prefix="/samsung-tv", tags=["samsung-tv"])
@@ -427,8 +429,10 @@ async def tv_register(request: Request):
         callback_url, device_id, len(_hubitat_callbacks)
     )
     # Immediately push current state so the hub is in sync on registration.
+    # Supervised: fire-and-forget push; a crash inside push_state_changes
+    # would otherwise vanish silently (no caller awaits the task).
     client = _get_client()
-    asyncio.create_task(push_state_changes(client))
+    supervised_spawn(push_state_changes(client), name=f"tv_push_state_register_{device_id}")
     return {"ok": True, "registered": len(_hubitat_callbacks)}
 
 

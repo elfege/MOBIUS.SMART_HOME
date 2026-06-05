@@ -24,6 +24,7 @@ from pydantic import BaseModel
 # Used by every FastAPI route below that talks to PostgREST. See
 # services/http_sync_offload.py for the rationale and the 2026-05-27 incident.
 from services.http_sync_offload import aget, apost, apatch, adelete
+from services.supervised_tasks import supervised_spawn
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -2430,7 +2431,10 @@ async def run_test_scenario(instance_id: int, scenario_id: str):
         except Exception as e:
             logger.error(f"E2E scenario '{scenario_id}' failed: {e}", exc_info=True)
 
-    asyncio.create_task(run_in_background())
+    # Supervised: holds a strong ref so the background task can't be
+    # GC'd mid-execution before the HTTP response returns and the caller
+    # discards their scope.
+    supervised_spawn(run_in_background(), name=f"e2e_run_scenario_{scenario_id}")
     return {
         "message": f"Scenario '{scenario_id}' started",
         "instance_id": instance_id
@@ -2497,7 +2501,8 @@ async def run_all_test_scenarios(instance_id: int):
                     exc_info=True
                 )
 
-    asyncio.create_task(run_all())
+    # Supervised: see comment on the per-scenario callsite above.
+    supervised_spawn(run_all(), name=f"e2e_run_all_inst{instance_id}")
     return {"message": "All scenarios started", "instance_id": instance_id}
 
 

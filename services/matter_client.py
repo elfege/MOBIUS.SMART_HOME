@@ -29,6 +29,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import websockets
 import requests
 
+from services.supervised_tasks import supervised_spawn
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -184,7 +186,14 @@ class MatterClient:
                 close_timeout=5
             )
             self._connected = True
-            self._listen_task = asyncio.create_task(self._listen_loop())
+            # Supervised: matter-server WS listen loop, long-lived. A
+            # crash (typical cause: matter-server SDK upstream change,
+            # WS close in the middle of a frame) used to silently kill
+            # the listener and matter integration would stop responding.
+            # Now logs ERROR with the task name.
+            self._listen_task = supervised_spawn(
+                self._listen_loop(), name="matter_listen_loop"
+            )
             logger.info(f"Connected to matter-server at {self.url}")
             return True
         except Exception as e:

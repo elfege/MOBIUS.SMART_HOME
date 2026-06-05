@@ -15,7 +15,7 @@ without giving up local-only operation.
 | Advanced Motion Lighting   | v3.3.11     | 2.0.0       | Shipped  | Python port of the Hubitat Groovy app [Advanced Motion Lighting Management V2][aml-groovy] (same author): motion-driven control, memoization of user overrides, mode-specific timeouts/dim levels, illuminance gating, pause/resume. |
 | Fan Automation             | v3.3.11     | 1.0.0       | Shipped  | Temp/humidity-driven exhaust/ceiling-fan control with manual fan-level override switches and a post-override humidity-suppress window. |
 | Screen Time Planner        | v4.8.0      | 2.0.0       | Shipped  | TV allowed only inside daily time windows (per-day, cross-midnight aware). Turning it on outside a window is cut in real time; optional delayed cut of a secondary power switch, plus wake-on-power suppression for TVs that boot on mains restore. |
-| Samsung FastAPI router     | v3.3.11     | —           | Shipped  | Standalone FastAPI router + Jinja2 page mounted under `/samsung-tv` (Wake-on-LAN, WebSocket remote, token-paired SmartView). Not a multi-instance app type. |
+| Samsung FastAPI router     | v3.3.11     | —           | Shipped (single-TV) | Standalone FastAPI router + Jinja2 page mounted under `/samsung-tv`: Wake-on-LAN, WebSocket remote, token-paired SmartView. **Currently single-tenant** — one process-wide client, supports exactly one TV. IP/MAC/token come from env vars (`SAMSUNG_TV_IP` / `SAMSUNG_TV_MAC` / `SAMSUNG_TV_TOKEN`) and can be retargeted live via `POST /api/samsung-tv/configure`. Multi-TV support is a planned refactor (either promote to a real app type or registry-keyed routing). |
 
 Hubitat Safety Monitor (HSM) and a handful of hub-native pieces intentionally
 stay on the hub.

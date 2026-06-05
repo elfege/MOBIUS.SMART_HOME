@@ -427,6 +427,52 @@ def run_db_migrations():
         "GRANT SELECT, INSERT, UPDATE, DELETE ON system_boot_log TO smarthome_anon",
         "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO smarthome_anon",
 
+        # ====================================================================
+        # 2026-06-05 — Samsung TV multi-instance refactor (migration 009)
+        # Canonical: psql/migrations/009_samsung_tv_instances_multi_tv_refactor_per_instance_config_2026_06_05.sql
+        # Plan:      docs/plans/samsung_tv_multi_instance_refactor_per_instance_ip_mac_token_in_database.md
+        # Idempotent: safe to run every boot. Same per-row defaults as the
+        # canonical .sql so a fresh DB matches an upgraded one byte-for-byte.
+        # ====================================================================
+        """CREATE TABLE IF NOT EXISTS dsapp.samsung_tv_instances (
+            id              SERIAL PRIMARY KEY,
+            label           VARCHAR(120) NOT NULL,
+            tv_ip           VARCHAR(45)  NOT NULL,
+            mac_address     VARCHAR(17),
+            use_ssl         BOOLEAN      NOT NULL DEFAULT TRUE,
+            samsung_name    VARCHAR(120) NOT NULL DEFAULT 'mobius_smart_home',
+            app_name        VARCHAR(120) NOT NULL DEFAULT 'Smart Home Controller',
+            token           VARCHAR(64),
+            callbacks       JSONB        NOT NULL DEFAULT '{}'::jsonb,
+            is_enabled      BOOLEAN      NOT NULL DEFAULT TRUE,
+            is_paused       BOOLEAN      NOT NULL DEFAULT FALSE,
+            pause_reason    VARCHAR(50),
+            created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+            updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+            CONSTRAINT samsung_tv_instances_tv_ip_samsung_name_key
+                UNIQUE (tv_ip, samsung_name)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_samsung_tv_instances_enabled "
+        "ON dsapp.samsung_tv_instances (is_enabled) WHERE is_enabled",
+        # updated_at trigger — reuses the generic helper defined in init-db.sql.
+        "DROP TRIGGER IF EXISTS update_samsung_tv_instances_updated_at "
+        "ON dsapp.samsung_tv_instances",
+        "CREATE TRIGGER update_samsung_tv_instances_updated_at "
+        "BEFORE UPDATE ON dsapp.samsung_tv_instances "
+        "FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()",
+        # 1:1 PostgREST view in the `api` schema (same pattern as 007).
+        "CREATE OR REPLACE VIEW api.samsung_tv_instances AS "
+        "SELECT * FROM dsapp.samsung_tv_instances",
+        # Explicit grants (default privileges from migration 007 already
+        # cover this on a freshly-007'd DB, but kept here so an older
+        # snapshot upgrading directly to 009 still gets them).
+        "GRANT SELECT, INSERT, UPDATE, DELETE "
+        "ON dsapp.samsung_tv_instances TO smarthome_anon",
+        "GRANT SELECT, INSERT, UPDATE, DELETE "
+        "ON api.samsung_tv_instances   TO smarthome_anon",
+        "GRANT USAGE, SELECT "
+        "ON SEQUENCE dsapp.samsung_tv_instances_id_seq TO smarthome_anon",
+
         # Tell PostgREST to reload its schema cache. Without this, columns
         # added by ALTER TABLE above are invisible to PostgREST's OpenAPI
         # and POST/PATCH requests fail with PGRST204 "column does not exist".
@@ -491,6 +537,18 @@ async def lifespan(app: FastAPI):
         start_eventsocket, stop_eventsocket
     )
     await start_eventsocket()
+
+    # Samsung TV multi-instance registry — replaces the env-driven single-
+    # tenant client. Spawns one SamsungTVClient per enabled row in
+    # dsapp.samsung_tv_instances. On the very first boot after migration 009
+    # with no rows yet, runs the env→DB importer so the legacy single TV
+    # becomes row id 1 automatically. See:
+    #   services/samsung_tv_registry.py
+    #   docs/plans/samsung_tv_multi_instance_refactor_per_instance_ip_mac_token_in_database.md
+    from services.samsung_tv_registry import (
+        start_samsung_tv_registry, stop_samsung_tv_registry,
+    )
+    await start_samsung_tv_registry()
 
     # Reconcile poll — safety net for the WS-only intake. Polls /devices/all
     # per hub every 60s (10s in aggressive mode after a recent WS failure),
@@ -692,7 +750,14 @@ async def lifespan(app: FastAPI):
     await stop_eventsocket()
     await stop_reconcile_poll()
 
-    # Stop Samsung TV client cleanly
+    # Stop Samsung TV multi-instance registry — tears down every per-row
+    # client cleanly. Symmetric with start_samsung_tv_registry above.
+    await stop_samsung_tv_registry()
+
+    # Stop the legacy single-tenant Samsung TV client. Coexists with the
+    # registry today: the registry handles /samsung-tv/<id>/* routes; the
+    # legacy client backs the bare /samsung-tv/* routes until the cutover
+    # step (see plan §4.7 step 6). At that point this block disappears.
     await _tv_client.stop()
 
     logger.info("Shutting down...")
@@ -724,6 +789,13 @@ app.include_router(motion_router)
 
 from apps.samsung_tv.blueprint import router as samsung_tv_router  # noqa: E402
 app.include_router(samsung_tv_router)
+
+# Multi-instance Samsung TV router (mounts at /samsung-tv/<id>/* etc.).
+# Coexists with the legacy single-tenant router above; routes don't
+# collide because the new ones are all parameterized with {instance_id}.
+# See docs/plans/samsung_tv_multi_instance_refactor_per_instance_ip_mac_token_in_database.md
+from apps.samsung_tv.instance_router import router as samsung_tv_instance_router  # noqa: E402
+app.include_router(samsung_tv_instance_router)
 
 
 # =============================================================================

@@ -275,6 +275,10 @@ strip_files = {
     b"claude_rules.txt",
     b"file_history.txt",
     b"tree.txt",
+    # .gitignore lists private paths (docs/patent/, .hubitat/, backups/,
+    # _SYNCAPP/, postgres_data/, ...) — stripping it keeps the public mirror
+    # from advertising the private structure. Stays tracked in the dev repo.
+    b".gitignore",
 }
 strip_prefixes = (
     b"docs/README_investigation_",

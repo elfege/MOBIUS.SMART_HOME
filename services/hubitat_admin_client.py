@@ -35,6 +35,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from services.circuit_breaker import get_breaker, CircuitBreakerOpen
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,6 +68,16 @@ class HubitatAdminClient:
         # Cache the no-auth state: we try unauthenticated first; if anything
         # 401s we flip to "needs auth" and call _login.
         self._needs_auth = bool(username and password)
+        # Per-hub circuit breaker. Trips after 5 consecutive request failures
+        # within 60s; cools down 30s before letting a probe through. Each hub
+        # has its own breaker so hub_72 degrading doesn't open hub_69's.
+        # Observable via the future /api/health/breakers endpoint.
+        self._breaker = get_breaker(
+            f"hubitat:{hub_ip}",
+            fail_threshold=5,
+            reset_timeout_secs=30.0,
+            fail_window_secs=60.0,
+        )
 
     # ---------------- core ----------------
 
@@ -101,20 +113,51 @@ class HubitatAdminClient:
         return False
 
     def _request(self, method: str, path: str, **kw) -> requests.Response:
-        """One-time-retry-on-401 request wrapper."""
+        """One-time-retry-on-401 request wrapper, gated by the per-hub
+        circuit breaker.
+
+        Breaker semantics:
+          - A failed call (any exception) increments the failure count.
+            After 5 consecutive failures within 60s the breaker opens.
+          - While OPEN, this method raises CircuitBreakerOpen instead of
+            hitting the hub. Callers can catch it and fall back to
+            cached state, or surface the degradation upstream.
+          - A 401 that triggers a retry-with-login is NOT counted as a
+            failure in the breaker — only the OUTER call's outcome
+            matters (the breaker sees one successful response after
+            the re-login).
+
+        We pass the wrapped lambda into call_sync so the breaker also
+        catches exceptions from the underlying requests library (read
+        timeouts, ConnectionError, etc.) — those ARE the failure modes
+        we're protecting against.
+        """
         url = f"{self.base_url}{path}"
-        with self._lock:
-            kw.setdefault("timeout", self.timeout)
-            r = self._session.request(method, url, **kw)
-            if r.status_code == 401 and self._needs_auth and not self._authed:
-                if self._login():
-                    r = self._session.request(method, url, **kw)
-            elif r.status_code == 401 and self._needs_auth:
-                # Cookie may have expired — try re-login once
-                self._authed = False
-                if self._login():
-                    r = self._session.request(method, url, **kw)
-            return r
+
+        def _do_request() -> requests.Response:
+            with self._lock:
+                kw.setdefault("timeout", self.timeout)
+                r = self._session.request(method, url, **kw)
+                if r.status_code == 401 and self._needs_auth and not self._authed:
+                    if self._login():
+                        r = self._session.request(method, url, **kw)
+                elif r.status_code == 401 and self._needs_auth:
+                    # Cookie may have expired — try re-login once
+                    self._authed = False
+                    if self._login():
+                        r = self._session.request(method, url, **kw)
+                # Treat 5xx as a failure for breaker purposes: raise so
+                # call_sync increments the failure count. The caller's
+                # try/except still sees the raised RuntimeError; if the
+                # caller wants to inspect the original response.status_code
+                # it can catch CircuitBreakerOpen separately.
+                if 500 <= r.status_code < 600:
+                    raise RuntimeError(
+                        f"hubitat {self.hub_name} {method} {path} -> {r.status_code}"
+                    )
+                return r
+
+        return self._breaker.call_sync(_do_request)
 
     # ---------------- public API ----------------
 

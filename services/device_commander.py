@@ -46,6 +46,7 @@ from models.command import (
     resolve_expected_state,
 )
 from services.hubitat_client import HubitatClient
+from services.supervised_tasks import supervised_spawn
 
 
 # Module-level logger
@@ -976,7 +977,15 @@ class DeviceCommander:
                             f"{exc}"
                         )
 
-                loop.create_task(_matter_fire_and_forget())
+                # Supervised: a crash inside _matter_fire_and_forget
+                # (e.g. matter-server SDK quirk on a specific node) used
+                # to vanish silently. Now logs ERROR with the per-device
+                # task name so the operator knows WHICH device's matter
+                # dispatch died.
+                supervised_spawn(
+                    _matter_fire_and_forget(),
+                    name=f"matter_dispatch_dev{device_id}",
+                )
                 logger.debug(
                     f"Matter dual-command dispatched for device {device_id}: "
                     f"node={mapping['matter_node_id']}, cmd={command}"

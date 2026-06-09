@@ -73,6 +73,12 @@ def initialize_registry(instance_manager=None) -> None:
     from apps.screen_time_planner.app import ScreenTimePlannerApp
     register_app_type(ScreenTimePlannerApp)
 
+    # Power Management — avg-watts threshold cutoff for breaker-overload
+    # protection (pool pumps, EV chargers, dryers, etc.). Optional
+    # dry-run detection (low-threshold) gated on pump HP + rated watts.
+    from apps.power_management.app import PowerManagementApp
+    register_app_type(PowerManagementApp)
+
     # Register with instance manager if provided
     if instance_manager:
         for type_name, app_class in _app_types.items():

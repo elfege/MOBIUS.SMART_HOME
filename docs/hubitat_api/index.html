@@ -11,15 +11,38 @@
     <nav class="breadcrumb"><a href="../index.html">Project Docs</a> &raquo; Hubitat API</nav>
 
     <h1>Hubitat API Documentation</h1>
-    <p class="last-updated">Reference documentation for the Hubitat Maker API and device ecosystem.<br>Compiled February 2026.</p>
+    <p class="last-updated">
+        Reference documentation for both Hubitat APIs that MOBIUS.SMART_HOME uses: the
+        <strong>Admin API</strong> (primary transport) and the <strong>Maker API</strong> (opt-in fallback).
+        Maker docs compiled February 2026; Admin docs added June 2026 against firmware
+        <strong>2.5.0.143</strong> (C-8).
+    </p>
 
     <div class="card-grid">
+        <div class="card">
+            <h3><a href="admin_api_reference.html">Admin API Reference</a></h3>
+            <p>
+                The hub's own web-UI API &mdash; our <strong>primary</strong> transport for commands
+                and device polling. Auth via session cookie, no per-device opt-in, richer device
+                data. Covers <code>/device/list/data</code>, <code>/device/fullJson/&lt;id&gt;</code>,
+                <code>/device/runmethod</code> (both contracts), <code>/hub2/hubData</code>,
+                <code>/device/updateLabel</code>, the eventsocket, contract-watch heartbeat,
+                Hub-Mesh dedup, and known quirks.
+            </p>
+            <span class="tag">Primary</span>
+            <span class="tag">Admin&nbsp;API</span>
+            <span class="tag">Eventsocket</span>
+            <span class="tag">Hub&nbsp;Mesh</span>
+        </div>
+
         <div class="card">
             <h3><a href="maker_api_reference.html">Maker API Reference</a></h3>
             <p>
                 Complete endpoint reference: device discovery, command execution, attributes,
                 events, modes, HSM, hub variables, webhook configuration, and event payload format.
+                Used as an opt-in fallback today.
             </p>
+            <span class="tag">Fallback</span>
             <span class="tag">Endpoints</span>
             <span class="tag">Webhooks</span>
             <span class="tag">Authentication</span>

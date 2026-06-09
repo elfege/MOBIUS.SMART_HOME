@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hubitat Admin API Reference - 0_MOBIUS.SMART_HOME</title>
+    <link rel="stylesheet" href="hubitat_docs.css">
+</head>
+<body>
+<div class="container">
+    <nav class="breadcrumb"><a href="index.html">Hubitat API Docs</a> &raquo; Admin API Reference</nav>
+
+    <h1>Hubitat Admin API Reference</h1>
+    <p class="last-updated">
+        Compiled June 2026 against Hubitat firmware <strong>2.5.0.143</strong> (C-8).
+        Endpoints reverse-engineered from the hub&rsquo;s own Vue UI
+        (<code>/ui2/js/vue-hub2.min.js</code>) and confirmed against live hubs in
+        the MOBIUS.SMART_HOME fleet.
+    </p>
+    <p>
+        The <strong>admin API</strong> is what Hubitat&rsquo;s own web UI uses to talk to
+        the hub. It is undocumented but stable, and used in the community for years. In
+        MOBIUS.SMART_HOME it has replaced the Maker API as the <em>primary</em>
+        transport for both outbound commands and device polling. Maker API is supported
+        as an opt-in fallback.
+    </p>
+
+    <h2 id="why">Why Admin over Maker</h2>
+    <table>
+        <thead><tr><th>Concern</th><th>Maker API</th><th>Admin API</th></tr></thead>
+        <tbody>
+            <tr>
+                <td>Per-device opt-in</td>
+                <td>Every device must be explicitly enabled in the Maker app on the hub. New devices silently invisible until you remember to add them.</td>
+                <td>None. All devices visible to all callers as long as they can authenticate (or the hub is open).</td>
+            </tr>
+            <tr>
+                <td>Event forwarding firmware regression risk</td>
+                <td>Maker silently de-arms event forwarding for individual devices across firmware updates and Maker re-saves (witnessed 2026-05-16 on the Living motion sensors).</td>
+                <td>Events come via the <a href="#eventsocket">eventsocket</a> WebSocket, not Maker. No silent opt-out.</td>
+            </tr>
+            <tr>
+                <td>Device richness</td>
+                <td><code>{id, label, attributes:[{name,currentValue}]}</code></td>
+                <td>Full device dict: preferences, driver name, mesh status, last-activity, parent links, room assignment, capabilities, commands, dashboards using it, apps using it.</td>
+            </tr>
+            <tr>
+                <td>Round-trip latency</td>
+                <td>Maker handler is a Groovy app processing each request &mdash; adds 50&ndash;250&nbsp;ms over the wire.</td>
+                <td>Hits the hub&rsquo;s internal request pipeline directly &mdash; closer to web-UI latency.</td>
+            </tr>
+            <tr>
+                <td>Token in URL</td>
+                <td>Every request includes the access token in the query string &mdash; leaked in logs and process listings.</td>
+                <td>Session cookie after a one-shot POST <code>/login</code>. No per-request secret in the URL.</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2 id="base-url">Base URL</h2>
+    <div class="code-block"><pre>http://[HUB_IP]/[ENDPOINT]</pre></div>
+    <p>
+        No path prefix, no port qualifier, no token. The hub serves the admin endpoints
+        from the root on port 80. HTTPS is not enabled on the hub by default.
+    </p>
+
+    <h2 id="auth">Authentication</h2>
+    <p>
+        Two modes &mdash; the client probes for the second only after a 401:
+    </p>
+    <ol>
+        <li>
+            <strong>Open hub.</strong> If the hub has no login password set under
+            Settings &rsaquo; Hub Login Security, requests work unauthenticated. This
+            is the operator&rsquo;s default state today.
+        </li>
+        <li>
+            <strong>Password hub.</strong> The web UI authenticates via a form POST to
+            <code>/login</code>. The server sets a session cookie; subsequent requests
+            include it. The client persists the cookie in a <code>requests.Session</code>
+            and re-logins automatically on 401 or 302&rarr;<code>/login</code>.
+        </li>
+    </ol>
+
+    <h3 id="auth-login">POST /login</h3>
+    <table>
+        <thead><tr><th>Header / field</th><th>Value</th></tr></thead>
+        <tbody>
+            <tr><td>Content-Type</td><td><code>application/x-www-form-urlencoded</code></td></tr>
+            <tr><td><code>username</code></td><td>Admin username</td></tr>
+            <tr><td><code>password</code></td><td>Admin password</td></tr>
+            <tr><td><code>submit</code></td><td><code>Login</code> (sentinel the form expects)</td></tr>
+        </tbody>
+    </table>
+    <p><strong>Responses:</strong></p>
+    <ul>
+        <li><code>302 Found</code> with <code>Set-Cookie: JSESSIONID=&hellip;</code> &mdash; <strong>success.</strong> The redirect target is <code>/</code>; the client must NOT follow it (callers pass <code>allow_redirects=False</code>) or the cookie is overwritten before it can be captured.</li>
+        <li><code>200 OK</code> re-rendering the login form &mdash; bad credentials. Some firmware versions still set a cookie here; it is not valid.</li>
+    </ul>
+
+    <h3 id="auth-credentials">Credential resolution (this codebase)</h3>
+    <p>The client resolves <code>(username, password)</code> in this order:</p>
+    <ol>
+        <li><code>hub_config.admin_username</code> + <code>hub_config.admin_password</code> &mdash; populated by the operator via the <code>/hubs</code> settings page.</li>
+        <li>Environment variables <code>HUBITAT_ADMIN_USER_&lt;n&gt;</code> / <code>HUBITAT_ADMIN_PASSWORD_&lt;n&gt;</code> where <code>&lt;n&gt; = hub_config.admin_creds_index</code> &mdash; populated by <code>pull_aws_secrets HUBITAT</code> at boot.</li>
+        <li><code>(None, None)</code> &mdash; correct for an open hub (default state).</li>
+    </ol>
+    <p>Empty strings are treated as &ldquo;no credential&rdquo; on both layers; <code>pull_aws_secrets</code> exports every key in the secret including empties, and the bash equivalent uses <code>[[ -n "$VAR" ]]</code>.</p>
+
+    <!-- ================================================================== -->
+    <h2 id="endpoints-used">Endpoints used in this codebase</h2>
+
+    <h3 id="device-list-data">GET /device/list/data</h3>
+    <p>Lightweight list of every device the hub knows about, with metadata but <strong>without</strong> per-attribute <code>currentStates</code>.</p>
+    <p><strong>Use case:</strong> initial device discovery, hub-mesh classification, the <code>linkedDevice</code>/primary-hub dedup pass.</p>
+    <p><strong>Authentication:</strong> session cookie (if hub has a password) or none.</p>
+    <p><strong>Response (real shape, abbreviated to one device):</strong></p>
+    <div class="response-example"><pre>[
+  {
+    "id": 3663,
+    "name": "AC BEDROOM JESSICA on Home 3",
+    "displayName": "AC BEDROOM JESSICA",
+    "label": "AC BEDROOM JESSICA",
+    "deviceTypeName": "Midea AC local controller",
+    "deviceTypeReadableType": "Linked",
+    "deviceTypeId": 2883,
+    "deviceNetworkId": "597417a1-895c-41ce-bb55-6051c5313bc6-180",
+    "type": "link",
+    "linkedDevice": true,
+    "meshEnabled": false,
+    "isComponent": "false",
+    "parentDeviceId": null,
+    "hasChildren": false,
+    "children": null,
+    "displayAsChild": false,
+    "zigbeeId": null,
+    "lanId": null,
+    "hubId": 1,
+    "locationId": 1,
+    "locationName": "Home 2",
+    "hubName": "Home 2",
+    "roomId": 0,
+    "roomAssigned": false,
+    "deviceRoomName": null,
+    "status": "ACTIVE",
+    "disabled": false,
+    "createTime": "2022-06-12T20:15:20+0000",
+    "lastActivityTime": "2026-06-07T05:59:46+0000"
+  },
+  &hellip;
+]</pre></div>
+
+    <h4 id="device-list-data-fields">Fields worth knowing</h4>
+    <table>
+        <thead><tr><th>Field</th><th>Meaning</th><th>Used in this code as</th></tr></thead>
+        <tbody>
+            <tr><td><code>id</code></td><td>Per-hub Hubitat device ID</td><td><code>hubitat_id</code> on <code>devices</code> table</td></tr>
+            <tr><td><code>label</code></td><td>User-facing name (the rename target for <code>set_device_label</code>)</td><td><code>label</code> on <code>devices</code></td></tr>
+            <tr><td><code>name</code></td><td>The Hub-Mesh-rewritten name (e.g. "Fan Bathroom on Home 2")</td><td><code>name</code> on <code>devices</code> &mdash; <a href="#mesh-suffix">see Hub-Mesh suffix</a></td></tr>
+            <tr><td><code>type</code></td><td><code>"link"</code> for mesh-linked, otherwise driver-specific</td><td>signals linked-device pruning</td></tr>
+            <tr><td><code>linkedDevice</code></td><td><code>true</code> if this is a mirror from another hub via Hub Mesh</td><td><strong>primary key</strong> for the dedup decision (the classifier drops mirrors before they reach the canonical table)</td></tr>
+            <tr><td><code>meshEnabled</code></td><td><code>true</code> if the device is shared OUT via Hub Mesh</td><td>cross-checked against <code>linkedDevice</code> for the primary-hub election</td></tr>
+            <tr><td><code>deviceTypeReadableType</code></td><td>e.g. <code>"Linked"</code>, <code>"Zigbee"</code>, <code>"Z-Wave"</code>, <code>"LAN"</code>, <code>"Virtual"</code></td><td><code>protocol</code> on <code>devices</code></td></tr>
+            <tr><td><code>hubId</code></td><td>Numeric local hub id (<strong>NOT</strong> the canonical hub from <code>hub_config</code>)</td><td>cross-checked against <code>hub_config.id</code></td></tr>
+            <tr><td><code>locationName</code> / <code>hubName</code></td><td>The user-set hub name; the suffix Hub Mesh appends to linked-device labels (&ldquo;Fan Bathroom on <em>Home 2</em>&rdquo;)</td><td><a href="#mesh-suffix">stripped by <code>device_name_normalizer</code></a></td></tr>
+            <tr><td><code>disabled</code></td><td><code>true</code> if the device is admin-disabled in the hub UI</td><td>respected by the classifier</td></tr>
+        </tbody>
+    </table>
+
+    <h3 id="device-fulljson">GET /device/fullJson/&lt;id&gt;</h3>
+    <p>Full state for a single device &mdash; preferences, driver, every command, every attribute&rsquo;s current value, apps consuming it, and dashboard widgets using it. Pricier per call than the Maker bulk endpoint, but ours-style code only fetches the devices we actually need state for.</p>
+    <p><strong>Use case:</strong> command verification, capability discovery, the reconcile poll&rsquo;s per-subscribed-device sweep.</p>
+    <p><strong>Response shape (top-level keys we read):</strong></p>
+    <div class="response-example"><pre>{
+  "device": {
+    "id": 2781,
+    "label": "Fan Bathroom",
+    "displayName": "Fan Bathroom",
+    "name": "GE Smart Fan Control",
+    "deviceTypeName": "GE Smart Fan Control",
+    "currentStates": {
+      "switch": { "name": "switch", "value": "on", "stringValue": "on", "dataType": "ENUM" },
+      "level":  { "name": "level",  "value": 65,   "stringValue": "65", "dataType": "NUMBER" },
+      "speed":  { "name": "speed",  "value": "medium", "dataType": "ENUM" }
+    },
+    "commands": [
+      { "name": "on",        "capability": true, "arguments": null, "parameters": null },
+      { "name": "off",       "capability": true, "arguments": null, "parameters": null },
+      { "name": "setLevel",  "capability": true, "arguments": null, "parameters": [{ "type": "NUMBER", "name": "level" }] },
+      &hellip;
+    ],
+    "capabilities": ["Switch", "SwitchLevel", "FanControl", "Refresh", "Configuration"],
+    "preferences": { &hellip; },
+    "appsUsingForDialog": [
+      { "id": 1530, "label": "HUMIDITY MANAGEMENT BATHROOM", "name": "HUMIDITY MANAGEMENT", "disabled": true },
+      &hellip;
+    ]
+  }
+}</pre></div>
+    <p><strong>Shape gotcha:</strong> <code>currentStates</code> here is a <strong>dict</strong> keyed by attribute name. The Maker API returns it as a <strong>list</strong> <code>[{name, currentValue}, &hellip;]</code>. The codebase calls <code>to_maker_shape()</code> to normalize, otherwise downstream <code>extract_attribute()</code> finds nothing and command verification silently breaks (live-fixed 2026-05-26 after the firmware contract flip).</p>
+
+    <h3 id="device-runmethod">POST /device/runmethod &mdash; command execution</h3>
+    <p>The endpoint that fires commands. <strong>Two firmware contracts</strong> in the wild &mdash; the client tries the modern one first and falls back to the legacy one on transport rejection.</p>
+
+    <h4 id="runmethod-json">Current contract (firmware 2.5.0.x JSON)</h4>
+    <table>
+        <thead><tr><th>Header / field</th><th>Value</th></tr></thead>
+        <tbody>
+            <tr><td>Content-Type</td><td><code>application/json</code></td></tr>
+            <tr><td>Body</td><td><code>{"id": &lt;device_id&gt;, "method": "&lt;command&gt;", "args": [&hellip;]}</code></td></tr>
+        </tbody>
+    </table>
+    <p>The <code>args</code> array is a list of typed entries:</p>
+    <div class="code-block"><pre>// no argument
+"args": []
+
+// numeric argument (e.g. setLevel(50))
+"args": [{ "type": "NUMBER", "value": 50 }]
+
+// string argument
+"args": [{ "type": "STRING", "value": "medium" }]</pre></div>
+    <p>The client&rsquo;s <code>_build_runmethod_args()</code> infers the type from the value: integral numerics become <code>NUMBER</code>/int, fractional numerics become <code>NUMBER</code>/float, anything non-numeric becomes <code>STRING</code>. Hubitat coerces within reason but sending the right type avoids parameter-binding surprises.</p>
+    <p><strong>Successful response:</strong> <code>HTTP 200</code> with JSON body <code>{"success": true}</code> (or a richer envelope &mdash; we only check <code>success</code>).</p>
+    <p><strong>Command failure</strong> (the device rejected it, e.g. unknown command, bad arg type): <code>HTTP 200</code> with <code>{"success": false}</code>. <em>Not</em> a transport failure &mdash; the client returns <code>(ok=False, transport_failed=False)</code> and does NOT retry with the legacy contract.</p>
+
+    <h4 id="runmethod-form">Legacy contract (older firmware, form-urlencoded)</h4>
+    <table>
+        <thead><tr><th>Header / field</th><th>Value</th></tr></thead>
+        <tbody>
+            <tr><td>Content-Type</td><td><code>application/x-www-form-urlencoded</code></td></tr>
+            <tr><td><code>id</code></td><td>Device ID</td></tr>
+            <tr><td><code>method</code></td><td>Command name</td></tr>
+            <tr><td><code>arg</code> + <code>value</code></td><td>Optional argument; same value goes into both fields</td></tr>
+        </tbody>
+    </table>
+    <p>Used only as a fallback. A hub on the JSON contract rejects this with a transport error and the client doesn&rsquo;t retry beyond one attempt per contract.</p>
+
+    <h4 id="runmethod-flip">Contract flip detection (the 2026-05-26 incident)</h4>
+    <p>Firmware 2.5.0.x changed this endpoint from form-urlencoded to JSON with <strong>no backward compatibility</strong>. A hub that receives the wrong body type answers with a bare <code>HTTP 500 "Server error"</code> &mdash; not a 415 &mdash; so the surface symptom is &ldquo;every command fails verification with got=None&rdquo; rather than an obvious content-type error.</p>
+    <p>Our <code>send_command()</code> tries JSON first, sees a 4xx/5xx, retries form-urlencoded once, and records which one worked. <a href="#contract-watch">The contract-watch service</a> probes a no-arg <code>refresh</code> on a known device periodically and writes the verdict to <code>hub_health</code> so the dashboard surfaces a contract flip the moment it happens.</p>
+
+    <h4 id="runmethod-response-interpretation">Response interpretation table</h4>
+    <table>
+        <thead><tr><th>HTTP</th><th>Body</th><th>Verdict</th><th>Action</th></tr></thead>
+        <tbody>
+            <tr><td>200&ndash;399</td><td><code>{"success": true}</code> (or no JSON envelope)</td><td>OK</td><td>none</td></tr>
+            <tr><td>200&ndash;399</td><td><code>{"success": false}</code></td><td>Command failure</td><td>log, do NOT fall back</td></tr>
+            <tr><td>&ge; 400</td><td>any</td><td>Transport failure (wrong contract)</td><td>fall back to the other encoding once</td></tr>
+        </tbody>
+    </table>
+
+    <h3 id="hub2-hubdata">GET /hub2/hubData</h3>
+    <p>Hub-level metadata. Used in this codebase for two purposes: reading the hub&rsquo;s location name (for Hub-Mesh suffix stripping) and pulling the platform version (for the contract-watch heartbeat).</p>
+    <p><strong>Response (real, abbreviated):</strong></p>
+    <div class="response-example"><pre>{
+  "hubId":     "e8be828f-67cd-4610-8d12-1831bf064031",
+  "ipAddress": "<LAN_IP>",
+  "version":   "2.5.0.143",
+  "model":     "C-8",
+  "name":      "Home 2",
+  "locationName": "Home 2",
+  "alerts": {
+    "hubLoadElevated": false,
+    "hubLoadSevere":   false,
+    "hubLowMemory":    false,
+    "zwaveOffline":    false,
+    "zigbeeOffline":   false,
+    "platformUpdateAvailable": true,
+    "platformUpdateVersion": "&hellip;",
+    &hellip;
+  }
+}</pre></div>
+    <p><strong>Fields we use:</strong></p>
+    <ul>
+        <li><code>locationName</code> (or <code>name</code> as fallback) &mdash; what Hub Mesh appends to linked-device labels as &ldquo; on &lt;name&gt;&rdquo;.</li>
+        <li><code>version</code> &mdash; firmware version. The contract-watch service stamps this on <code>hub_health.platform_version</code> on every check.</li>
+        <li><code>alerts.*</code> &mdash; the same flags the hub&rsquo;s own dashboard shows. Worth surfacing in a future hub-health widget.</li>
+    </ul>
+
+    <h3 id="device-updatelabel">GET /device/updateLabel</h3>
+    <p>Rename a device on the hub. Used by <code>device_name_normalizer</code> for the strip-trailing-&ldquo;on&nbsp;&lt;hub&gt;&rdquo; pass on Hub-Mesh linked labels.</p>
+    <p><strong>Endpoint (verbatim, from the hub&rsquo;s own Vue UI):</strong></p>
+    <div class="code-block"><pre>fetch("/device/updateLabel?" + new URLSearchParams({deviceId, label}))
+  .then(r => r.json())
+  .then(r => { r === true &amp;&amp; cb() })</pre></div>
+    <p>A <code>GET</code> with query params <code>deviceId</code> and <code>label</code>. The hub replies with the JSON literal <code>true</code> on success. Same call the web UI fires on a manual rename, so it persists exactly like one.</p>
+    <p><strong>Note:</strong> takes the device&rsquo;s per-hub Hubitat id, not our canonical PK.</p>
+
+    <!-- ================================================================== -->
+    <h2 id="eventsocket">Eventsocket (WebSocket event stream)</h2>
+    <p>Not strictly part of the admin REST API, but the same endpoint family &mdash; the hub exposes a raw WebSocket at <code>ws://&lt;HUB_IP&gt;/eventsocket</code> that emits every device event the hub processes, regardless of any per-device Maker-API opt-in.</p>
+    <p><strong>Replaces:</strong> the Maker-API HTTP webhook intake. Maker webhook is the path that silently de-armed itself for individual devices in the 2026-05-16 Living-motion incident. The eventsocket has no per-device opt-in to lose.</p>
+    <p><strong>Frame shape (real, switch event):</strong></p>
+    <div class="response-example"><pre>{
+  "source":  "DEVICE",
+  "name":    "switch",
+  "value":   "on",
+  "type":    "physical",
+  "unit":    null,
+  "data":    null,
+  "deviceId": "2781",
+  "displayName": "Fan Bathroom",
+  "descriptionText": null
+}</pre></div>
+    <p><strong>Two source types we consume:</strong></p>
+    <ul>
+        <li><code>DEVICE</code> &mdash; per-device state events. Routed to subscribed app instances via the webhook router.</li>
+        <li><code>LOCATION</code> &mdash; hub-level events. Only the <code>mode</code> events are routed (to <code>route_mode_change</code>). Sunset/sunrise/etc. are skipped.</li>
+    </ul>
+    <p>Everything else (<code>APP_STATUS</code>, <code>HUB_INFO</code>) is dropped at the WS drain.</p>
+    <p><strong>physical vs digital:</strong> the <code>type</code> field distinguishes events caused by physical interaction (<code>physical</code>) from events caused by a command we (or another app) issued (<code>digital</code>). <span class="warning">Apps subscribing to the same device&rsquo;s switch event must NOT re-issue a command on every event &mdash; doing so creates a self-feedback loop at the hub roundtrip rate (the 2026-06-05 Fan Bathroom storm). The framework now skips auto-subscription for pure-output categories; see <code>services/instance_manager.py::category_events</code>.</span></p>
+    <p><strong>Reliability:</strong> the eventsocket WS does not heartbeat the way the hub UI would &mdash; <code>ws.open == True</code> is not proof events are flowing. Our client adds a 120&nbsp;s data-flow watchdog that recycles the connection if no event arrives. Reset of the exponential backoff happens on first data, not on first connect.</p>
+
+    <!-- ================================================================== -->
+    <h2 id="other-endpoints">Other endpoints worth knowing (not used yet)</h2>
+    <p>These are visible in the Vue UI source and are stable in community use. They are not wired in this codebase today; documented here so a future feature can grab the right one without re-discovery.</p>
+    <table>
+        <thead><tr><th>Endpoint</th><th>Purpose</th></tr></thead>
+        <tbody>
+            <tr><td><code>GET /device/eventsJson/&lt;id&gt;</code></td><td>Recent events for one device (the hub&rsquo;s own Events tab). Useful for forensic replay.</td></tr>
+            <tr><td><code>GET /installedapp/list</code></td><td>List installed Groovy apps (id, name, label, paused, installedType).</td></tr>
+            <tr><td><code>GET /installedapp/list/data</code></td><td>Same but with richer per-app metadata.</td></tr>
+            <tr><td><code>POST /installedapp/&lt;id&gt;/configure</code></td><td>Update a Groovy app&rsquo;s settings (the page the user lands on when they click an app).</td></tr>
+            <tr><td><code>POST /installedapp/&lt;id&gt;/disable</code> / <code>/enable</code></td><td>Disable/enable a Groovy app. (Manually used 2026-06-05 to kill the offending Motion Bathroom V2 that caused the round-1 storm.)</td></tr>
+            <tr><td><code>GET /location/list/data</code></td><td>Locations &amp; their modes.</td></tr>
+            <tr><td><code>POST /location/setMode</code></td><td>Programmatically change location mode.</td></tr>
+            <tr><td><code>GET /driver/list/data</code></td><td>Installed device drivers.</td></tr>
+            <tr><td><code>GET /hub/zigbeeInfo</code> / <code>/hub/zwaveInfo</code></td><td>Mesh-level health (excluded devices, weak links).</td></tr>
+            <tr><td><code>POST /device/&lt;id&gt;/disable</code> / <code>/enable</code></td><td>Disable/enable a device without deleting it.</td></tr>
+            <tr><td><code>POST /device/&lt;id&gt;/delete</code></td><td>Hard-delete a device (mirrors the &ldquo;Remove Device&rdquo; button).</td></tr>
+        </tbody>
+    </table>
+
+    <!-- ================================================================== -->
+    <h2 id="defensive">Defensive layers in this codebase</h2>
+
+    <h3 id="circuit-breaker">Circuit breaker per hub</h3>
+    <p>Every <code>HubitatAdminClient</code> wraps every request through a per-hub circuit breaker (<code>hubitat:&lt;hub_ip&gt;</code>). Trips after 5 consecutive request failures within 60&nbsp;s, cools down 30&nbsp;s before letting a probe through. While OPEN, the client raises <code>CircuitBreakerOpen</code> instead of hitting the hub &mdash; callers fall back to cached state or surface the degradation. Observability: <code>GET /api/health/breakers</code> on this app.</p>
+    <p>Key rules:</p>
+    <ul>
+        <li>Any exception from the underlying <code>requests</code> call counts as a failure.</li>
+        <li><code>HTTP 5xx</code> is converted to an exception by the client wrapper so the breaker counts it.</li>
+        <li>A 401-then-re-login does NOT count &mdash; only the outer call&rsquo;s final outcome matters.</li>
+    </ul>
+
+    <h3 id="contract-watch">Contract-watch heartbeat</h3>
+    <p>The <code>services/hub_contract_watch.py</code> service polls <code>/hub2/hubData</code> (for the firmware version) and calls <code>HubitatAdminClient.probe_command_path()</code> on every hub on a schedule. Writes the verdict to <code>hub_health</code>:</p>
+    <table>
+        <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+        <tbody>
+            <tr><td><code>platform_version</code></td><td>e.g. <code>"2.5.0.143"</code></td></tr>
+            <tr><td><code>command_path_ok</code></td><td><code>true</code> / <code>false</code> &mdash; did SOME contract accept a no-arg <code>refresh</code>?</td></tr>
+            <tr><td><code>command_path_contract</code></td><td><code>"json"</code> / <code>"form"</code> / <code>"none"</code></td></tr>
+            <tr><td><code>command_path_checked_at</code></td><td>Timestamp of the last probe</td></tr>
+            <tr><td><code>command_path_error</code></td><td>Body snippet from the last failing call (for diagnosis)</td></tr>
+        </tbody>
+    </table>
+    <p>The hubs page surfaces this as a green / amber / red badge on each hub card.</p>
+
+    <h3 id="mesh-suffix">Hub-Mesh suffix &amp; dedup</h3>
+    <p>Hub Mesh appends &ldquo; on &lt;hub_name&gt;&rdquo; to <code>name</code> on every linked-device row. Two consequences:</p>
+    <ol>
+        <li>The same physical device shows up once per hub that has it shared (1 native + N mirrors). The <code>device_to_hubs_classifier</code> uses <code>linkedDevice</code> to drop mirrors before they reach the canonical <code>devices</code> table.</li>
+        <li>The label as the user sees it ends up with the suffix on the mirrors. <code>device_name_normalizer</code> (default-off) runs a dry-run-first pass that strips the suffix via <code>GET /device/updateLabel</code>. Data-driven from <code>/hub2/hubData.locationName</code>, not hardcoded.</li>
+    </ol>
+
+    <!-- ================================================================== -->
+    <h2 id="python-usage">Python usage</h2>
+    <p>Get the per-hub client and call its public methods:</p>
+    <div class="code-block"><pre>from services.hubitat_admin_client import get_client, to_maker_shape
+
+client = get_client(hub_ip="<LAN_IP>", hub_name="home_2")
+
+# List every device the hub knows
+devices = client.get_all_devices()                       # list[dict]
+
+# Full state for one device
+raw = client.get_device(device_id=2781)                  # dict | None
+maker_shaped = to_maker_shape(raw)
+# -> {"id": "2781", "label": "Fan Bathroom",
+#     "attributes": [{"name":"switch","currentValue":"on"}, ...]}
+
+# Fire a command
+ok = client.send_command(device_id=2781, command="setLevel",
+                          argument=50)                    # bool
+
+# Rename a device
+ok = client.set_device_label(device_id=2781,
+                             new_label="Bathroom Fan")    # bool
+
+# Read the hub's location name
+loc = client.get_location_name()                          # "Home 2" | None
+
+# Health-probe the command transport
+verdict = client.probe_command_path(device_id=2781)
+# -> {"ok": True, "contract": "json", "status": 200, "error": None}</pre></div>
+
+    <p>The client is a per-hub singleton. <code>get_client()</code> reuses the cached <code>requests.Session</code> (and therefore the auth cookie). <code>invalidate_clients()</code> drops all cached clients after a credentials rotation.</p>
+
+    <!-- ================================================================== -->
+    <h2 id="quirks">Quirks &amp; gotchas</h2>
+    <table>
+        <thead><tr><th>Quirk</th><th>Symptom</th><th>Mitigation</th></tr></thead>
+        <tbody>
+            <tr>
+                <td>Successful <code>POST /login</code> returns 302; following the redirect overwrites the cookie</td>
+                <td>Authenticated client behaves as if it didn&rsquo;t log in</td>
+                <td>Pass <code>allow_redirects=False</code> on <code>POST /login</code> calls.</td>
+            </tr>
+            <tr>
+                <td>Wrong content-type on <code>/device/runmethod</code> returns bare HTTP 500</td>
+                <td>Commands silently fail; verification reports <code>got=None</code></td>
+                <td>Two-contract retry in <code>send_command()</code> + contract-watch alerting.</td>
+            </tr>
+            <tr>
+                <td><code>currentStates</code> shape differs from Maker (dict vs list)</td>
+                <td>Downstream <code>extract_attribute()</code> finds nothing; every verify fails</td>
+                <td>Always pass <code>get_device()</code> output through <code>to_maker_shape()</code> before reading attributes.</td>
+            </tr>
+            <tr>
+                <td>Hub-Mesh adds &ldquo; on &lt;hub_name&gt;&rdquo; to mirror device names</td>
+                <td>Same device shows up multiple times under nearly identical labels; pickers get noisy; instances accidentally bind to a mirror</td>
+                <td>Classifier uses <code>linkedDevice</code> for dedup; <code>device_name_normalizer</code> for label cleanup.</td>
+            </tr>
+            <tr>
+                <td>Eventsocket WS does not heartbeat at the protocol level</td>
+                <td><code>ws.open == True</code> after silent hub-side disconnect; events stop flowing without notice</td>
+                <td>120&nbsp;s data-flow watchdog in <code>hubitat_eventsocket_client.py</code> recycles the connection on no-event.</td>
+            </tr>
+            <tr>
+                <td>Eventsocket fan-out via Hub Mesh emits the same event on every hub the device is shared on</td>
+                <td>Same event ingested N times; routing decisions made N times</td>
+                <td>Mesh-mirror filter at ingest: drop events whose origin hub &ne; the device&rsquo;s canonical hub. Key on <code>&lt;hub_ip&gt;:&lt;deviceId&gt;</code>.</td>
+            </tr>
+            <tr>
+                <td>The hub serves admin endpoints over plain HTTP; HTTPS is not on by default</td>
+                <td>Cookies and admin credentials cross the LAN in cleartext</td>
+                <td>LAN-only access posture today. If exposing externally: VPN or reverse-proxy with TLS termination.</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <!-- ================================================================== -->
+    <h2 id="see-also">See also</h2>
+    <ul>
+        <li><a href="maker_api_reference.html">Maker API Reference</a> &mdash; the fallback intake.</li>
+        <li><a href="device_capabilities.html">Device Capabilities</a> &mdash; the contract behind every command and attribute.</li>
+        <li><a href="device_response_examples.html">Device Response Examples</a> &mdash; what state JSON looks like for 30+ device types.</li>
+        <li><a href="webhook_dispatcher.html">Webhook Dispatcher</a> &mdash; the fallback intake&rsquo;s fan-out path.</li>
+    </ul>
+
+    <footer>
+        <p>
+            Hub firmware reference: <code>2.5.0.143</code> (C-8). Fields and shapes here track that
+            version; older firmware may use the legacy <code>/device/runmethod</code> contract.
+            Source of truth for this codebase: <code>services/hubitat_admin_client.py</code>.
+        </p>
+    </footer>
+</div>
+</body>
+</html>

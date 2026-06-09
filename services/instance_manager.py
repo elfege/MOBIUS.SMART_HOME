@@ -843,6 +843,14 @@ class InstanceManager:
             'manual_fan_level_override_switches': 'switch',
             'humidity_sensors': 'humidity',
             'presence_sensors': 'presence',
+            # Power Management — see apps/power_management/app.py.
+            # power_sensors are INPUTS (the rolling-average source); we
+            # subscribe so each power event drives the threshold check.
+            # cutoff_switches are intentionally OMITTED for the same
+            # reason 'fans' is: they're pure outputs of this app, and
+            # subscribing would create an echo loop on every cutoff
+            # actuation.
+            'power_sensors': 'power',
         }
 
         # device_selections stores CANONICAL devices.id PKs (Phase 5).

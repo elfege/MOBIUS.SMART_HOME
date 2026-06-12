@@ -712,7 +712,7 @@ export class InstanceWizardController {
             id: 'dimming',
             title: 'Dimming & Color',
             description: 'Brightness and color settings',
-            keys: ['useDim', 'defaultDimLevel', 'useColor', 'colorPreset', 'customColorTemperature']
+            keys: ['useDim', 'defaultDimLevel', 'dimWithMode', 'modeDimLevels', 'useColor', 'colorPreset', 'customColorTemperature']
         },
         {
             id: 'illuminance',
@@ -844,6 +844,7 @@ export class InstanceWizardController {
 
         // Bind timeWithMode toggle to show/hide per-mode timeouts
         this._bindModeTimeoutToggle(container);
+        this._bindModeDimLevelToggle(container);
 
         // Motion-timeout floor enforcement (2026-05-17). Live-validate
         // noMotionTime + modeTimeouts against system_settings floor; surface
@@ -1347,6 +1348,91 @@ export class InstanceWizardController {
     }
 
     /**
+     * Bind the dimWithMode checkbox to show/hide per-mode dim-level inputs.
+     * Mirrors _bindModeTimeoutToggle exactly — see that method for rationale.
+     * @param {HTMLElement} container - Settings form container
+     */
+    _bindModeDimLevelToggle(container) {
+        const dwmCheckbox = container.querySelector('[name="dimWithMode"]');
+        const mdlContainer = container.querySelector('#mode-dim-levels-container');
+        if (!dwmCheckbox || !mdlContainer) return;
+
+        const show = !!this.settings.dimWithMode;
+        mdlContainer.style.display = show ? '' : 'none';
+        if (show) {
+            this._populateModeDimLevels(mdlContainer);
+        }
+
+        dwmCheckbox.addEventListener('change', () => {
+            const enabled = dwmCheckbox.checked;
+            mdlContainer.style.display = enabled ? '' : 'none';
+            if (enabled) {
+                this._populateModeDimLevels(mdlContainer);
+            }
+        });
+    }
+
+    /**
+     * Fetch modes and render per-mode dim-level inputs.
+     * Shows ALL modes with a number input next to each. Empty input = fall
+     * back to defaultDimLevel for that mode.
+     * @param {HTMLElement} container - The #mode-dim-levels-container element
+     */
+    async _populateModeDimLevels(container) {
+        const listEl = container.querySelector('#mode-dim-levels-list');
+        if (!listEl) return;
+
+        let modes = [];
+        try {
+            modes = await $.get('/api/modes');
+        } catch (e) {
+            console.error('Failed to fetch modes for dim levels:', e);
+            listEl.innerHTML = '<span class="error-text">Failed to load modes</span>';
+            return;
+        }
+
+        const modeDimLevels = this.settings.modeDimLevels || {};
+        const defaultDim = this.settings.defaultDimLevel ?? 50;
+
+        listEl.innerHTML = modes.map(mode => {
+            const name = mode.name || mode;
+            const value = modeDimLevels[name] !== undefined ? modeDimLevels[name] : '';
+            const badge = mode.active
+                ? ' <span class="mode-active-badge">(current)</span>'
+                : '';
+            return `
+                <div class="mode-timeout-row">
+                    <span class="mode-timeout-label">
+                        ${utils.escapeHtml(name)}${badge}
+                    </span>
+                    <input type="number"
+                           class="mode-dim-level-input"
+                           data-mode="${utils.escapeHtml(name)}"
+                           value="${value}"
+                           placeholder="${defaultDim}"
+                           min="0" max="100">
+                </div>
+            `;
+        }).join('');
+
+        listEl.querySelectorAll('.mode-dim-level-input').forEach(input => {
+            input.addEventListener('change', () => {
+                if (!this.settings.modeDimLevels) {
+                    this.settings.modeDimLevels = {};
+                }
+                const modeName = input.dataset.mode;
+                const val = parseInt(input.value, 10);
+                if (isNaN(val) || input.value.trim() === '') {
+                    delete this.settings.modeDimLevels[modeName];
+                } else {
+                    // Clamp to 0..100 defensively even though the input enforces it.
+                    this.settings.modeDimLevels[modeName] = Math.max(0, Math.min(100, val));
+                }
+            });
+        });
+    }
+
+    /**
      * Bind the timeWithMode checkbox to show/hide per-mode timeout inputs.
      * @param {HTMLElement} container - Settings form container
      */
@@ -1496,6 +1582,20 @@ export class InstanceWizardController {
                 </div>
             `;
             // Skip the outer form-group description since we embed it
+            return `<div class="form-group">${input}</div>`;
+        } else if (prop.type === 'object' && key === 'modeDimLevels') {
+            // Per-mode dim-level widget (shown/hidden by dimWithMode toggle).
+            // Mirrors the modeTimeouts widget exactly so the two read as a
+            // matched pair in the Dimming & Color section.
+            input = `
+                <div id="mode-dim-levels-container" style="display:none;">
+                    <label>${utils.escapeHtml(title)}</label>
+                    <p class="help-text">${utils.escapeHtml(description)}</p>
+                    <div id="mode-dim-levels-list">
+                        <span class="help-text">Loading modes...</span>
+                    </div>
+                </div>
+            `;
             return `<div class="form-group">${input}</div>`;
         } else if (prop.type === 'array' && prop.items && prop.items.type === 'string') {
             // Dropdown with checkboxes for multi-select

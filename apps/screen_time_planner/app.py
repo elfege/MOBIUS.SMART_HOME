@@ -249,7 +249,15 @@ class ScreenTimePlannerApp(BaseApp):
         Turn the secondary 'power device' ON if it isn't already. On an actual
         off->on restore, stamp the suppression timer so a TV that boots-to-ON on
         power is caught by on_event and turned back off.
+
+        Pause guard (defensive): every action-issuing method MUST check
+        is_paused at its own top, not rely on the caller's check. Pause
+        state can flip between the caller's check and our send_command
+        if pause arrives mid-tick — the only way to guarantee no rule
+        executes while paused is to re-check here too.
         """
+        if self.is_paused:
+            return
         for sid in self.get_devices('secondary_switch'):
             if self._read_switch(sid) == 'on':
                 continue
@@ -283,7 +291,12 @@ class ScreenTimePlannerApp(BaseApp):
 
     def _turn_off_primary_only(self) -> None:
         """Cut the TV (primary) only — used for wake-on-power suppression inside a
-        window (we keep power ON so the TV stays *available*)."""
+        window (we keep power ON so the TV stays *available*).
+
+        Pause guard (defensive): see _ensure_power_on docstring.
+        """
+        if self.is_paused:
+            return
         for pid in self.get_devices('primary_switch'):
             self.send_command(pid, 'off', verify=False)
 
@@ -400,12 +413,20 @@ class ScreenTimePlannerApp(BaseApp):
         Returns True only on a genuine reported off. NOTE: if this device never
         pushes a real state over the eventsocket (only the optimistic echo), no
         real 'off' will arrive and this returns False at the timeout.
+
+        Pause guard (defensive): see _ensure_power_on docstring. We
+        also re-check inside the poll loop so a pause that lands
+        mid-loop short-circuits the remaining sleeps.
         """
+        if self.is_paused:
+            return False
         self.send_command(device_id, 'off', verify=False)
         deadline = time.monotonic() + max(1, int(timeout_s))
         step = min(2.0, max(1.0, timeout_s / 10.0))
         while time.monotonic() < deadline:
             time.sleep(step)
+            if self.is_paused:
+                return False
             if self._read_switch(device_id) == 'off':
                 return True
         return False

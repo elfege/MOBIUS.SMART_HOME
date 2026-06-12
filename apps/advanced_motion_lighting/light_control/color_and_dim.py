@@ -42,9 +42,17 @@ class ColorAndDimMixin:
         """
         Get the dim level to use when turning on a device.
 
-        Priority:
+        Priority (added 2026-06-12):
           1. Memoized manual override for this device (source='manual')
-          2. defaultDimLevel from settings
+          2. Per-mode override (modeDimLevels[current_mode]) — only when
+             dimWithMode is enabled and the current mode has a value
+          3. defaultDimLevel from settings
+
+        The per-mode tier mirrors the existing timeWithMode/modeTimeouts
+        pattern in apps/advanced_motion_lighting/timeout.py exactly — same
+        settings shape, same lookup, same fallback semantics. Driver:
+        operator wants Night-mode lights dim (25%), Day-mode lights bright
+        (100%), with one motion instance covering both.
 
         Args:
             device_name: Device name key in dim_level memo
@@ -61,6 +69,20 @@ class ColorAndDimMixin:
                         f"Using memoized dim level for {_C}{device_name}{_R}: {level}"
                     )
                     return int(level)
+
+        # Per-mode dim level (cascade tier above defaultDimLevel).
+        if self.get_setting('dimWithMode', False):
+            mode_levels = self.get_setting('modeDimLevels', {}) or {}
+            current_mode = self._get_current_mode()
+            if current_mode and current_mode in mode_levels:
+                mode_level = mode_levels[current_mode]
+                if mode_level is not None:
+                    self.logger.debug(
+                        f"Per-mode dim level for '{current_mode}' "
+                        f"({device_name or 'default'}): {mode_level}"
+                    )
+                    return int(mode_level)
+
         return self.get_setting('defaultDimLevel', 50)
 
     def _get_current_color(self, device_name: str = '') -> Optional[Dict[str, Any]]:

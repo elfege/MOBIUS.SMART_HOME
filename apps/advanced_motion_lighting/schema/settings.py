@@ -33,6 +33,19 @@ def get_settings_schema() -> Dict[str, Any]:
                 "maximum": 100,
                 "default": 50
             },
+            "dimWithMode": {
+                "type": "boolean",
+                "title": "Use Different Dim Levels per Mode",
+                "description": "Set different brightness levels for each Hubitat mode (e.g. 100 in Day, 25 in Night). Mirrors the timeWithMode/modeTimeouts pattern.",
+                "default": False
+            },
+            "modeDimLevels": {
+                "type": "object",
+                "title": "Per-Mode Dim Levels",
+                "description": "Brightness (0-100) for each mode. Empty cell for a mode = fall back to Default Dim Level for that mode. Only consulted when dimWithMode is enabled.",
+                "additionalProperties": {"type": "integer", "minimum": 0, "maximum": 100},
+                "default": {}
+            },
             "useColor": {
                 "type": "boolean",
                 "title": "Enable Color Control",

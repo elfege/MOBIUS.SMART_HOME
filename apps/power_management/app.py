@@ -122,6 +122,26 @@ class PowerManagementApp(BaseApp):
     """
     Average-power threshold cutoff. See module docstring for the
     decision flow, subscriptions, and trip / recovery semantics.
+
+    Status (2026-06-09): UNTESTED. Code shipped + registered (app_types
+    row id 1119, schema reachable via PostgREST) + ast.parse clean +
+    imports clean. No live instance has been created yet. Before
+    relying on this for real protection (pool pump, EV charger, etc.):
+
+      1. Create an instance via the dashboard with a HIGH threshold
+         well above normal operating draw (e.g. 90% of the appliance's
+         peak load). Verify trip fires + cutoff actuates.
+      2. Verify auto-recovery un-trips correctly after the sustained
+         sub-threshold window.
+      3. If enabling dry-run detection, calibrate the LOW threshold by
+         observing real readings of the protected pump in both healthy
+         (water flowing) and dry (no prime) states, NOT by guessing
+         from the rated wattage alone. The default-50%-of-rated
+         starting point in the field description is a starting point,
+         not a recommendation.
+      4. Watch the dashboard tile + event_log for at least one full
+         day under normal load before disconnecting any manual
+         protection (e.g. breaker reset, manual on/off).
     """
 
     TYPE_NAME    = 'power_management'
@@ -533,9 +553,30 @@ class PowerManagementApp(BaseApp):
         Send ``on`` or ``off`` to every cutoff switch. Logs failures
         per-device but does not abort the loop — a single offline
         cutoff shouldn't block the others from acting.
+
+        Pause guard (defensive, project rule
+        ``feedback_pause_guard_on_every_action_method``): action-issuing
+        methods MUST check is_paused at their own top. The recovery
+        path calls this from _recover() — which calls self.resume()
+        FIRST, so by the time send_command runs we're no longer paused.
+        The trip path calls this from _trip() BEFORE self.pause(), so
+        is_paused is still False there. The remaining concern is a
+        pause that lands between our caller's check and ours; this
+        guard catches that race.
         """
         if action not in ('on', 'off'):
             self.logger.error(f"_fire_cutoffs unknown action: {action!r}")
+            return
+        # _trip() calls us BEFORE pause(0), so we're not paused at trip time.
+        # _recover() calls self.resume() before us, so we're not paused then either.
+        # The only race left is an external pause arriving mid-tick — short-circuit.
+        # `action == 'off'` from _trip is allowed to proceed (we're not paused yet);
+        # `action == 'on'` from _recover is also allowed (just resumed). If a
+        # SCHEDULED retry of either path landed here while paused, drop it.
+        if self.is_paused and action == 'on':
+            # Recovery 'on' must not fire while paused — this can only
+            # happen if a scheduled callback raced with a pause.
+            self.logger.debug("_fire_cutoffs('on') skipped — instance is paused")
             return
         cutoffs = self.get_devices('cutoff_switches')
         if not cutoffs:

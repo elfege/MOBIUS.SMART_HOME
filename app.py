@@ -481,6 +481,40 @@ def run_db_migrations():
         "GRANT USAGE, SELECT "
         "ON SEQUENCE dsapp.samsung_tv_instances_id_seq TO smarthome_anon",
 
+        # ====================================================================
+        # 2026-06-16 — AML Always-Off / Always-On toggle migration (Q1=B)
+        # Operator directive 2026-06-16: replace the "empty mode list = active
+        # in all modes" magic with an explicit boolean. Backfill toggle=true
+        # for instances that have keep_off_switches / keep_on_switches
+        # selected (preserves their behavior); fill empty keepOffModes /
+        # keepOnModes with all currently-known modes from location_modes.
+        # Idempotent: the WHERE clauses no-op when already-applied.
+        # ====================================================================
+        "UPDATE dsapp.app_instances ai "
+        "SET settings = ai.settings || jsonb_build_object('keepOffEnabled', true) "
+        "WHERE ai.app_type_id = 1 "
+        "  AND jsonb_array_length(coalesce(ai.device_selections->'keep_off_switches', '[]'::jsonb)) > 0 "
+        "  AND NOT (ai.settings ? 'keepOffEnabled')",
+        "UPDATE dsapp.app_instances ai "
+        "SET settings = ai.settings || jsonb_build_object('keepOnEnabled', true) "
+        "WHERE ai.app_type_id = 1 "
+        "  AND jsonb_array_length(coalesce(ai.device_selections->'keep_on_switches', '[]'::jsonb)) > 0 "
+        "  AND NOT (ai.settings ? 'keepOnEnabled')",
+        # Fill empty mode lists with ALL known modes (the post-Q1=B explicit
+        # form of the old "empty = all modes" shortcut).
+        "WITH all_modes AS (SELECT jsonb_agg(mode_name) AS modes FROM dshub.location_modes) "
+        "UPDATE dsapp.app_instances ai "
+        "SET settings = ai.settings || jsonb_build_object('keepOffModes', (SELECT modes FROM all_modes)) "
+        "WHERE ai.app_type_id = 1 "
+        "  AND jsonb_array_length(coalesce(ai.device_selections->'keep_off_switches', '[]'::jsonb)) > 0 "
+        "  AND jsonb_array_length(coalesce(ai.settings->'keepOffModes', '[]'::jsonb)) = 0",
+        "WITH all_modes AS (SELECT jsonb_agg(mode_name) AS modes FROM dshub.location_modes) "
+        "UPDATE dsapp.app_instances ai "
+        "SET settings = ai.settings || jsonb_build_object('keepOnModes', (SELECT modes FROM all_modes)) "
+        "WHERE ai.app_type_id = 1 "
+        "  AND jsonb_array_length(coalesce(ai.device_selections->'keep_on_switches', '[]'::jsonb)) > 0 "
+        "  AND jsonb_array_length(coalesce(ai.settings->'keepOnModes', '[]'::jsonb)) = 0",
+
         # Tell PostgREST to reload its schema cache. Without this, columns
         # added by ALTER TABLE above are invisible to PostgREST's OpenAPI
         # and POST/PATCH requests fail with PGRST204 "column does not exist".

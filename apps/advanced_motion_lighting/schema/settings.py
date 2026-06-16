@@ -143,12 +143,40 @@ def get_settings_schema() -> Dict[str, Any]:
                 "enum": ["toggle", "on", "off"],
                 "default": "toggle"
             },
+            "keepOffEnabled": {
+                "type": "boolean",
+                "title": "Enable Always-Off",
+                "description": (
+                    "Master toggle for the Always-Off feature. When OFF, the "
+                    "feature does NOTHING regardless of devices or modes "
+                    "below — no silent 'all modes' fallback. Required because "
+                    "an empty mode list used to mean 'active in all modes', "
+                    "which let this feature override modeDimLevels by "
+                    "surprise. Toggle off → feature is dead."
+                ),
+                "default": False
+            },
             "keepOffModes": {
                 "type": "array",
                 "title": "Always-Off: Active Modes",
-                "description": "Modes where Always-Off is enforced. Empty = all modes.",
+                "description": (
+                    "Modes where Always-Off is enforced. Only consulted when "
+                    "the Enable Always-Off toggle above is ON. Empty list "
+                    "means 'enforced in all modes that exist' — but with the "
+                    "toggle as the authority, that's now an explicit choice."
+                ),
                 "items": {"type": "string"},
                 "default": []
+            },
+            "keepOnEnabled": {
+                "type": "boolean",
+                "title": "Enable Always-On",
+                "description": (
+                    "Master toggle for the Always-On feature. When OFF, the "
+                    "feature does NOTHING regardless of devices or modes "
+                    "below. Same authority semantics as Enable Always-Off."
+                ),
+                "default": False
             },
             "keepOnModes": {
                 "type": "array",

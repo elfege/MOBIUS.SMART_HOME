@@ -46,12 +46,23 @@ class KeepSwitchEnforcementMixin:
         keep_on_ids = set(self.get_devices('keep_on_switches')) - keep_off_ids
 
         # --- Always-Off enforcement ---
-        keep_off_modes = self.get_setting('keepOffModes', [])
-        enforce_off = not keep_off_modes or current_mode in keep_off_modes
-        if not enforce_off:
-            self.logger.debug(
-                f"Always-Off: skipped (mode={current_mode}, active={keep_off_modes})"
-            )
+        # Q1=B (operator directive 2026-06-16): the keepOffEnabled toggle
+        # is the AUTHORITY for whether this feature runs at all. Empty mode
+        # list no longer silently means "all modes" — the toggle must be
+        # explicitly true. Migration backfilled toggle=true + filled
+        # keepOffModes for existing instances that had keep_off_switches
+        # selected, preserving their behavior.
+        if not self.get_setting('keepOffEnabled', False):
+            self.logger.debug("Always-Off: feature disabled by toggle")
+            enforce_off = False
+            keep_off_modes = []  # don't bother logging mode breakdown
+        else:
+            keep_off_modes = self.get_setting('keepOffModes', [])
+            enforce_off = not keep_off_modes or current_mode in keep_off_modes
+            if not enforce_off:
+                self.logger.debug(
+                    f"Always-Off: skipped (mode={current_mode}, active={keep_off_modes})"
+                )
 
         for device_id in self.get_devices('keep_off_switches'):
             if not enforce_off:
@@ -92,12 +103,18 @@ class KeepSwitchEnforcementMixin:
                 )
 
         # --- Always-On enforcement ---
-        keep_on_modes = self.get_setting('keepOnModes', [])
-        enforce_on = not keep_on_modes or current_mode in keep_on_modes
-        if not enforce_on:
-            self.logger.debug(
-                f"Always-On: skipped (mode={current_mode}, active={keep_on_modes})"
-            )
+        # Same toggle contract as Always-Off above.
+        if not self.get_setting('keepOnEnabled', False):
+            self.logger.debug("Always-On: feature disabled by toggle")
+            enforce_on = False
+            keep_on_modes = []
+        else:
+            keep_on_modes = self.get_setting('keepOnModes', [])
+            enforce_on = not keep_on_modes or current_mode in keep_on_modes
+            if not enforce_on:
+                self.logger.debug(
+                    f"Always-On: skipped (mode={current_mode}, active={keep_on_modes})"
+                )
 
         for device_id in keep_on_ids:
             if not enforce_on:

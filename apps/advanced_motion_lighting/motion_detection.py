@@ -116,22 +116,81 @@ class MotionDetectionMixin:
             )
             return True
 
-        # Rule 2: ALL sensors currently 'inactive' (or unknown). Compute
-        # the off-timer anchor as the MAX of inactive timestamps.
-        inactive_ts = [
-            ts for val, ts in per_sensor_state.values() if val == 'inactive'
-        ]
-        if not inactive_ts:
+        # Rule 2: ALL sensors currently 'inactive'. Compute the off-timer
+        # anchor as the actual TRANSITION moment per sensor (first
+        # 'inactive' event after the last 'active' event), then take the
+        # MAX across sensors.
+        #
+        # 2026-06-16 fix: previously we used max(per_sensor_state inactive
+        # timestamps). That broke when the hub emitted polled "inactive"
+        # state-report events for sensors that had ALREADY been inactive
+        # for hours (e.g. firmware-update aftermath). Those polled events
+        # have empty src and represent state CONFIRMATION, not transition.
+        # The latest such event reset the off-timer anchor to 'just now,'
+        # making the timeout window open again and master() turned on
+        # every AML instance's lights at 5 AM with nobody home. The
+        # transition-based query below ignores polled re-confirmations:
+        # subsequent inactive events for an already-inactive sensor
+        # don't move the anchor.
+        transition_ts: List[str] = []
+        for sid in functional:
+            val, _ = per_sensor_state.get(str(sid), ('', ''))
+            if val != 'inactive':
+                continue
+            try:
+                # Most recent ACTIVE event for this sensor (if any).
+                r_active = requests.get(
+                    f"{pg}/event_log",
+                    params={
+                        'canonical_device_id': f'eq.{sid}',
+                        'event_type': 'eq.motion',
+                        'event_value': 'eq.active',
+                        'select': 'received_at',
+                        'order': 'received_at.desc',
+                        'limit': '1',
+                    },
+                    timeout=3,
+                )
+                last_active_iso = ''
+                if r_active.status_code == 200 and r_active.json():
+                    last_active_iso = r_active.json()[0].get('received_at') or ''
+
+                # FIRST inactive event AFTER the last active. If the sensor
+                # has never been active in the log, the earliest inactive
+                # event is treated as the transition (cold-cache case).
+                params = {
+                    'canonical_device_id': f'eq.{sid}',
+                    'event_type': 'eq.motion',
+                    'event_value': 'eq.inactive',
+                    'select': 'received_at',
+                    'order': 'received_at.asc',
+                    'limit': '1',
+                }
+                if last_active_iso:
+                    params['received_at'] = f'gt.{last_active_iso}'
+                r_trans = requests.get(
+                    f"{pg}/event_log", params=params, timeout=3,
+                )
+                if r_trans.status_code == 200 and r_trans.json():
+                    t = r_trans.json()[0].get('received_at')
+                    if t:
+                        transition_ts.append(t)
+            except Exception as e:
+                self.logger.warning(
+                    f"motion: transition query failed for canon={sid}: {e}"
+                )
+
+        if not transition_ts:
             # No motion events for any subscribed sensor at all (cold
             # cache / fresh install). Per the canonical logic, no
             # evidence of active = off. The first incoming active event
             # will trip the on path immediately.
             return False
 
-        # All-inactive moment = the latest of the inactive event times
-        # (the last sensor to fall silent). ISO-8601 strings compare
-        # lexically, so max() works directly.
-        latest_inactive_iso = max(inactive_ts)
+        # All-inactive moment = the latest of the per-sensor TRANSITION
+        # times (the last sensor to actually go from active -> inactive).
+        # ISO-8601 strings compare lexically, so max() works directly.
+        latest_inactive_iso = max(transition_ts)
         try:
             latest_inactive_at = datetime.fromisoformat(
                 latest_inactive_iso.replace('Z', '+00:00')

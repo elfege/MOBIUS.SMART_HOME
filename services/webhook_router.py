@@ -571,6 +571,34 @@ class WebhookRouter:
 
         async def _notify(instance_id: int, app: Any) -> bool:
             try:
+                # Universal pause contract (2026-06-16): if the instance is
+                # currently paused AND its settings declare
+                # resumeOnModeChange=true, auto-resume it BEFORE calling
+                # on_mode_change. The mode change is by definition a
+                # household transition; the instance opts in to treating
+                # it as a "fresh start" signal.
+                if getattr(app, 'is_paused', False):
+                    try:
+                        resume_on_mode = bool(app.get_setting(
+                            'resumeOnModeChange', False
+                        ))
+                    except Exception:
+                        resume_on_mode = False
+                    if resume_on_mode:
+                        self.logger.info(
+                            f"Instance {instance_id} paused + "
+                            f"resumeOnModeChange=true; auto-resuming "
+                            f"before notifying mode change to {new_mode!r}"
+                        )
+                        try:
+                            await asyncio.to_thread(
+                                instance_manager.resume_instance, instance_id
+                            )
+                        except Exception as e:
+                            self.logger.warning(
+                                f"resumeOnModeChange auto-resume for "
+                                f"{instance_id} failed: {e}"
+                            )
                 await asyncio.to_thread(app.on_mode_change, new_mode)
                 return True
             except Exception as e:

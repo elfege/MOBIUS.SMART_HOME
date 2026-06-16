@@ -122,18 +122,19 @@ def get_settings_schema() -> Dict[str, Any]:
                 "enum": ["held", "pushed", "doubleTapped"],
                 "default": "held"
             },
+            # Universal pause settings (pauseDuration / pauseDurationUnit /
+            # resumeOnModeChange) — project rule 2026-06-16. See
+            # apps/base/pause_settings.py for the contract. AML's pre-existing
+            # default of 60 minutes is preserved here via an explicit override
+            # below the spread; everything else (semantics, units enum,
+            # resumeOnModeChange) matches the universal contract.
+            **__import__('apps.base.pause_settings', fromlist=['UNIVERSAL_PAUSE_SETTINGS']).UNIVERSAL_PAUSE_SETTINGS,
+            # AML legacy default: 60 minutes (preserved so existing instances
+            # keep their familiar behavior). New apps use the universal default
+            # of 0 = indefinite.
             "pauseDuration": {
-                "type": "integer",
-                "title": "Pause Duration",
-                "description": "How long to pause when button pressed",
-                "minimum": 1,
-                "default": 60
-            },
-            "pauseDurationUnit": {
-                "type": "string",
-                "title": "Pause Duration Unit",
-                "enum": ["Minutes", "Hours"],
-                "default": "Minutes"
+                **__import__('apps.base.pause_settings', fromlist=['UNIVERSAL_PAUSE_SETTINGS']).UNIVERSAL_PAUSE_SETTINGS["pauseDuration"],
+                "default": 60,
             },
             "pauseSwitchAction": {
                 "type": "string",

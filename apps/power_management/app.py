@@ -705,9 +705,12 @@ class PowerManagementApp(BaseApp):
 
     @classmethod
     def get_settings_schema(cls) -> Dict[str, Any]:
+        from apps.base.pause_settings import UNIVERSAL_PAUSE_SETTINGS
         return {
             "type": "object",
             "properties": {
+                # Universal pause settings — project rule 2026-06-16.
+                **UNIVERSAL_PAUSE_SETTINGS,
                 "highThresholdWatts": {
                     "type": "integer", "minimum": 1, "maximum": 100000,
                     "default": 1500,

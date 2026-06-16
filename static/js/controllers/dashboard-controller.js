@@ -663,23 +663,32 @@ export class DashboardController {
                 // neither setting is declared by the app type. Surfaced
                 // 2026-06-16 — the previous hardcoded 60 was silently
                 // auto-resuming pauses the user intended to be indefinite.
+                // Universal pause contract (2026-06-16): every app declares
+                // pauseDuration + pauseDurationUnit (Seconds|Minutes) +
+                // resumeOnModeChange. We send duration_seconds when the unit
+                // is Seconds so sub-minute pauses don't degenerate to
+                // indefinite via integer-divide rounding.
                 const inst = this.instances.find(i => i.id === instanceId);
                 const settings = (inst && inst.settings) || {};
-                let durationMinutes = 60;  // legacy fallback
+                const body = { reason: 'ui_button' };
                 if ('pauseDuration' in settings) {
                     const raw = parseInt(settings.pauseDuration, 10);
                     if (!isNaN(raw) && raw >= 0) {
                         const unit = (settings.pauseDurationUnit || 'Minutes');
-                        const multiplier = unit === 'Hours' ? 60
-                                         : unit === 'Days'  ? 60 * 24
-                                         : 1;
-                        durationMinutes = raw * multiplier;
+                        if (unit === 'Seconds') {
+                            body.duration_seconds = raw;
+                        } else {
+                            body.duration_minutes = raw;
+                        }
+                    } else {
+                        body.duration_minutes = 60;
                     }
+                } else {
+                    // App type pre-dates the universal contract — legacy
+                    // 60-minute pause stays as the safe fallback.
+                    body.duration_minutes = 60;
                 }
-                await api.post(`/instances/${instanceId}/pause`, {
-                    duration_minutes: durationMinutes,
-                    reason: 'ui_button'
-                });
+                await api.post(`/instances/${instanceId}/pause`, body);
             }
             await this.loadInstances();
         } catch (error) {

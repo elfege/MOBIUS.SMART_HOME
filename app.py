@@ -98,8 +98,16 @@ class UpdateInstanceRequest(BaseModel):
 
 
 class PauseInstanceRequest(BaseModel):
-    """Request body for pausing an instance."""
+    """Request body for pausing an instance.
+
+    Universal pause contract (2026-06-16): the dashboard sends either
+    ``duration_minutes`` (legacy / Minutes unit) or ``duration_seconds``
+    (Seconds unit for sub-minute pauses). The server converts to minutes
+    for the existing instance_manager.pause_instance path. 0 in EITHER
+    field means indefinite (no auto-resume).
+    """
     duration_minutes: Optional[int] = None
+    duration_seconds: Optional[int] = None
     reason: Optional[str] = None
 
 
@@ -1040,11 +1048,25 @@ async def start_instance(instance_id: int):
 
 @app.post("/api/instances/{instance_id}/pause", tags=["instances"])
 async def pause_instance(instance_id: int, body: PauseInstanceRequest = PauseInstanceRequest()):
-    """Pause an instance."""
+    """Pause an instance.
+
+    Accepts either ``duration_minutes`` (legacy) or ``duration_seconds``
+    (preferred for sub-minute pauses). When both are provided,
+    ``duration_seconds`` wins; we convert with ceil so 30 seconds doesn't
+    round down to 0-minute (= indefinite). 0 in EITHER means indefinite.
+    """
     from services.instance_manager import get_instance_manager
 
+    duration_minutes = body.duration_minutes
+    if body.duration_seconds is not None:
+        if body.duration_seconds == 0:
+            duration_minutes = 0
+        else:
+            # Ceil so 30s -> 1 minute (won't degenerate to indefinite).
+            duration_minutes = max(1, (body.duration_seconds + 59) // 60)
+
     manager = get_instance_manager()
-    if manager.pause_instance(instance_id, body.duration_minutes, body.reason):
+    if manager.pause_instance(instance_id, duration_minutes, body.reason):
         return {"message": "Instance paused"}
     raise HTTPException(status_code=500, detail="Failed to pause instance")
 

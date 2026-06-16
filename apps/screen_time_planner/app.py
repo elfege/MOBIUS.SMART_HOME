@@ -577,6 +577,34 @@ class ScreenTimePlannerApp(BaseApp):
         return {
             "type": "object",
             "properties": {
+                # Pause duration — mirrors AML's pauseDuration / pauseDurationUnit
+                # pattern. The dashboard's pause button reads these and uses
+                # them as the duration_minutes argument to /api/instances/<id>/pause.
+                # 0 = INDEFINITE pause (no auto-resume). User must hit Resume
+                # manually. Surfaced 2026-06-16 after the user reported their
+                # afternoon pause auto-resumed unexpectedly — the dashboard had
+                # been hardcoding 60 minutes for every app.
+                "pauseDuration": {
+                    "type": "integer", "minimum": 0, "maximum": 10080,
+                    "default": 0,
+                    "title": "Default pause duration",
+                    "description": (
+                        "How long the Pause button on the dashboard pauses this "
+                        "instance for. 0 = indefinite (no auto-resume; you must "
+                        "hit Resume manually). Set in the unit chosen below."
+                    ),
+                },
+                "pauseDurationUnit": {
+                    "type": "string",
+                    "enum": ["Minutes", "Hours", "Days"],
+                    "default": "Minutes",
+                    "title": "Pause duration unit",
+                    "description": (
+                        "Unit for the pause duration above. The dashboard "
+                        "converts to minutes when calling the API."
+                    ),
+                },
+
                 # Custom per-day windows widget (see instance-controller.js
                 # weeklyWindows case).
                 "weeklyWindows": {

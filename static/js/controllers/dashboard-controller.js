@@ -655,8 +655,29 @@ export class DashboardController {
                 // 'mode_exclusion', so 'ui_button' (and any other manually
                 // assigned reason) is safe from accidental auto-resume on
                 // mode flips.
+                //
+                // Pause duration is per-instance: read pauseDuration +
+                // pauseDurationUnit from the instance's settings, convert
+                // to minutes. 0 = indefinite (no auto-resume; user must
+                // hit Resume manually). Fallback to 60 minutes only if
+                // neither setting is declared by the app type. Surfaced
+                // 2026-06-16 — the previous hardcoded 60 was silently
+                // auto-resuming pauses the user intended to be indefinite.
+                const inst = this.instances.find(i => i.id === instanceId);
+                const settings = (inst && inst.settings) || {};
+                let durationMinutes = 60;  // legacy fallback
+                if ('pauseDuration' in settings) {
+                    const raw = parseInt(settings.pauseDuration, 10);
+                    if (!isNaN(raw) && raw >= 0) {
+                        const unit = (settings.pauseDurationUnit || 'Minutes');
+                        const multiplier = unit === 'Hours' ? 60
+                                         : unit === 'Days'  ? 60 * 24
+                                         : 1;
+                        durationMinutes = raw * multiplier;
+                    }
+                }
                 await api.post(`/instances/${instanceId}/pause`, {
-                    duration_minutes: 60,
+                    duration_minutes: durationMinutes,
                     reason: 'ui_button'
                 });
             }

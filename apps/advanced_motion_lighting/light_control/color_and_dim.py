@@ -71,11 +71,24 @@ class ColorAndDimMixin:
                     return int(level)
 
         # Per-mode dim level (cascade tier above defaultDimLevel).
+        #
+        # Case-insensitive mode lookup — defends against any drift between how
+        # Hubitat reports the active mode (e.g. 'WatchingTV') and how the UI
+        # stored the key in modeDimLevels (e.g. 'watchingtv' or 'WATCHINGTV').
+        # We do an exact lookup first (cheapest, normal path), then fall back
+        # to case-insensitive comparison if no exact match. Reference: TILES
+        # _mapModeToBackground bug 2026-03-18 was the same class of issue.
         if self.get_setting('dimWithMode', False):
             mode_levels = self.get_setting('modeDimLevels', {}) or {}
             current_mode = self._get_current_mode()
-            if current_mode and current_mode in mode_levels:
-                mode_level = mode_levels[current_mode]
+            if current_mode and mode_levels:
+                mode_level = mode_levels.get(current_mode)
+                if mode_level is None:
+                    cm_lower = current_mode.lower()
+                    for k, v in mode_levels.items():
+                        if isinstance(k, str) and k.lower() == cm_lower:
+                            mode_level = v
+                            break
                 if mode_level is not None:
                     self.logger.debug(
                         f"Per-mode dim level for '{current_mode}' "

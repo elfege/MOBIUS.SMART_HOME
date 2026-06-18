@@ -327,6 +327,23 @@ class InstanceManager:
         if not update_data:
             return True  # Nothing to update
 
+        # Always clear memoization on update — manual overrides (dim_level
+        # source='manual', color_state source='manual', switch_state) MUST
+        # NOT survive a settings or device-selection change, otherwise a
+        # stale manual override silently shadows the new settings forever.
+        # Concrete bug this prevents: user sets modeDimLevels.WatchingTV=10,
+        # but a prior manual override at level=80 was still in memo, and the
+        # cascade returned 80 every time. Clearing here means the fresh
+        # instance starts with empty memo; AML's _init_memoization_keys()
+        # re-seeds keep_off / keep_on entries on __init__. Label-only updates
+        # are unaffected because nothing about the memo depends on the label.
+        if 'settings' in update_data or 'device_selections' in update_data:
+            update_data['memoization_state'] = {}
+            self.logger.info(
+                f"Instance {instance_id} update includes settings/devices — "
+                f"clearing memoization_state to drop any stale overrides"
+            )
+
         # Kill the running instance FIRST — guarantees no stale in-memory state
         self.stop_instance(instance_id)
 

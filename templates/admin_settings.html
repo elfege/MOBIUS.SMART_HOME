@@ -55,6 +55,13 @@
             <button type="button" class="settings-tab"
                     role="tab" aria-selected="false"
                     data-section="device_naming">Device naming</button>
+            {# Matter — external page (its own template, its own controller).
+               Rendered as a settings-tab styled anchor so it visually fits
+               with the other tabs; clicking navigates to /matter (browser
+               handles native nav, the tab-click handler skips A elements).
+               Moved here from the main navbar 2026-06-17. #}
+            <a href="/matter" class="settings-tab settings-tab-external"
+               role="link" aria-label="Matter — opens commissioning page">Matter</a>
         </nav>
 
         {# Right pane — one panel per section. system_settings rows
@@ -478,6 +485,20 @@
     outline: 2px solid var(--color-primary);
     outline-offset: 2px;
 }
+/* External-page tabs (Matter) — anchored to /matter etc., styled with a
+   small arrow glyph so users know clicking navigates away. */
+.settings-tab-external {
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.settings-tab-external::after {
+    content: "\2197";   /* north-east arrow */
+    margin-left: 0.5rem;
+    opacity: 0.6;
+    font-size: 0.85em;
+}
 
 /* ---------- panels (right pane) ---------- */
 .settings-panels {
@@ -864,6 +885,12 @@
         const panels = document.querySelectorAll('.settings-panel');
         tabs.forEach(btn => {
             btn.addEventListener('click', () => {
+                // External tabs are <a> elements pointing to a separate
+                // page (e.g. Matter → /matter). Let the browser navigate;
+                // do NOT mutate panel visibility — the page is about to
+                // unload anyway, and touching state causes a flash of
+                // empty content.
+                if (btn.tagName === 'A') return;
                 const target = btn.dataset.section;
                 tabs.forEach(t => {
                     const active = (t.dataset.section === target);

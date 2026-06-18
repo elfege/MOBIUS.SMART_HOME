@@ -38,7 +38,10 @@
             </div>
             <nav class="main-nav">
                 <a href="/" class="nav-link">Dashboard</a>
-                <a href="/matter" class="nav-link">Matter</a>
+                {# Matter moved into Settings → Matter tab (operator directive 2026-06-17).
+                   The top-level navbar should host primary workflows; Matter
+                   commissioning is an infrastructure concern that belongs
+                   under the gear icon with the other system tabs. #}
                 <a href="/instance/new" class="nav-link btn-add">+ Add</a>
                 <span class="nav-sep"></span>
                 <a href="https://mobius.tiles" class="nav-link nav-app">TILES</a>

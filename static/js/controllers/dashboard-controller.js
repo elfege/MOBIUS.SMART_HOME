@@ -454,27 +454,21 @@ export class DashboardController {
                     </div>
                 </div>
                 <div class="card-actions">
-                    <button class="btn btn-secondary btn-small" onclick="dashboard.runInstance(${inst.id})">
-                        Run
-                    </button>
-                    <button class="btn btn-secondary btn-small" onclick="dashboard.updateInstance(${inst.id})">
-                        Update
-                    </button>
-                    <button class="btn btn-secondary btn-small" onclick="dashboard.togglePause(${inst.id}, ${isPaused})">
-                        ${isPaused ? 'Resume' : 'Pause'}
-                    </button>
-                    <button class="btn btn-secondary btn-small" onclick="location.href='/instance/${inst.id}'">
-                        Edit
-                    </button>
-                    <button class="btn btn-secondary btn-small" onclick="dashboard.toggleDebug(${inst.id})">
-                        Debug
-                    </button>
-                    <button class="btn btn-secondary btn-small" onclick="dashboard.openTest(${inst.id}, '${utils.escapeHtml(inst.label).replace(/'/g, "\\'")}')">
-                        Test
-                    </button>
-                    <button class="btn btn-danger btn-small" onclick="dashboard.deleteInstance(${inst.id})">
-                        Delete
-                    </button>
+                    <button class="action-icon-btn" title="Run now"
+                            aria-label="Run instance" onclick="dashboard.runInstance(${inst.id})">&#9654;</button>
+                    <button class="action-icon-btn" title="Update from DB"
+                            aria-label="Update instance" onclick="dashboard.updateInstance(${inst.id})">&#8635;</button>
+                    <button class="action-icon-btn" title="${isPaused ? 'Resume' : 'Pause'}"
+                            aria-label="${isPaused ? 'Resume' : 'Pause'} instance"
+                            onclick="dashboard.togglePause(${inst.id}, ${isPaused})">${isPaused ? '&#9654;' : '&#10074;&#10074;'}</button>
+                    <button class="action-icon-btn" title="Edit"
+                            aria-label="Edit instance" onclick="location.href='/instance/${inst.id}'">&#9998;</button>
+                    <button class="action-icon-btn" title="Debug panel"
+                            aria-label="Toggle debug panel" onclick="dashboard.toggleDebug(${inst.id})">&#9881;</button>
+                    <button class="action-icon-btn" title="Open test runner"
+                            aria-label="Open test runner" onclick="dashboard.openTest(${inst.id}, '${utils.escapeHtml(inst.label).replace(/'/g, "\\'")}')">&#10003;</button>
+                    <button class="action-icon-btn action-icon-danger" title="Delete"
+                            aria-label="Delete instance" onclick="dashboard.deleteInstance(${inst.id})">&#10005;</button>
                 </div>
                 <div class="debug-panel" id="debug-${inst.id}" style="display:none;">
                     <!-- Live runtime status: countdown to next AML turn-off,
@@ -486,8 +480,12 @@ export class DashboardController {
                     <div class="debug-toolbar">
                         <span class="debug-title">Event Log</span>
                         <div class="debug-toolbar-actions">
-                            <button class="btn btn-secondary btn-small btn-copy" onclick="dashboard.copyDebug(${inst.id}, this)">Copy</button>
-                            <button class="btn btn-secondary btn-small" onclick="dashboard.refreshDebug(${inst.id})">Refresh</button>
+                            <button class="action-icon-btn btn-copy" title="Copy log to clipboard"
+                                    aria-label="Copy log"
+                                    onclick="dashboard.copyDebug(${inst.id}, this)">&#9112;</button>
+                            <button class="action-icon-btn" title="Refresh log"
+                                    aria-label="Refresh log"
+                                    onclick="dashboard.refreshDebug(${inst.id})">&#8635;</button>
                         </div>
                     </div>
                     <div class="debug-output" id="debug-output-${inst.id}"></div>

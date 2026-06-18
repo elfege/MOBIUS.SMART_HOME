@@ -335,6 +335,67 @@ body {
     min-width: 60px;
 }
 
+/* Compact icon action buttons (operator directive 2026-06-17 — drop
+   the bootstrap-blue Run/Update/Pause/Edit/Debug/Test/Delete strip in
+   favor of icon + tooltip). The visual goal: small neutral squares
+   that disappear into the card unless hovered, with the action name
+   surfaced via native title= tooltip on hover.
+
+   Each glyph is a deliberate single Unicode character (not an emoji):
+     &#9654; play         Run / Resume
+     &#8635; clockwise    Update / Refresh
+     &#10074;&#10074; vertical-bars pair  Pause
+     &#9998; pencil       Edit
+     &#9881; gear         Debug
+     &#10003; check       Test
+     &#10005; cross       Delete
+     &#9112; next-page    Copy
+*/
+.action-icon-btn {
+    flex: 0 0 auto;
+    appearance: none;
+    background: transparent;
+    color: var(--color-text-muted);
+    border: 1px solid transparent;
+    border-radius: var(--radius, 6px);
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    font-size: 0.95rem;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 120ms, color 120ms, border-color 120ms;
+}
+
+.action-icon-btn:hover {
+    background: var(--color-card, rgba(255, 255, 255, 0.04));
+    color: var(--color-text);
+    border-color: var(--color-border);
+}
+
+.action-icon-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 1px;
+}
+
+/* Delete keeps a destructive-action hover tint (still no permanent blue —
+   neutral at rest, only the hover signals 'this is dangerous'). */
+.action-icon-btn.action-icon-danger:hover {
+    background: var(--color-danger-soft, rgba(220, 38, 38, 0.12));
+    color: var(--color-danger, #ef4444);
+    border-color: var(--color-danger, #ef4444);
+}
+
+/* Override the card-actions button {flex:1 1 auto; min-width:60px} rule
+   for icon buttons so they stay compact instead of stretching. */
+.card-actions .action-icon-btn {
+    flex: 0 0 auto;
+    min-width: 32px;
+}
+
 /* Debug Panel */
 .debug-panel {
     border-top: 1px solid var(--color-border);

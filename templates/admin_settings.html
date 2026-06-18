@@ -447,6 +447,25 @@
     .settings-layout {
         grid-template-columns: 1fr;
     }
+    /* Tabs go horizontal so the panel below isn't pushed off-screen.
+       Operator audit 2026-06-17: stacked vertical tabs ate 200px of
+       screen width on mobile, leaving 160px for the panel. */
+    .settings-tabs {
+        flex-direction: row;
+        gap: 0.25rem;
+        position: relative;     /* drop sticky — confusing in a row */
+        top: auto;
+        overflow-x: auto;
+        scrollbar-width: thin;
+        padding-bottom: 0.25rem;
+    }
+    .settings-tab,
+    .settings-tab-external {
+        flex: 0 0 auto;
+        white-space: nowrap;
+        padding: 6px 10px;
+        font-size: 0.8rem;
+    }
 }
 
 /* ---------- tabs (left rail) ---------- */

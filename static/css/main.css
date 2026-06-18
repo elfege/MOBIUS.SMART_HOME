@@ -971,6 +971,22 @@ a.debug-device:hover {
     padding: 0.75rem 1rem;
     border-bottom: 1px solid var(--color-border);
     background: var(--color-card);
+    /* Collapsible header — operator directive 2026-06-17 'wrapped by default'.
+       The header is the click target via onclick='wizard.toggleSettingsGroup(...)'. */
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.settings-group-header:hover {
+    background: var(--color-card-hover, var(--color-card));
+}
+
+.settings-group-header-text {
+    min-width: 0;
 }
 
 .settings-group-header h4 {
@@ -983,8 +999,31 @@ a.debug-device:hover {
     font-size: 0.8rem;
 }
 
+/* Chevron rotates 180° (pointing up) when the group is open. When the
+   group has .is-collapsed, the chevron points down (the default rotation
+   in HTML — &#9660; is a down-pointing triangle). The body is hidden via
+   the .is-collapsed rule on .settings-group-body below. */
+.settings-group-chevron {
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+    transition: transform 150ms;
+    flex-shrink: 0;
+}
+
+.settings-group:not(.is-collapsed) .settings-group-chevron {
+    transform: rotate(180deg);
+}
+
+.settings-group.is-collapsed .settings-group-header {
+    border-bottom: 1px solid transparent;
+}
+
 .settings-group-body {
     padding: 0.75rem 1rem;
+}
+
+.settings-group.is-collapsed .settings-group-body {
+    display: none;
 }
 
 .settings-group-body .form-group {

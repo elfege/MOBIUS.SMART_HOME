@@ -22,6 +22,12 @@ export class InstanceWizardController {
         this.selectedDevices = {};
         this.settings = {};
         this.existingInstance = null;
+        // Settings-group expand state — preserved across re-renders of
+        // Step 3 within ONE wizard session. Wrapped by default per
+        // operator directive 2026-06-17. The Set holds group ids that
+        // are CURRENTLY EXPANDED; the default-collapsed state is
+        // implicit (an absent id = collapsed).
+        this._expandedSettingsGroups = new Set();
     }
 
     /**
@@ -807,11 +813,26 @@ export class InstanceWizardController {
 
             const fieldsHtml = groupKeys.map(k => this.renderSettingField(k, properties[k])).join('');
 
+            // Wizard settings groups start COLLAPSED by default per operator
+            // directive 2026-06-17 ('All cards wrapable + WRAPPED by default').
+            // Extends the dashboard groups-collapsed-default rule
+            // (memory: feedback-dashboard-groups-collapsed-default). Wizard
+            // sessions are ephemeral — no cross-session persistence needed,
+            // but in-session toggle state IS preserved by storing the
+            // expanded set on the controller (this._expandedSettingsGroups).
+            const isExpanded = this._expandedSettingsGroups
+                                && this._expandedSettingsGroups.has(group.id);
+            const collapsedClass = isExpanded ? '' : ' is-collapsed';
             html += `
-                <div class="settings-group" data-group="${group.id}">
-                    <div class="settings-group-header">
-                        <h4>${group.title}</h4>
-                        <span class="settings-group-desc">${group.description}</span>
+                <div class="settings-group${collapsedClass}" data-group="${group.id}">
+                    <div class="settings-group-header"
+                         onclick="wizard.toggleSettingsGroup('${group.id}')"
+                         title="Click to expand / collapse">
+                        <div class="settings-group-header-text">
+                            <h4>${group.title}</h4>
+                            <span class="settings-group-desc">${group.description}</span>
+                        </div>
+                        <span class="settings-group-chevron" aria-hidden="true">&#9660;</span>
                     </div>
                     <div class="settings-group-body">
                         ${fieldsHtml}
@@ -824,10 +845,18 @@ export class InstanceWizardController {
         const ungrouped = Object.keys(properties).filter(k => !placed.has(k));
         if (ungrouped.length > 0) {
             const fieldsHtml = ungrouped.map(k => this.renderSettingField(k, properties[k])).join('');
+            const isExpanded = this._expandedSettingsGroups
+                                && this._expandedSettingsGroups.has('other');
+            const collapsedClass = isExpanded ? '' : ' is-collapsed';
             html += `
-                <div class="settings-group" data-group="other">
-                    <div class="settings-group-header">
-                        <h4>Other</h4>
+                <div class="settings-group${collapsedClass}" data-group="other">
+                    <div class="settings-group-header"
+                         onclick="wizard.toggleSettingsGroup('other')"
+                         title="Click to expand / collapse">
+                        <div class="settings-group-header-text">
+                            <h4>Other</h4>
+                        </div>
+                        <span class="settings-group-chevron" aria-hidden="true">&#9660;</span>
                     </div>
                     <div class="settings-group-body">
                         ${fieldsHtml}
@@ -1464,6 +1493,34 @@ export class InstanceWizardController {
                 }
             });
         });
+    }
+
+    /**
+     * Toggle a settings group's expanded/collapsed state in Step 3.
+     *
+     * Called from the inline onclick on .settings-group-header. Flips the
+     * .is-collapsed class on the group's outer .settings-group div, then
+     * records the new state on this._expandedSettingsGroups so a re-render
+     * of the form within the same wizard session preserves what the user
+     * had open. (Cross-session persistence is intentionally NOT done — a
+     * fresh wizard starts everything wrapped, matching the operator's
+     * "wrapped by default" directive.)
+     *
+     * @param {string} groupId - SETTINGS_GROUPS entry id ('timing',
+     *                            'dimming', 'keep_off', etc.) or 'other'
+     */
+    toggleSettingsGroup(groupId) {
+        const groupEl = document.querySelector(
+            `.settings-group[data-group="${groupId}"]`
+        );
+        if (!groupEl) return;
+        const willCollapse = !groupEl.classList.contains('is-collapsed');
+        groupEl.classList.toggle('is-collapsed', willCollapse);
+        if (willCollapse) {
+            this._expandedSettingsGroups.delete(groupId);
+        } else {
+            this._expandedSettingsGroups.add(groupId);
+        }
     }
 
     /**

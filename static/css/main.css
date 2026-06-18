@@ -1012,6 +1012,35 @@ a.debug-device:hover {
     font-size: 0.875rem;
 }
 
+/* Always-Off / Always-On inline device picker (2026-06-17).
+   Lives inside .settings-group-body for the keep_off / keep_on groups.
+   Visibility is toggled inline (display:none) by _bindKeepFeatureCard
+   based on the keepOffEnabled / keepOnEnabled toggle state. */
+.keep-feature-devices {
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    border: 1px solid var(--color-border, #d1d5db);
+    border-radius: var(--radius);
+    background: var(--color-bg, #f9fafb);
+}
+
+.keep-feature-devices-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.keep-feature-devices-label {
+    font-size: 0.875rem;
+    font-weight: 600;
+}
+
+.keep-feature-devices .device-list {
+    max-height: 240px;
+    margin-top: 0.5rem;
+}
+
 /* Wizard Summary */
 .wizard-summary {
     background: var(--color-bg);

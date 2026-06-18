@@ -346,6 +346,12 @@ export class InstanceWizardController {
 
         // Render each category from the bulk response. Fallback to per-category
         // call if the bulk call somehow missed (defensive).
+        //
+        // Cache devices for EVERY category (visible or hidden) — the hidden
+        // ones still need to render in Step 3's settings cards. Only the
+        // HTML emission is skipped for hidden_in_devices_section categories.
+        // Operator directive 2026-06-17: keep_off_switches / keep_on_switches
+        // belong in Step 3's Always-Off / Always-On cards, not Step 2.
         let html = '';
         for (const category of categories) {
             let devices = grouped[category.capability] || [];
@@ -353,6 +359,7 @@ export class InstanceWizardController {
                 devices = await this.loadDevices(category.capability);
             }
             this._devicesByCategory[category.key] = devices;
+            if (category.hidden_in_devices_section) continue;
             html += this.renderDeviceCategory(category, devices);
         }
 
@@ -726,11 +733,28 @@ export class InstanceWizardController {
             description: 'Button and pause duration settings',
             keys: ['buttonEventType', 'pauseDuration', 'pauseDurationUnit', 'pauseSwitchAction']
         },
+        // Split into two separate cards per operator directive 2026-06-17
+        // (Q2+Q3 reiteration): each feature owns its enable-toggle, mode
+        // picker, AND device picker in the same card. The device pickers
+        // are injected inline after renderSettingsForm() via
+        // _bindKeepFeatureCard() because they're not properties of
+        // settings_schema — they're device-categories with the
+        // hidden_in_devices_section flag set in devices.py.
         {
-            id: 'keep',
-            title: 'Always Off / Always On',
-            description: 'Mode restrictions for keep-off and keep-on enforcement',
-            keys: ['keepOffModes', 'keepOnModes']
+            id: 'keep_off',
+            title: 'Always Off',
+            description: 'Switches always kept off in selected modes',
+            keys: ['keepOffEnabled', 'keepOffModes'],
+            featureDevicesKey: 'keep_off_switches',
+            featureEnableKey: 'keepOffEnabled'
+        },
+        {
+            id: 'keep_on',
+            title: 'Always On',
+            description: 'Switches always kept on in selected modes',
+            keys: ['keepOnEnabled', 'keepOnModes'],
+            featureDevicesKey: 'keep_on_switches',
+            featureEnableKey: 'keepOnEnabled'
         },
         {
             id: 'restrictions',
@@ -845,6 +869,16 @@ export class InstanceWizardController {
         // Bind timeWithMode toggle to show/hide per-mode timeouts
         this._bindModeTimeoutToggle(container);
         this._bindModeDimLevelToggle(container);
+
+        // Always-Off / Always-On feature cards: inject device picker inline
+        // (same card as toggle + mode picker), visibility tied to the
+        // matching enable-toggle. Operator directive 2026-06-17 (Q2+Q3
+        // reiteration). See SETTINGS_GROUPS entries with featureDevicesKey.
+        for (const group of InstanceWizardController.SETTINGS_GROUPS) {
+            if (group.featureDevicesKey) {
+                this._bindKeepFeatureCard(group, container);
+            }
+        }
 
         // Motion-timeout floor enforcement (2026-05-17). Live-validate
         // noMotionTime + modeTimeouts against system_settings floor; surface
@@ -1430,6 +1464,151 @@ export class InstanceWizardController {
                 }
             });
         });
+    }
+
+    /**
+     * Bind one "Always-Off" or "Always-On" feature card.
+     *
+     * Each card owns three things, all in the same `<div class="settings-group">`:
+     *   1. the enable-toggle (already rendered by renderSettingsForm via the
+     *      settings_schema property — keepOffEnabled / keepOnEnabled),
+     *   2. the per-mode picker (modeKeyed array — keepOffModes / keepOnModes),
+     *   3. an INLINE device picker for keep_off_switches / keep_on_switches —
+     *      injected here because those categories are flagged
+     *      hidden_in_devices_section=True in the AML device schema so they
+     *      do NOT appear in Step 2's Devices section.
+     *
+     * Operator directive 2026-06-17 (Q2+Q3 reiteration): the toggle is the
+     * authority. When OFF, the picker subsection is HIDDEN — there's no
+     * useful interaction with it because the feature does nothing. When
+     * ON, the picker becomes visible and behaves identically to its Step-2
+     * counterpart (same handleDeviceSelection, same mutual-exclusion between
+     * keep_off and keep_on, same _updateCategoryTags rendering).
+     *
+     * Depends on renderDevicePickers() having populated this._devicesByCategory
+     * earlier. In the normal wizard flow that's guaranteed (Step 2 runs before
+     * Step 3). In edit mode where the operator may jump straight to Step 3,
+     * the cache is still primed by initInstance() — but if it's somehow empty,
+     * the picker renders with a fallback "load Step 2 first" hint.
+     *
+     * @param {object} group - SETTINGS_GROUPS entry with featureDevicesKey
+     *                         and featureEnableKey
+     * @param {HTMLElement} container - settings-form-container element
+     */
+    _bindKeepFeatureCard(group, container) {
+        const groupBody = container.querySelector(
+            `[data-group="${group.id}"] .settings-group-body`
+        );
+        if (!groupBody) return;
+
+        const catKey = group.featureDevicesKey;
+        const devices = (this._devicesByCategory && this._devicesByCategory[catKey])
+                        || [];
+        const subsectionId = `keep-feature-${group.id}`;
+
+        // Append the inline device picker subsection inside the same card.
+        const subsectionHtml = this._renderInlineDevicePicker(
+            catKey, devices, subsectionId
+        );
+        groupBody.insertAdjacentHTML('beforeend', subsectionHtml);
+
+        const subsection = container.querySelector(`#${subsectionId}`);
+
+        // Initial visibility — bound to the enable-toggle's current value.
+        const enabled = !!this.settings[group.featureEnableKey];
+        subsection.style.display = enabled ? '' : 'none';
+
+        // Toggle drives the subsection visibility. Keep the picker in the DOM
+        // so the checked state survives toggling off/on within the wizard;
+        // selectedDevices is the source of truth across hides/shows.
+        const toggle = container.querySelector(
+            `[name="${group.featureEnableKey}"]`
+        );
+        if (toggle) {
+            toggle.addEventListener('change', (e) => {
+                subsection.style.display = e.target.checked ? '' : 'none';
+            });
+        }
+
+        this._wireInlineDevicePickerCheckboxes(subsection, catKey);
+    }
+
+    /**
+     * Build the HTML for an inline device picker inside an Always-Off /
+     * Always-On settings card. Mirrors renderDeviceCategory() in shape but
+     * sheds the header / collapsible behavior (the picker is already inside
+     * a card; nesting a second collapse would be confusing).
+     *
+     * @param {string} catKey - device category key (keep_off_switches /
+     *                          keep_on_switches)
+     * @param {Array}  devices - device objects to render
+     * @param {string} subsectionId - DOM id for the wrapping div
+     * @returns {string} HTML
+     */
+    _renderInlineDevicePicker(catKey, devices, subsectionId) {
+        const selectedCount = (this.selectedDevices[catKey] || []).length;
+
+        if (devices.length === 0) {
+            return `
+                <div class="keep-feature-devices" id="${subsectionId}">
+                    <div class="keep-feature-devices-label">Switches</div>
+                    <p class="loading-placeholder">
+                        No switches loaded yet. Visit Step 2 (Devices) once
+                        in this session to prime the device cache.
+                    </p>
+                </div>
+            `;
+        }
+
+        const deviceItems = devices.map(d => `
+            <label class="device-item"
+                   data-device-id="${d.id}"
+                   data-search-text="${utils.escapeHtml((d.label || d.name).toLowerCase())}">
+                <input type="checkbox" name="${catKey}" value="${d.id}">
+                <span>${utils.escapeHtml(d.label || d.name)}</span>
+            </label>
+        `).join('');
+
+        return `
+            <div class="keep-feature-devices" id="${subsectionId}">
+                <div class="keep-feature-devices-header">
+                    <div class="keep-feature-devices-label">Switches</div>
+                    <span class="device-count" id="count-${catKey}">${selectedCount} selected</span>
+                </div>
+                <div class="device-selected-tags" id="tags-${catKey}"></div>
+                <div class="device-list">
+                    ${deviceItems}
+                </div>
+            </div>
+        `;
+    }
+
+    /**
+     * Pre-check checkboxes from existing selectedDevices and bind change
+     * handlers to the shared handleDeviceSelection() so the mutual-exclusion
+     * (keep_off ↔ keep_on) and tag refresh continue to work identically
+     * whether the operator interacts with the inline picker (here) or a
+     * Step-2 picker.
+     *
+     * @param {HTMLElement} subsection - the keep-feature-devices div
+     * @param {string} catKey - device category key
+     */
+    _wireInlineDevicePickerCheckboxes(subsection, catKey) {
+        if (!subsection) return;
+
+        const selected = this.selectedDevices[catKey] || [];
+        selected.forEach(id => {
+            const cb = subsection.querySelector(
+                `input[name="${catKey}"][value="${id}"]`
+            );
+            if (cb) cb.checked = true;
+        });
+
+        subsection.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+            cb.addEventListener('change', (e) => this.handleDeviceSelection(e));
+        });
+
+        this._updateCategoryTags(catKey);
     }
 
     /**

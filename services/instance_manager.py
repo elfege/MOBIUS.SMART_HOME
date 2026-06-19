@@ -868,6 +868,14 @@ class InstanceManager:
             # subscribing would create an echo loop on every cutoff
             # actuation.
             'power_sensors': 'power',
+            # Rules app — a single trigger button drives multiple actions
+            # by event type, so this category fans out to ALL THREE button
+            # event types (the only multi-event entry in this map). The
+            # value is a LIST; the loop below handles list-or-str. The
+            # pool_water_switches / pump_switch categories are pure OUTPUTS
+            # and are deliberately UNMAPPED (subscribing an output re-feeds
+            # our own commands back as events — the fan-storm failure mode).
+            'trigger_button': ['pushed', 'held', 'doubleTapped'],
         }
 
         # device_selections stores CANONICAL devices.id PKs (Phase 5).
@@ -878,9 +886,18 @@ class InstanceManager:
         subscriptions = []
 
         for category, device_ids in device_selections.items():
-            event_type = category_events.get(category)
-            if not event_type:
+            event_spec = category_events.get(category)
+            if not event_spec:
                 continue
+
+            # A category may subscribe to ONE event type (str) or SEVERAL
+            # (list/tuple — e.g. Rules' trigger_button → pushed/held/
+            # doubleTapped). Normalize to a list so the inner loop is uniform.
+            event_types = (
+                list(event_spec)
+                if isinstance(event_spec, (list, tuple))
+                else [event_spec]
+            )
 
             for device_id in device_ids:
                 # Selection entries are canonical PKs (post-Phase-5 schema).
@@ -892,15 +909,16 @@ class InstanceManager:
                         f"in instance {instance_id} ({category})"
                     )
                     continue
-                key = (canonical_id, event_type)
-                if key in sub_keys:
-                    continue
-                sub_keys.add(key)
-                subscriptions.append({
-                    'device_id':   canonical_id,
-                    'instance_id': instance_id,
-                    'event_type':  event_type,
-                })
+                for event_type in event_types:
+                    key = (canonical_id, event_type)
+                    if key in sub_keys:
+                        continue
+                    sub_keys.add(key)
+                    subscriptions.append({
+                        'device_id':   canonical_id,
+                        'instance_id': instance_id,
+                        'event_type':  event_type,
+                    })
 
         if subscriptions:
             try:

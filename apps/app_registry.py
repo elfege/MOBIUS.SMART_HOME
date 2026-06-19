@@ -79,6 +79,12 @@ def initialize_registry(instance_manager=None) -> None:
     from apps.power_management.app import PowerManagementApp
     register_app_type(PowerManagementApp)
 
+    # Rules — case-based button/event automations (hand-coded per case, NOT
+    # a rule engine). First case: pool button → toggle pool-water switches
+    # together (tap) / pump (double-tap) / all-off (hold).
+    from apps.rules.app import RulesApp
+    register_app_type(RulesApp)
+
     # Register with instance manager if provided
     if instance_manager:
         for type_name, app_class in _app_types.items():

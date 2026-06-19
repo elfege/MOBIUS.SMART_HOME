@@ -515,6 +515,34 @@ def run_db_migrations():
         "  AND jsonb_array_length(coalesce(ai.device_selections->'keep_on_switches', '[]'::jsonb)) > 0 "
         "  AND jsonb_array_length(coalesce(ai.settings->'keepOnModes', '[]'::jsonb)) = 0",
 
+        # ====================================================================
+        # 2026-06-19 — device presence flag (prune support).
+        # The classifier only ever UPSERTED devices present on the hubs; it
+        # never removed ones that vanished, so a device removed from a hub
+        # lingered forever in the registry AND stayed selectable in the
+        # wizard (operator-reported: orphan canonical 101 'Light piano').
+        # run_classification now marks is_present=false for any device whose
+        # last_synced_at predates the run (i.e. it wasn't in the latest
+        # pull); the wizard/device pickers filter is_present=true. Default
+        # true so existing rows stay visible until the first post-migration
+        # classification re-evaluates them. Hard delete is intentionally
+        # NOT used — event_log / device_subscriptions FK-reference devices,
+        # and historical event_log must survive a device removal.
+        # ====================================================================
+        "ALTER TABLE dshub.devices "
+        "ADD COLUMN IF NOT EXISTS is_present boolean NOT NULL DEFAULT true",
+        # PostgREST exposes the `api` schema; `devices` is an api VIEW with
+        # an EXPLICIT column list, so the base-table ALTER above is invisible
+        # to the API until the view is recreated. CREATE OR REPLACE VIEW
+        # permits APPENDING a column at the end (not reorder/remove), which
+        # is exactly what we need. The view stays simple/auto-updatable so
+        # the classifier's PATCH .../devices?last_synced_at=... is_present
+        # writes through to dshub.devices. Grants are preserved by REPLACE.
+        "CREATE OR REPLACE VIEW api.devices AS "
+        "SELECT id, hub_ip, hubitat_id, name, label, device_type, protocol, "
+        "capabilities, attributes, last_synced_at, hub_id, is_name_duplicate, "
+        "is_present FROM dshub.devices",
+
         # Tell PostgREST to reload its schema cache. Without this, columns
         # added by ALTER TABLE above are invisible to PostgREST's OpenAPI
         # and POST/PATCH requests fail with PGRST204 "column does not exist".
@@ -737,6 +765,29 @@ async def lifespan(app: FastAPI):
         logger.info("instance_revive_watchdog: scheduled every 300s (grace 900s)")
     except Exception as e:
         logger.warning(f"instance_revive_watchdog schedule failed: {e}")
+
+    # Periodic device reclassification (2026-06-19). Classification used to
+    # run ONLY at startup or on a manual refresh (↻), so a device removed
+    # from a hub lingered in the registry indefinitely and stayed
+    # selectable (operator-reported orphan 'Light piano'). Re-running every
+    # 10 min lets the presence-prune (devices.is_present) reflect hub
+    # add/remove within minutes. run_classification is sync HTTP across all
+    # hubs; APScheduler runs it in a worker thread so the loop is unblocked.
+    try:
+        from services.scheduler_service import get_scheduler
+        from services.device_to_hubs_classifier import (
+            run_classification as _run_classification,
+        )
+        get_scheduler()._scheduler.add_job(
+            func=_run_classification,
+            trigger='interval',
+            seconds=600,
+            id='device_reclassify',
+            replace_existing=True,
+        )
+        logger.info("device_reclassify: scheduled every 600s")
+    except Exception as e:
+        logger.warning(f"device_reclassify schedule failed: {e}")
 
     # Hubitat admin-API contract-drift watch (2026-05-26).
     # Firmware 2.5.0.143 changed POST /device/runmethod from form-encoded to
@@ -1337,6 +1388,11 @@ async def get_devices(capability: Optional[str] = Query(None)):
             'select': 'id,hub_ip,hubitat_id,label,name,device_type,'
                       'protocol,capabilities,attributes',
             'order': 'label',
+            # Hide devices that have been pruned from their hub. The
+            # classifier sets is_present=false when a device stops
+            # appearing in the hub pull (2026-06-19). Removed devices must
+            # not stay selectable in the wizard.
+            'is_present': 'eq.true',
         }
         if capability:
             # PostgREST JSONB array-contains: cs.["value"] for JSONB array
@@ -1382,6 +1438,9 @@ async def get_devices_by_categories(categories: str = Query(...)):
                 'select': 'id,hub_ip,hubitat_id,label,name,device_type,'
                           'protocol,capabilities,attributes',
                 'order': 'label',
+                # Hide hub-pruned devices (is_present=false), same as the
+                # per-capability /devices endpoint above. 2026-06-19.
+                'is_present': 'eq.true',
             },
             timeout=5,
         )

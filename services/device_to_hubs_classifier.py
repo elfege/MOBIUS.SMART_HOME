@@ -322,6 +322,71 @@ def _ingest_into_devices(natives: List[Dict[str, Any]]) -> None:
     )
 
 
+def _mark_device_presence(run_start) -> None:
+    """
+    Flip ``devices.is_present`` based on whether each row was refreshed in
+    the current classification run.
+
+    Every device seen in this run was upserted with ``last_synced_at =
+    NOW()`` (>= ``run_start``); a device that has vanished from its hub
+    keeps its older ``last_synced_at``. Two PostgREST PATCHes:
+
+      - ``last_synced_at >= run_start`` → ``is_present = true``  (re-marks a
+        device that re-appeared, too)
+      - ``last_synced_at <  run_start`` → ``is_present = false`` (pruned)
+
+    Hard delete is deliberately avoided: ``event_log`` /
+    ``device_subscriptions`` FK-reference ``devices`` and historical
+    event_log must survive a device removal. The wizard/device pickers
+    filter ``is_present = true`` so a pruned device disappears from
+    selection while existing instances keep routing until reconfigured.
+
+    Caller guards this on a non-empty pull so a total hub-fetch failure
+    never marks the whole registry absent. (2026-06-19)
+
+    Args:
+        run_start: timezone-aware datetime captured before the ingest.
+    """
+    pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    iso = run_start.isoformat()
+    headers = {"Content-Type": "application/json", "Prefer": "return=minimal"}
+    try:
+        rp = requests.patch(
+            f"{pg}/devices",
+            params={"last_synced_at": f"gte.{iso}"},
+            json={"is_present": True},
+            headers=headers,
+            timeout=10,
+        )
+        ra = requests.patch(
+            f"{pg}/devices",
+            params={"last_synced_at": f"lt.{iso}"},
+            json={"is_present": False},
+            headers=headers,
+            timeout=10,
+        )
+        if rp.status_code not in (200, 204) or ra.status_code not in (200, 204):
+            logger.warning(
+                f"presence prune: unexpected status present={rp.status_code} "
+                f"absent={ra.status_code} ({rp.text[:120]} / {ra.text[:120]})"
+            )
+        else:
+            # Count what's now absent so the prune is visible in the log.
+            try:
+                rc = requests.get(
+                    f"{pg}/devices",
+                    params={"is_present": "eq.false", "select": "id"},
+                    headers={"Prefer": "count=exact"},
+                    timeout=5,
+                )
+                absent = rc.headers.get("content-range", "*/?").split("/")[-1]
+            except Exception:
+                absent = "?"
+            logger.info(f"presence prune: marked present/absent OK (absent now={absent})")
+    except Exception as e:
+        logger.warning(f"presence prune failed: {e}")
+
+
 def classify_hub(
     hub_name: str,
     hub_ip: str,
@@ -450,6 +515,14 @@ def run_classification() -> Dict[str, Any]:
     if not hubs:
         return {"error": "No hub configurations found in environment"}
 
+    # Capture the run start BEFORE any ingest. Every device present in this
+    # run gets last_synced_at = NOW() (>= run_start) via upsert_device;
+    # devices that have vanished from the hubs keep their older
+    # last_synced_at. _mark_device_presence() below uses this boundary to
+    # flip is_present. Must be captured before the ingest so the comparison
+    # is meaningful. (2026-06-19 prune support.)
+    run_start = datetime.now(timezone.utc)
+
     # Step 1: Classify each hub
     hub_results = {}
     for cfg in hubs:
@@ -492,6 +565,18 @@ def run_classification() -> Dict[str, Any]:
         _ingest_into_devices(all_natives)
     except Exception as e:
         logger.warning(f"_ingest_into_devices (global) failed: {e}")
+
+    # Prune pass: flip is_present based on whether each device was seen in
+    # THIS run. Guarded on a non-empty pull — if every hub fetch failed
+    # (all_natives empty), we must NOT mark the whole registry absent and
+    # blank the wizard. (2026-06-19)
+    if all_natives:
+        _mark_device_presence(run_start)
+    else:
+        logger.warning(
+            "classifier: empty pull — skipping presence prune to avoid "
+            "marking the entire device registry absent"
+        )
 
     # Step 3: device_hub_mapping cross-reference (command routing). Native
     # registry = WINNERS only (is_name_duplicate=false); mirrors come from

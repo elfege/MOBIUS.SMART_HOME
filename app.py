@@ -2135,6 +2135,17 @@ async def matter_nodes():
                 node['_is_online'] = match.get('is_online')
                 node['_last_seen_at'] = match.get('last_seen_at')
 
+                # Resolve to the CURRENT canonical device via the exact
+                # (hub_ip, hubitat_id) anchor (2026-06-19). This is what the
+                # UI's Test ON/OFF and staleness must use — NOT the frozen
+                # maker-api id above (the #660 bug). None => stale mapping.
+                from services.matter_mapping import resolve_node_to_device
+                _canon = resolve_node_to_device(node_id)
+                node['_canonical_id'] = _canon.get('id') if _canon else None
+                node['_canonical_label'] = _canon.get('label') if _canon else None
+                node['_canonical_hubitat_id'] = _canon.get('hubitat_id') if _canon else None
+                node['_mapping_stale'] = _canon is None
+
                 # Backfill: if matched by UniqueID but our_node_id not set, update DB
                 if not match.get('our_node_id') and node_id:
                     try:
@@ -2203,11 +2214,13 @@ async def matter_commission(body: MatterCommissionRequest):
 
 @app.get("/api/matter/map", tags=["matter"])
 async def matter_mappings():
-    """Get all Hubitat-to-Matter device mappings."""
-    from services.matter_client import get_all_matter_mappings
-    # get_all_matter_mappings() is sync (blocking requests.get on PostgREST);
-    # offload to a worker thread so a slow lookup can't hold the event loop.
-    return await asyncio.to_thread(get_all_matter_mappings)
+    """Get all Hubitat-to-Matter device mappings, enriched with the resolved
+    CURRENT canonical device (so the table reflects re-pairs / staleness
+    instead of the frozen commission-time id). See services.matter_mapping.
+    """
+    from services.matter_mapping import get_device_matter_map_enriched
+    # Sync (blocking PostgREST) — offload so a slow lookup can't hold the loop.
+    return await asyncio.to_thread(get_device_matter_map_enriched)
 
 
 @app.post("/api/matter/map", tags=["matter"])

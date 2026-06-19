@@ -229,14 +229,26 @@ $(document).ready(function () {
                          style="margin-left:auto;font-size:.72rem;padding:.1rem .45rem;border-radius:4px;background:${longGone ? 'rgba(192,86,74,.25)' : 'rgba(199,154,90,.22)'};color:${longGone ? '#e6857a' : '#d9b277'};">⚠ unresponsive · ${seenAgo}</span>`
                 : '';
 
-            // 5.3 — quick link to the device on its Hubitat hub (when mapped).
+            // 5.3 — quick link to the CURRENT canonical device on its hub.
+            // Resolved server-side via the exact (hub_ip, hubitat_id) anchor
+            // (2026-06-19) — NOT the frozen maker-api id that produced the
+            // dead "#660" link. node._mapping_stale=true means the node no
+            // longer resolves to any present device (re-paired away / removed).
             const hubIp = node._hub_ip;
-            const hubDevId = node._hubitat_device_id || (mapped && mapped.hubitat_device_id);
-            const mappedHtml = (hubIp && hubDevId)
-                ? `<div class="node-mapped">Mapped to Hubitat
-                       <a href="http://${hubIp}/device/edit/${hubDevId}" target="_blank" rel="noopener"
-                          title="Open on the Hubitat hub">#${hubDevId} ↗</a></div>`
-                : (mapped ? `<div class="node-mapped">Mapped to Hubitat #${mapped.hubitat_device_id}</div>` : '');
+            const canonHubId = node._canonical_hubitat_id;   // current admin id
+            const canonLabel = node._canonical_label;
+            let mappedHtml;
+            if (node._mapping_stale) {
+                mappedHtml = `<div class="node-mapped node-mapped--stale"
+                       title="This Matter node no longer resolves to a present Hubitat device (re-paired or removed). Re-map it.">
+                       ⚠ mapping stale — no current device</div>`;
+            } else if (hubIp && canonHubId) {
+                mappedHtml = `<div class="node-mapped">Mapped to
+                       <a href="http://${hubIp}/device/edit/${canonHubId}" target="_blank" rel="noopener"
+                          title="Open on the Hubitat hub">${escapeHtml(canonLabel || ('#' + canonHubId))} (#${canonHubId}) ↗</a></div>`;
+            } else {
+                mappedHtml = '';
+            }
 
             html += `
                 <div class="node-card${stale ? ' node-card--stale' : ''}" data-node-id="${nodeId}" ${cardStyle}>
@@ -306,11 +318,14 @@ $(document).ready(function () {
         `;
 
         for (const m of mappings) {
-            // Try to find Hubitat device name
-            const hDevice = hubitatDevices.find(
-                d => String(d.id) === String(m.hubitat_device_id)
-            );
-            const hName = hDevice ? hDevice.label || hDevice.name : '';
+            // Resolved CURRENT device, computed server-side from
+            // matter_node_id → canonical (services.matter_mapping). m.stale
+            // means the mapping no longer points at a present device (the
+            // #660 / re-paired-away case). The old client-side check compared
+            // canonical d.id to the frozen hubitat_device_id — different id
+            // spaces — and was structurally wrong; removed.
+            const curLabel = m.canonical_label;
+            const curHubId = m.canonical_hubitat_id;
 
             // Correlate to the enriched node (matterNodes carry _is_online /
             // _last_seen_at) for responsiveness. Highlights the Remove button
@@ -333,8 +348,10 @@ $(document).ready(function () {
                 : '';
 
             html += `
-                <tr${st.longGone ? ' style="background:rgba(192,86,74,.06);"' : ''}>
-                    <td>#${m.hubitat_device_id} ${escapeHtml(hName)}${staleMark}</td>
+                <tr${(st.longGone || m.stale) ? ' style="background:rgba(192,86,74,.06);"' : ''}>
+                    <td>${m.stale
+                        ? `<span style="color:#e6857a;" title="No current device resolves for this mapping (re-paired or removed)">⚠ stale</span> <span style="opacity:.55;">(was #${m.hubitat_device_id})</span>`
+                        : `${escapeHtml(curLabel || '(unknown)')} <span style="opacity:.55;">(#${curHubId})</span>`}${staleMark}</td>
                     <td>${m.matter_node_id}</td>
                     <td>${m.matter_endpoint_id}</td>
                     <td>${escapeHtml(m.device_name || '')}</td>
@@ -512,26 +529,34 @@ $(document).ready(function () {
      * Uses the mapping if available, otherwise sends directly.
      */
     function testMatterCommand(nodeId, command) {
-        // Find if this node has a Hubitat mapping
-        const mapping = mappings.find(m => m.matter_node_id === nodeId);
+        // Resolve to the CURRENT canonical device id, computed server-side via
+        // the exact (hub_ip, hubitat_id) anchor (2026-06-19). The command
+        // endpoint takes a CANONICAL devices.id — sending the old frozen
+        // maker-api id (#660) hit nothing, which is why Test ON/OFF "failed".
+        const node = matterNodes.find(n => (n.node_id || n.nodeId) === nodeId);
+        const canonicalId = node && node._canonical_id;
 
-        if (mapping) {
-            // Send via Hubitat device command (which triggers dual-command)
-            $.ajax({
-                url: `/api/devices/${mapping.hubitat_device_id}/command`,
-                method: 'POST',
-                contentType: 'application/json',
-                data: JSON.stringify({ command: command })
-            })
-            .done(function () {
-                console.log(`Test ${command} sent to Hubitat #${mapping.hubitat_device_id} + Matter node ${nodeId}`);
-            })
-            .fail(function (xhr) {
-                showToast(`Test failed: ${xhr.responseJSON?.detail || 'Unknown error'}`, 'error');
-            });
-        } else {
-            showToast(`Node ${nodeId} is not mapped to a Hubitat device. Create a mapping first.`, 'info');
+        if (!node || node._mapping_stale || !canonicalId) {
+            showToast(
+                `Node ${nodeId} doesn't resolve to a current Hubitat device `
+                + `(mapping stale or uncommissioned). Re-map it first.`,
+                'info'
+            );
+            return;
         }
+
+        $.ajax({
+            url: `/api/devices/${canonicalId}/command`,
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ command: command })
+        })
+        .done(function () {
+            console.log(`Test ${command} → canonical #${canonicalId} (Matter node ${nodeId})`);
+        })
+        .fail(function (xhr) {
+            showToast(`Test failed: ${xhr.responseJSON?.detail || 'Unknown error'}`, 'error');
+        });
     }
 
     // =========================================================================

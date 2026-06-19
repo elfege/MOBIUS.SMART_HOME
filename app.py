@@ -716,6 +716,28 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"mode_poller schedule failed: {e}")
 
+    # Dead-instance watchdog (2026-06-19). Revives app instances whose
+    # worker was left stopped (e.g. an abandoned edit — the wizard stops a
+    # worker on edit-entry and only restarts it on save/cancel) past the
+    # grace window. Closes the gap that left instance 5 (Motion Kitchen)
+    # dead ~7h on 2026-06-18 with the kitchen unmanaged. Paused instances
+    # are never revived. grace 900s, checked every 300s → an abandoned edit
+    # self-heals within ~20 min instead of staying dead indefinitely.
+    try:
+        from services.scheduler_service import get_scheduler
+        from services.instance_manager import get_instance_manager
+        _im = get_instance_manager()
+        get_scheduler()._scheduler.add_job(
+            func=lambda: _im.revive_dead_instances(grace_seconds=900),
+            trigger='interval',
+            seconds=300,
+            id='instance_revive_watchdog',
+            replace_existing=True,
+        )
+        logger.info("instance_revive_watchdog: scheduled every 300s (grace 900s)")
+    except Exception as e:
+        logger.warning(f"instance_revive_watchdog schedule failed: {e}")
+
     # Hubitat admin-API contract-drift watch (2026-05-26).
     # Firmware 2.5.0.143 changed POST /device/runmethod from form-encoded to
     # JSON with no backward compat, silently breaking every command. This

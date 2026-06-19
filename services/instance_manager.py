@@ -12,6 +12,7 @@ represents a user-created automation (e.g., "Advanced Lights - Office").
 """
 
 import os
+import time
 import logging
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -76,6 +77,13 @@ class InstanceManager:
         # Runtime instances (keyed by instance_id)
         # These are the actual Python app objects that process events
         self._running_instances: Dict[int, Any] = {}
+
+        # instance_id → monotonic ts of its last stop_instance(). Used by
+        # the dead-instance watchdog (revive_dead_instances) to leave a
+        # transient edit-stop alone during its grace window while still
+        # reviving a worker that's been stopped-and-not-restarted past it
+        # (abandoned edit / crashed start). Cleared on successful start.
+        self._recently_stopped: Dict[int, float] = {}
 
         # App type registry (populated by app modules on import)
         self._app_types: Dict[str, Type] = {}
@@ -697,6 +705,9 @@ class InstanceManager:
 
             # Track
             self._running_instances[instance_id] = app_instance
+            # Successful (re)start clears any stale stop marker so the
+            # watchdog's grace logic starts fresh next time it's stopped.
+            self._recently_stopped.pop(instance_id, None)
             self.logger.info(
                 f"Started instance {instance_id} ({app_instance.label}) "
                 f"— devices: {list(instance_data.get('device_selections', {}).keys())}"
@@ -742,8 +753,79 @@ class InstanceManager:
             )
 
         del self._running_instances[instance_id]
+        # Stamp for the dead-instance watchdog's grace window. A normal
+        # edit (stop → save/cancel → start) clears this on the restart;
+        # an ABANDONED edit leaves it set, and the watchdog revives the
+        # instance once the grace window elapses.
+        self._recently_stopped[instance_id] = time.monotonic()
         self.logger.info(f"Stopped instance {instance_id} ({label})")
         return True
+
+    def revive_dead_instances(self, grace_seconds: int = 900) -> Dict[str, Any]:
+        """
+        Watchdog: revive instances that SHOULD be running but whose worker
+        is dead — present in the DB, not paused, yet absent from
+        ``_running_instances``.
+
+        Transient edit-stops are protected by the ``_recently_stopped``
+        grace window: the wizard stops a worker on edit-entry and restarts
+        it on save/cancel, so a recently-stopped instance is left alone for
+        ``grace_seconds``. Past that window a still-stopped, not-paused
+        instance is treated as an ABANDONED edit (or a start that crashed)
+        and revived. PAUSED instances are never revived — pause is the
+        supported way to keep an instance intentionally off; ``stop`` is
+        meant to be transient.
+
+        Root cause this closes: 2026-06-18, instance 5 (Motion Kitchen) was
+        left stopped after an abandoned edit and ran dead ~7 h, leaving the
+        kitchen unmanaged with no self-heal. Returns a small report dict.
+        """
+        revived: List[int] = []
+        skipped_paused = 0
+        skipped_grace = 0
+        now = time.monotonic()
+
+        try:
+            instances = self.get_all_instances()
+        except Exception as e:
+            self.logger.warning(f"revive_dead_instances: list failed: {e}")
+            return {"status": "error", "error": str(e)}
+
+        for inst in instances:
+            iid = inst.get('id')
+            if iid is None or iid in self._running_instances:
+                continue
+            if inst.get('is_paused'):
+                skipped_paused += 1
+                continue
+            stopped_at = self._recently_stopped.get(iid)
+            if stopped_at is not None and (now - stopped_at) < grace_seconds:
+                skipped_grace += 1
+                continue
+
+            self.logger.warning(
+                f"watchdog: instance {iid} ({inst.get('label', '?')}) is in "
+                f"DB, not paused, not running — reviving"
+            )
+            try:
+                if self._start_from_db(iid):
+                    revived.append(iid)
+            except Exception as e:
+                self.logger.error(
+                    f"watchdog: revive of instance {iid} raised: {e}",
+                    exc_info=True
+                )
+
+        if revived:
+            self.logger.info(
+                f"watchdog: revived {len(revived)} dead instance(s): {revived}"
+            )
+        return {
+            "status": "ok",
+            "revived": revived,
+            "skipped_paused": skipped_paused,
+            "skipped_grace": skipped_grace,
+        }
 
     def _start_from_db(self, instance_id: int) -> bool:
         """

@@ -110,6 +110,93 @@ def resolve_node_to_device(node_id: int) -> Optional[Dict[str, Any]]:
         return None
 
 
+def resolve_device_to_node(canonical_id) -> Optional[Dict[str, Any]]:
+    """
+    Reverse of :func:`resolve_node_to_device`: given a canonical
+    ``devices.id``, return the Matter node that controls it (if Mobius's
+    matter-server has it commissioned), or None.
+
+    Chain (the same exact composite key, in reverse):
+        canonical devices.id
+            -> devices(id) -> (hub_ip, hubitat_id)
+            -> hubitat_matter_devices[(hub_ip, hubitat_device_id),
+                                       our_node_id IS NOT NULL]
+            -> {node_id, endpoint_id, is_online, ...}
+
+    This is what device_commander uses to decide whether a command can go
+    over Matter directly. It deliberately requires ``our_node_id`` (the
+    node is commissioned to US) — a device merely paired to Hubitat's
+    Matter bridge but not to our server is NOT Matter-controllable by us
+    and must use the Hubitat path.
+
+    Args:
+        canonical_id: canonical devices.id (what apps/device_commander use).
+
+    Returns:
+        {node_id, endpoint_id, is_online, unique_id, device_name} or None.
+    """
+    if canonical_id is None:
+        return None
+    pg = _pg()
+    try:
+        rd = requests.get(
+            f"{pg}/devices",
+            params={
+                "id": f"eq.{canonical_id}",
+                "select": "hub_ip,hubitat_id",
+                "limit": "1",
+            },
+            timeout=5,
+        )
+        if rd.status_code != 200 or not rd.json():
+            return None
+        dev = rd.json()[0]
+
+        rh = requests.get(
+            f"{pg}/hubitat_matter_devices",
+            params={
+                "hub_ip": f"eq.{dev['hub_ip']}",
+                "hubitat_device_id": f"eq.{dev['hubitat_id']}",
+                "our_node_id": "not.is.null",
+                "select": "our_node_id,is_online,unique_id,device_name",
+                "limit": "1",
+            },
+            timeout=5,
+        )
+        if rh.status_code != 200 or not rh.json():
+            return None
+        hmd = rh.json()[0]
+
+        # matter_endpoint_id lives in device_matter_map (default 1); most
+        # single-endpoint devices are endpoint 1. Look it up best-effort.
+        endpoint_id = 1
+        try:
+            rm = requests.get(
+                f"{pg}/device_matter_map",
+                params={
+                    "matter_node_id": f"eq.{hmd['our_node_id']}",
+                    "select": "matter_endpoint_id",
+                    "limit": "1",
+                },
+                timeout=5,
+            )
+            if rm.status_code == 200 and rm.json():
+                endpoint_id = rm.json()[0].get("matter_endpoint_id") or 1
+        except Exception:
+            pass
+
+        return {
+            "node_id": hmd["our_node_id"],
+            "endpoint_id": endpoint_id,
+            "is_online": hmd.get("is_online"),
+            "unique_id": hmd.get("unique_id"),
+            "device_name": hmd.get("device_name"),
+        }
+    except Exception as e:
+        logger.warning(f"resolve_device_to_node({canonical_id}) failed: {e}")
+        return None
+
+
 def list_mappings() -> List[Dict[str, Any]]:
     """
     Authoritative mapping list, derived from CURRENT discovery state rather

@@ -643,3 +643,35 @@ def get_matter_client() -> MatterClient:
     if _matter_client is None:
         _matter_client = MatterClient()
     return _matter_client
+
+
+# =========================================================================
+# Sync bridge — call the (async) Matter client from worker threads
+# =========================================================================
+#
+# device_commander runs commands in a ThreadPoolExecutor (no running event
+# loop in that thread). The Matter client lives on the main asyncio loop.
+# To let the sync command path drive Matter, we capture the main loop at
+# app startup and submit coroutines to it via run_coroutine_threadsafe,
+# blocking the worker thread on the result. This is deadlock-safe because
+# the worker thread is never the loop thread.
+
+_event_loop: "Optional[asyncio.AbstractEventLoop]" = None
+
+
+def set_event_loop(loop) -> None:
+    """Record the main asyncio loop (called once from app startup)."""
+    global _event_loop
+    _event_loop = loop
+
+
+def run_on_loop(coro, timeout: float = 6.0):
+    """
+    Run a coroutine on the captured main loop from a worker thread and
+    return its result. Raises RuntimeError if the loop wasn't captured,
+    and propagates the coroutine's own exceptions / a TimeoutError.
+    """
+    if _event_loop is None:
+        raise RuntimeError("matter_client.set_event_loop() was never called")
+    fut = asyncio.run_coroutine_threadsafe(coro, _event_loop)
+    return fut.result(timeout=timeout)

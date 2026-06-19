@@ -531,6 +531,20 @@ def run_db_migrations():
         # ====================================================================
         "ALTER TABLE dshub.devices "
         "ADD COLUMN IF NOT EXISTS is_present boolean NOT NULL DEFAULT true",
+
+        # 2026-06-19 — Matter-primary command routing flag (default OFF).
+        # When true, device_commander drives commands for devices commissioned
+        # to OUR matter-server (and online) DIRECTLY over Matter, with Hubitat
+        # as fallback. Default false keeps this critical-path change dormant
+        # until validated. Idempotent insert; never clobbers an operator's
+        # chosen value (ON CONFLICT DO NOTHING).
+        "INSERT INTO dshub.system_settings "
+        "(key, value, value_type, description, ui_exposed, requires_restart) "
+        "VALUES ('matter_primary_enabled', 'false', 'bool', "
+        "'When TRUE: commands for devices commissioned to our matter-server "
+        "(and online) go DIRECTLY over Matter (faster + independent of "
+        "Hubitat''s Matter bridge); Hubitat is the fallback. Default false.', "
+        "true, false) ON CONFLICT (key) DO NOTHING",
         # PostgREST exposes the `api` schema; `devices` is an api VIEW with
         # an EXPLICIT column list, so the base-table ALTER above is invisible
         # to the API until the view is recreated. CREATE OR REPLACE VIEW
@@ -586,6 +600,16 @@ def run_db_migrations():
 async def lifespan(app: FastAPI):
     """Application lifecycle: initialize services on startup, cleanup on shutdown."""
     initialize_services()
+
+    # Capture the main asyncio loop so worker-thread code (device_commander's
+    # ThreadPoolExecutor) can drive the async Matter client via
+    # run_coroutine_threadsafe. Used by the Matter-primary command path.
+    try:
+        import asyncio as _asyncio
+        from services import matter_client as _mc
+        _mc.set_event_loop(_asyncio.get_running_loop())
+    except Exception as e:
+        logger.warning(f"matter_client.set_event_loop failed: {e}")
 
     # Apply any pending schema migrations
     run_db_migrations()

@@ -222,18 +222,13 @@ class DeviceCommander:
         Returns:
             CommandResult with success, verified, actual_state, timing, etc.
         """
-        # 1. Fire Matter first (async, non-blocking) — fastest path
-        #    Set UPDATING status early so _handle_switch() knows a command
-        #    is in-flight and won't interpret the state change as a manual
-        #    override. See docs/dual_command_flow.html for full flow diagram.
-        try:
-            self._fire_matter_command(device_id, command, args)
-        except Exception as e:
-            logger.debug(
-                f"Matter pre-dispatch failed for device {device_id}: {e}"
-            )
-
-        # 2. Fire Hubitat command (full retry + verify cycle)
+        # Matter-primary handling now lives at the TOP of
+        # _execute_command_sync (both the async and sync entry points funnel
+        # through it in the executor thread, where the sync->async bridge to
+        # the Matter client is valid). The old fire-and-forget pre-dispatch
+        # here was removed 2026-06-19: it resolved the mapping by the wrong
+        # id space (frozen hubitat_device_id vs the canonical id callers
+        # pass) so it almost never fired, and it raced the Hubitat command.
         try:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
@@ -296,17 +291,9 @@ class DeviceCommander:
         Returns:
             CommandResult with full execution details
         """
-        # 1. Fire Matter first (best-effort, non-blocking) — fastest path
-        #    _fire_matter_command uses create_task internally; if no event
-        #    loop is available (pure-thread context), it logs and skips.
-        try:
-            self._fire_matter_command(device_id, command, args)
-        except Exception as e:
-            logger.debug(
-                f"Matter pre-dispatch failed for device {device_id}: {e}"
-            )
-
-        # 2. Fire Hubitat command (full retry + verify cycle)
+        # Matter-primary handling is at the top of _execute_command_sync
+        # (see the async send_command note). One integration point, in the
+        # executor thread where the sync->async Matter bridge is valid.
         try:
             future = self._executor.submit(
                 self._execute_command_sync,
@@ -595,6 +582,20 @@ class DeviceCommander:
         Returns:
             CommandResult with full execution details
         """
+        # --- Matter-primary path (flag-gated, default OFF; 2026-06-19) ---
+        # When enabled AND this canonical device is commissioned to OUR
+        # matter-server and online, drive it DIRECTLY over Matter (faster +
+        # independent of Hubitat's Matter bridge). On ANY miss/failure we
+        # fall through to the Hubitat path below — Hubitat is the safety net
+        # and is NEVER silently skipped. Default OFF so this critical-path
+        # change stays dormant until explicitly enabled + validated.
+        if self._matter_primary_enabled():
+            mr = self._try_matter_primary(
+                device_id, command, args, verify, device_name
+            )
+            if mr is not None:
+                return mr
+
         # Resolve native hub — may remap device_id and client
         effective_client, effective_device_id, hub_name = (
             self._resolve_native_hub(device_id, device_name)
@@ -927,83 +928,151 @@ class DeviceCommander:
     # Matter Integration
     # =========================================================================
 
-    def _fire_matter_command(
-        self,
-        device_id: str,
-        command: str,
-        args: Optional[List]
-    ) -> None:
+    def _matter_primary_enabled(self) -> bool:
         """
-        Fire-and-forget Matter command for devices with a Matter mapping.
+        Whether Matter-primary command routing is enabled, from
+        ``system_settings.matter_primary_enabled`` (default **False**).
 
-        Checks the device_matter_map table via PostgREST. If a mapping exists,
-        translates the Hubitat command and sends via Matter WebSocket.
+        Cached ~30 s so we don't hit PostgREST on every command. Default OFF
+        keeps this critical-path feature dormant until an operator explicitly
+        turns it on and validates per-device.
+        """
+        now = time.monotonic()
+        if (now - getattr(self, "_mp_flag_ts", 0.0)) < 30.0:
+            return getattr(self, "_mp_flag_val", False)
+        val = getattr(self, "_mp_flag_val", False)
+        try:
+            import requests as _rq
+            pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+            r = _rq.get(
+                f"{pg}/system_settings",
+                params={"key": "eq.matter_primary_enabled",
+                        "select": "value", "limit": "1"},
+                timeout=3,
+            )
+            if r.status_code == 200 and r.json():
+                v = r.json()[0].get("value")
+                val = (v is True) or (str(v).strip().lower() == "true")
+            else:
+                val = False  # row absent → feature off
+        except Exception:
+            pass  # keep last known value on a transient lookup error
+        self._mp_flag_val = val
+        self._mp_flag_ts = now
+        return val
 
-        This is best-effort: failures are logged with full traceback but never
-        propagated to the caller.
+    def _try_matter_primary(
+        self,
+        device_id,
+        command: str,
+        args: Optional[List],
+        verify: bool,
+        device_name: str,
+    ) -> Optional["CommandResult"]:
+        """
+        Try to execute a command DIRECTLY over Matter.
 
-        Args:
-            device_id: Hubitat device ID
-            command: Hubitat command name
-            args: Hubitat command arguments
+        Returns a CommandResult on success; returns **None** to signal
+        "fall through to the Hubitat path" for ANY miss — not commissioned to
+        us, node offline, matter-server down, untranslatable command, or the
+        Matter send/verify failed. None ALWAYS means "use Hubitat", so the
+        fallback is never silently skipped.
+
+        Runs in the executor thread; the async Matter client is driven via
+        ``matter_client.run_on_loop`` (run_coroutine_threadsafe to the main
+        loop). Verification reads the OnOff attribute back over Matter (not
+        the Hubitat cache — that cache is exactly what goes zombie when the
+        hub's Matter bridge breaks). On success the verified state is pushed
+        into our cache so downstream apps don't depend on a hub event.
         """
         try:
-            from services.matter_client import (
-                get_matter_mapping,
-                get_matter_client,
+            from services.matter_mapping import resolve_device_to_node
+            from services import matter_client as mc
+
+            node = resolve_device_to_node(device_id)
+            if not node or not node.get("node_id"):
+                return None                       # not Matter-controllable by us
+            if node.get("is_online") is False:
+                return None                       # offline → Hubitat
+            client = mc.get_matter_client()
+            if not client.is_connected:
+                return None                       # matter-server down → Hubitat
+
+            node_id = node["node_id"]
+            endpoint_id = node.get("endpoint_id", 1) or 1
+            expected = resolve_expected_state(command, args) if verify else None
+            expected_val = expected.get("expected") if isinstance(expected, dict) else None
+
+            # --- send (sync-bridged) ---
+            send_res = mc.run_on_loop(
+                client.send_hubitat_command(
+                    node_id=node_id, endpoint_id=endpoint_id,
+                    hubitat_command=command, hubitat_args=args,
+                ),
+                timeout=6.0,
             )
-            mapping = get_matter_mapping(device_id)
-            if not mapping:
-                return
+            if send_res is None:
+                return None                       # untranslatable cmd → Hubitat
 
-            client = get_matter_client()
-            try:
-                loop = asyncio.get_running_loop()
+            verified = False
+            actual = None
+            if verify and command in ("on", "off"):
+                # OnOff cluster (6), attribute OnOff (0) → bool
+                raw = mc.run_on_loop(
+                    client.read_attribute(node_id, endpoint_id, 6, 0),
+                    timeout=5.0,
+                )
+                actual = "on" if bool(raw) else "off"
+                verified = (actual == (expected_val or command))
+                if not verified:
+                    logger.info(
+                        f"[Cmd] {device_name or device_id} MATTER node {node_id} "
+                        f"{command} unverified (got {actual}, want "
+                        f"{expected_val or command}) → Hubitat fallback"
+                    )
+                    return None                   # couldn't confirm → Hubitat
+            else:
+                # setLevel / color: accept send success for v1 (no Matter
+                # read-back). verified stays False unless no verify requested.
+                verified = (expected is None)
 
-                async def _matter_fire_and_forget():
-                    """Wrapper that catches Matter exceptions so asyncio
-                    doesn't log 'Task exception was never retrieved'."""
-                    try:
-                        await client.send_hubitat_command(
-                            node_id=mapping['matter_node_id'],
-                            endpoint_id=mapping['matter_endpoint_id'],
-                            hubitat_command=command,
-                            hubitat_args=args,
-                        )
-                    except Exception as exc:
-                        logger.debug(
-                            f"Matter dual-command failed for device "
-                            f"{device_id} (node {mapping['matter_node_id']}): "
-                            f"{exc}"
-                        )
+            # Best-effort: push verified state into our cache so downstream
+            # logic isn't dependent on the hub's (possibly zombie) bridge.
+            if command in ("on", "off"):
+                try:
+                    from services.device_cache import get_default_cache
+                    get_default_cache().update_device_attribute(
+                        device_id, "switch", command
+                    )
+                except Exception:
+                    pass
 
-                # Supervised: a crash inside _matter_fire_and_forget
-                # (e.g. matter-server SDK quirk on a specific node) used
-                # to vanish silently. Now logs ERROR with the per-device
-                # task name so the operator knows WHICH device's matter
-                # dispatch died.
-                supervised_spawn(
-                    _matter_fire_and_forget(),
-                    name=f"matter_dispatch_dev{device_id}",
-                )
-                logger.debug(
-                    f"Matter dual-command dispatched for device {device_id}: "
-                    f"node={mapping['matter_node_id']}, cmd={command}"
-                )
-            except RuntimeError:
-                # No running event loop (e.g., called from scheduler thread)
-                logger.debug(
-                    f"No event loop for Matter command on device {device_id}, "
-                    f"skipping Matter dispatch"
-                )
-        except ImportError:
-            # matter_client module not available — ignore silently
-            pass
+            logger.info(
+                f"[Cmd] {_C}{device_name or device_id}{_R} via MATTER "
+                f"node {node_id} ({command}) verified={verified}"
+            )
+            self._set_device_status(
+                device_id,
+                CommandStatus.VERIFIED if verified else CommandStatus.UPDATING,
+            )
+            return CommandResult(
+                device_id=str(device_id),
+                device_name=device_name or str(device_id),
+                command=command,
+                args=args,
+                success=True,
+                verified=verified,
+                expected_state=expected_val,
+                actual_state=actual,
+                status=CommandStatus.VERIFIED if verified else CommandStatus.UPDATING,
+                matter_sent=True,
+            )
         except Exception as e:
-            logger.warning(
-                f"Matter dual-command failed for device {device_id}: {e}",
-                exc_info=True
+            logger.debug(
+                f"Matter-primary attempt errored for device {device_id}: "
+                f"{e} → Hubitat fallback"
             )
+            return None
 
 
 # =========================================================================

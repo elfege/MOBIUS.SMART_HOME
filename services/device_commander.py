@@ -1016,36 +1016,34 @@ class DeviceCommander:
 
             verified = False
             actual = None
-            if verify and command in ("on", "off"):
-                # OnOff cluster (6), attribute OnOff (0) → bool
-                raw = mc.run_on_loop(
-                    client.read_attribute(node_id, endpoint_id, 6, 0),
-                    timeout=5.0,
+            if verify:
+                # Read the relevant attribute(s) BACK over Matter and compare.
+                # Covers on/off, setLevel, setColorTemperature, setColor — not
+                # just on/off. None => couldn't read (or unknown command) →
+                # fall through to Hubitat so we never report an unconfirmed
+                # success.
+                vres, actual = self._verify_matter_state(
+                    client, node_id, endpoint_id, command, args
                 )
-                actual = "on" if bool(raw) else "off"
-                verified = (actual == (expected_val or command))
-                if not verified:
+                if vres is None:
                     logger.info(
                         f"[Cmd] {device_name or device_id} MATTER node {node_id} "
-                        f"{command} unverified (got {actual}, want "
-                        f"{expected_val or command}) → Hubitat fallback"
+                        f"{command} could not be verified over Matter → "
+                        f"Hubitat fallback"
                     )
-                    return None                   # couldn't confirm → Hubitat
-            else:
-                # setLevel / color: accept send success for v1 (no Matter
-                # read-back). verified stays False unless no verify requested.
-                verified = (expected is None)
+                    return None
+                if not vres:
+                    logger.info(
+                        f"[Cmd] {device_name or device_id} MATTER node {node_id} "
+                        f"{command} unverified (got {actual}) → Hubitat fallback"
+                    )
+                    return None
+                verified = True
+            # else: caller didn't ask to verify; the send itself succeeded.
 
-            # Best-effort: push verified state into our cache so downstream
-            # logic isn't dependent on the hub's (possibly zombie) bridge.
-            if command in ("on", "off"):
-                try:
-                    from services.device_cache import get_default_cache
-                    get_default_cache().update_device_attribute(
-                        device_id, "switch", command
-                    )
-                except Exception:
-                    pass
+            # Best-effort: push the new state into our cache so downstream logic
+            # isn't dependent on the hub's (possibly zombie) Matter bridge.
+            self._push_matter_state_to_cache(device_id, command, args)
 
             logger.info(
                 f"[Cmd] {_C}{device_name or device_id}{_R} via MATTER "
@@ -1073,6 +1071,106 @@ class DeviceCommander:
                 f"{e} → Hubitat fallback"
             )
             return None
+
+    # Verification tolerances (Matter attribute units). setLevel/color use a
+    # MoveTo* with a ~1s transition, so we settle then compare with slack for
+    # ramp position + the Hubitat%→Matter(0-254) rounding.
+    _MATTER_LEVEL_TOL = 13     # ~5% of 254
+    _MATTER_MIRED_TOL = 25
+    _MATTER_HUESAT_TOL = 15
+    _MATTER_TRANSITION_SETTLE_S = 1.3   # transitionTime is 10 (=1.0s) + margin
+
+    def _verify_matter_state(
+        self, client, node_id: int, endpoint_id: int,
+        command: str, args: Optional[List],
+    ):
+        """
+        Read the attribute(s) a command should have changed BACK over Matter
+        and compare to the requested value.
+
+        Returns (verified: bool, actual: str) on a successful read, or
+        (None, None) when the state can't be read or the command isn't
+        verifiable — the caller treats None as "couldn't confirm → fall back
+        to Hubitat", never as success.
+        """
+        from services import matter_client as mc
+        from services.matter_client import (
+            CLUSTER_ON_OFF, CLUSTER_LEVEL_CONTROL, CLUSTER_COLOR_CONTROL,
+        )
+
+        def _read(cluster, attr):
+            return mc.run_on_loop(
+                client.read_attribute(node_id, endpoint_id, cluster, attr),
+                timeout=5.0,
+            )
+
+        try:
+            if command in ("on", "off"):
+                raw = _read(CLUSTER_ON_OFF, 0)          # OnOff attr 0 (bool)
+                actual = "on" if bool(raw) else "off"
+                return (actual == command), actual
+
+            # The MoveTo* commands ramp over the transition window — let it
+            # settle before reading current value.
+            if command in ("setLevel", "setColorTemperature", "setColor"):
+                time.sleep(self._MATTER_TRANSITION_SETTLE_S)
+
+            if command == "setLevel" and args:
+                want = min(254, max(0, int(int(args[0]) * 2.54)))
+                cur = int(_read(CLUSTER_LEVEL_CONTROL, 0))   # CurrentLevel
+                ok = abs(cur - want) <= self._MATTER_LEVEL_TOL
+                return ok, f"level={cur}/254 (want~{want})"
+
+            if command == "setColorTemperature" and args:
+                want = max(153, min(500, int(1_000_000 / int(args[0]))))
+                cur = int(_read(CLUSTER_COLOR_CONTROL, 7))   # ColorTempMireds
+                ok = abs(cur - want) <= self._MATTER_MIRED_TOL
+                return ok, f"mireds={cur} (want~{want})"
+
+            if command == "setColor" and args:
+                cm = args[0] if isinstance(args[0], dict) else {}
+                want_h = min(254, int(int(cm.get("hue", 0)) * 2.54))
+                want_s = min(254, int(int(cm.get("saturation", 100)) * 2.54))
+                cur_h = int(_read(CLUSTER_COLOR_CONTROL, 0))  # CurrentHue
+                cur_s = int(_read(CLUSTER_COLOR_CONTROL, 1))  # CurrentSaturation
+                ok = (abs(cur_h - want_h) <= self._MATTER_HUESAT_TOL
+                      and abs(cur_s - want_s) <= self._MATTER_HUESAT_TOL)
+                return ok, f"hue={cur_h},sat={cur_s}"
+
+            # Unknown / untranslatable command — can't verify over Matter.
+            return None, None
+        except Exception as e:
+            logger.debug(f"Matter verify read failed (node {node_id}): {e}")
+            return None, None
+
+    def _push_matter_state_to_cache(
+        self, device_id, command: str, args: Optional[List],
+    ) -> None:
+        """
+        Best-effort: mirror a Matter-applied command into our device_cache so
+        downstream apps don't depend on the hub's (possibly zombie) bridge
+        emitting the event. Never raises.
+        """
+        try:
+            from services.device_cache import get_default_cache
+            cache = get_default_cache()
+            if command in ("on", "off"):
+                cache.update_device_attribute(device_id, "switch", command)
+            elif command == "setLevel" and args:
+                cache.update_device_attribute(device_id, "switch", "on")
+                cache.update_device_attribute(device_id, "level", int(args[0]))
+            elif command == "setColorTemperature" and args:
+                cache.update_device_attribute(
+                    device_id, "colorTemperature", int(args[0]))
+            elif command == "setColor" and args and isinstance(args[0], dict):
+                if "hue" in args[0]:
+                    cache.update_device_attribute(
+                        device_id, "hue", int(args[0]["hue"]))
+                if "saturation" in args[0]:
+                    cache.update_device_attribute(
+                        device_id, "saturation", int(args[0]["saturation"]))
+        except Exception:
+            pass
 
 
 # =========================================================================

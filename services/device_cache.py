@@ -116,6 +116,7 @@ class DeviceCache:
             return self._memory_cache[key]
 
         # Try database
+        device = None
         try:
             response = requests.get(
                 f"{self.postgrest_url}/device_cache",
@@ -123,15 +124,46 @@ class DeviceCache:
                 timeout=5
             )
             if response.status_code == 200:
-                devices = response.json()
-                if devices:
-                    device = devices[0]
-                    self._memory_cache[key] = device
-                    return device
+                rows = response.json()
+                if rows:
+                    device = rows[0]
         except Exception as e:
             self.logger.error(f"Failed to get device from cache: {e}", exc_info=True)
 
-        return None
+        # Backfill STATIC capabilities from the canonical registry when the
+        # device_cache row lacks them. device_cache reliably carries live
+        # ATTRIBUTES, but rows created by update_device_attribute (webhook
+        # events) default to '[]' capabilities and are never filled. Caps
+        # live in dshub.devices. An empty caps list silently breaks AML's
+        # has_level / has_color checks — the device looks like it can't dim,
+        # so AML sends plain 'on' instead of 'setLevel' and dimming never
+        # happens (root cause of "dimming broke" 2026-06-20). Once per device,
+        # then memory-cached; never raises.
+        if device is not None and not device.get("capabilities"):
+            self._backfill_capabilities(key, device)
+
+        if device is not None:
+            self._memory_cache[key] = device
+        return device
+
+    def _backfill_capabilities(self, key: str, device: Dict[str, Any]) -> None:
+        """Fill an empty device-cache capabilities list from dshub.devices."""
+        try:
+            r = requests.get(
+                f"{self.postgrest_url}/devices",
+                params={"id": f"eq.{key}",
+                        "select": "capabilities,device_type", "limit": "1"},
+                timeout=5,
+            )
+            if r.status_code == 200 and r.json():
+                row = r.json()[0]
+                caps = row.get("capabilities")
+                if caps:
+                    device["capabilities"] = caps
+                if not device.get("device_type") and row.get("device_type"):
+                    device["device_type"] = row["device_type"]
+        except Exception as e:
+            self.logger.debug(f"caps backfill failed for device {key}: {e}")
 
     def get_devices_by_capability(self, capability: str) -> List[Dict[str, Any]]:
         """

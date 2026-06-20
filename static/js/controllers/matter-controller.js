@@ -955,7 +955,15 @@ $(document).ready(function () {
     function extractNodeName(node) {
         const nodeId = node.node_id || node.nodeId;
 
-        // First: backend-enriched name (cross-referenced via UniqueID → hubitat_matter_devices)
+        // First: the RESOLVED current canonical device label (2026-06-20).
+        // This is the authoritative current name and keeps the card title
+        // consistent with the "Mapped to <label>" line. Prevents the
+        // confusing case where Hubitat carries two names for one device
+        // (e.g. admin/canonical 'TV POWER' vs Maker-API 'TV') and the card
+        // showed the Maker name while mapping to the canonical one.
+        if (node._canonical_label) return node._canonical_label;
+
+        // Then: backend-enriched name (Maker/discovery name).
         if (node._device_name) return node._device_name;
 
         // Second: check our mapping table for a friendly name

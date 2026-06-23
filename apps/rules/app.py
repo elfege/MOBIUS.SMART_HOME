@@ -2,11 +2,27 @@
 Rules
 =====
 
-Case-based button / event automations. **Deliberately NOT a generic rule
-engine** (operator directive 2026-06-19): each behavior is hand-coded as a
-named ``case``. When a new automation is needed, add a case here rather
-than building a configurable condition/action DSL. If the number of cases
-ever grows past comfort, *that* is the signal to graduate to a real engine.
+Declarative rule interpreter (Phase 1 of the agentic-rule-authoring pivot,
+operator directive 2026-05-22 — supersedes the original 2026-06-19 case-only
+design). The rule logic lives in the instance's ``rule_spec`` setting (a
+JSONB blob conforming to ``apps.rules.schema.RuleSpec``) and the dispatch
+lives in ``apps.rules.interpreter``. This module is the BaseApp shell:
+lifecycle, settings/device-category contracts, and event-loop routing.
+
+See ``docs/plans/agentic_rule_authoring_via_user_local_claude_code_cli_and_mobius_mcp_server.md``
+for the full strategic context; ``apps/rules/schema.py`` for the schema
+contract; ``apps/rules/interpreter.py`` for the executor.
+
+Migration / backward compatibility
+==================================
+Instances created before this commit may not carry a ``rule_spec`` setting
+at all — they instead carry the legacy ``case`` enum (only value
+``"pool_button"``). For those instances, ``_resolve_spec()`` synthesises a
+``RuleSpec`` on the fly from the legacy preset
+(``schema.pool_button_preset``) using the existing
+``triggerButtonNumber`` / ``debounceSeconds`` settings, so behaviour is
+identical without requiring a settings migration. New instances should set
+``rule_spec`` directly.
 
 First shipped case: ``pool_button``
 -----------------------------------
@@ -51,24 +67,16 @@ the function, so pausing disables it on purpose.)
 from __future__ import annotations
 
 import logging
-import time as _monotonic_time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from apps.base_app import BaseApp
 from apps.base.pause_settings import UNIVERSAL_PAUSE_SETTINGS
+from apps.rules import interpreter as _rule_interpreter
+from apps.rules.schema import RuleSpec, pool_button_preset
 from models.event import DeviceEvent
+from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
-
-# Log color shortcuts (mirrors the other apps' style).
-_C = "\033[96m"   # cyan — device names
-_Y = "\033[93m"   # yellow — decisions
-_G = "\033[92m"   # green — on
-_R_RED = "\033[91m"
-_R = "\033[0m"
-
-# Button event types this app understands. Anything else is ignored.
-_BUTTON_EVENTS = ('pushed', 'held', 'doubleTapped')
 
 
 class RulesApp(BaseApp):
@@ -94,45 +102,82 @@ class RulesApp(BaseApp):
 
     @classmethod
     def get_settings_schema(cls) -> Dict[str, Any]:
-        """Return the JSON Schema for a Rules instance."""
+        """
+        Return the JSON Schema for a Rules instance.
+
+        The authoritative behaviour-defining field is ``rule_spec`` — a
+        JSON object conforming to ``apps.rules.schema.RuleSpec``. Two paths:
+
+          - **New instances** set ``rule_spec`` directly (usually authored
+            by the Phase 2 MCP ``create_rule`` tool from a natural-language
+            prompt; for now it can also be hand-edited).
+          - **Legacy pool_button instances** that predate Phase 1 still
+            carry only ``case`` / ``triggerButtonNumber`` / ``debounceSeconds``;
+            ``_resolve_spec()`` reconstructs an equivalent ``RuleSpec`` for
+            them on the fly, so they keep working without a settings
+            migration.
+
+        The ``case`` enum is kept as a legacy-only field — its only valid
+        value remains ``"pool_button"`` (the synthesis path's preset key).
+        New rule shapes should NOT add cases; they should ship as full
+        ``rule_spec`` blobs.
+        """
         return {
             "type": "object",
             "properties": {
+                "rule_spec": {
+                    "type": ["object", "null"],
+                    "title": "Rule Spec",
+                    "description": (
+                        "Declarative rule program. JSON object conforming "
+                        "to apps.rules.schema.RuleSpec — has a 'rules' list "
+                        "of trigger→action pairs and an optional "
+                        "'debounce_per_event' map. When null/missing, the "
+                        "app falls back to synthesising the pool_button "
+                        "preset from the legacy 'case' / 'triggerButtonNumber' "
+                        "/ 'debounceSeconds' settings."
+                    ),
+                    "default": None,
+                },
                 "case": {
                     "type": "string",
-                    "title": "Rule Case",
+                    "title": "Rule Case (legacy)",
                     "description": (
-                        "Which hard-coded behavior this instance runs. Only "
-                        "'pool_button' exists today; add cases in app.py."
+                        "LEGACY: kept for instances created before Phase 1. "
+                        "Only 'pool_button' is recognised; new rule shapes "
+                        "must use 'rule_spec' instead. When 'rule_spec' is "
+                        "set, this field is ignored."
                     ),
                     "enum": ["pool_button"],
                     "default": "pool_button",
                 },
                 "triggerButtonNumber": {
                     "type": "string",
-                    "title": "Trigger Button Number",
+                    "title": "Trigger Button Number (legacy pool_button)",
                     "description": (
-                        "Only button events carrying THIS button number are "
-                        "acted on. Default '1' — the physical single button. "
-                        "Phantom 'button 2' events fabricated by the driver "
-                        "after firmware 2.5.0.x are ignored."
+                        "LEGACY: feeds the pool_button synthesis path. "
+                        "Default '1' — the physical single button. Ignored "
+                        "when 'rule_spec' is set (the per-trigger 'value' "
+                        "field in the spec controls filtering directly)."
                     ),
                     "default": "1",
                 },
                 "debounceSeconds": {
                     "type": "integer",
-                    "title": "Debounce (seconds)",
+                    "title": "Debounce seconds (legacy pool_button)",
                     "description": (
-                        "Per-event-type window that collapses duplicate / "
-                        "retransmitted button events (e.g. 'held' repeats "
-                        "every ~2 s while held) into a single action."
+                        "LEGACY: feeds the pool_button synthesis path. "
+                        "When 'rule_spec' is set, the spec's "
+                        "'debounce_per_event' map controls debouncing "
+                        "directly and this field is ignored."
                     ),
                     "minimum": 0,
                     "default": 3,
                 },
                 # Universal pause contract (pauseDuration / pauseDurationUnit /
-                # resumeOnModeChange). New app → universal default of
-                # pauseDuration=0 (indefinite) is correct; no legacy override.
+                # resumeOnModeChange). Applies regardless of rule_spec vs
+                # legacy path — the interpreter and the legacy methods both
+                # honour ``self.is_paused``.
                 **UNIVERSAL_PAUSE_SETTINGS,
             },
         }
@@ -181,69 +226,80 @@ class RulesApp(BaseApp):
     # =========================================================================
 
     def initialize(self) -> None:
-        """Set up debounce state. No device actions at init."""
-        self.logger.info(f"Initializing: {self.label} (case={self.get_setting('case', 'pool_button')})")
-        # Per-event-type monotonic timestamp of the last accepted action,
-        # for the debounce window. 0.0 == never.
-        self._runtime.last_action_monotonic: Dict[str, float] = {}
+        """
+        Set up the interpreter's debounce-state dict and resolve the
+        instance's rule spec exactly once at startup. No device actions.
+
+        The resolved ``RuleSpec`` is cached on ``self._runtime.rule_spec``
+        for the lifetime of the instance — if the operator edits the
+        instance settings the app is re-initialised by the framework, so
+        this stays consistent without a per-event re-parse cost.
+        """
+        spec = self._resolve_spec()
+        self._runtime.rule_spec = spec
+        self._runtime.debounce_state: Dict[str, float] = {}
+        self.logger.info(
+            f"Initializing: {self.label} "
+            f"({len(spec.rules)} rule{'s' if len(spec.rules) != 1 else ''} "
+            f"loaded)"
+        )
 
         if not self.get_devices('trigger_button'):
             self.logger.warning("no trigger_button selected — instance is idle")
 
     # =========================================================================
-    # Event dispatch
+    # Spec resolution — new ``rule_spec`` field, with legacy ``case`` fallback
+    # =========================================================================
+
+    def _resolve_spec(self) -> RuleSpec:
+        """
+        Return the ``RuleSpec`` this instance should run.
+
+        Priority:
+            1. ``rule_spec`` setting present and parseable → use it.
+            2. Otherwise synthesise from the legacy ``case`` /
+               ``triggerButtonNumber`` / ``debounceSeconds`` settings via
+               ``schema.pool_button_preset``.
+
+        On a malformed ``rule_spec``, log the validation error and fall
+        through to the legacy synthesis path — never raise from
+        initialize(), since that would dead-instance the app.
+        """
+        raw = self.get_setting('rule_spec', None)
+        if raw:
+            try:
+                return RuleSpec.model_validate(raw)
+            except ValidationError as e:
+                self.logger.error(
+                    f"rule_spec is invalid — falling back to legacy "
+                    f"pool_button synthesis. Errors: {e.errors()}"
+                )
+
+        button_number = str(self.get_setting('triggerButtonNumber', '1')).strip() or '1'
+        debounce = int(self.get_setting('debounceSeconds', 3) or 3)
+        return pool_button_preset(
+            button_number=button_number,
+            debounce_seconds=debounce,
+        )
+
+    # =========================================================================
+    # Event dispatch — pure delegation to the interpreter
     # =========================================================================
 
     def on_event(self, event: DeviceEvent) -> None:
         """
-        Dispatch a button event to the case handler.
-
-        Guards, in order: event type → button number → debounce → pause.
-        Only after all four pass do we act.
+        Hand the event off to the interpreter. All guards (debounce,
+        pause, trigger match) live there now; this method exists only to
+        bridge the BaseApp ``on_event`` contract and wrap the call in a
+        per-instance exception boundary.
         """
         try:
-            self.update_last_activity()
-
-            if event.event_type not in _BUTTON_EVENTS:
-                self.logger.debug(f"ignoring non-button event: {event.event_type}")
-                return
-
-            # Button-number filter — sidesteps the fabricated phantom-button
-            # events (see module docstring).
-            want = str(self.get_setting('triggerButtonNumber', '1')).strip()
-            got = str(event.value).strip()
-            if got != want:
-                self.logger.debug(
-                    f"ignoring {event.event_type} for button {got!r} "
-                    f"(only acting on button {want!r})"
-                )
-                return
-
-            # Debounce duplicate / retransmitted events of the same type.
-            if self._debounced(event.event_type):
-                self.logger.debug(
-                    f"debounced duplicate {event.event_type} within "
-                    f"{self.get_setting('debounceSeconds', 3)}s"
-                )
-                return
-
-            # Pause guard — paused Rules instance ignores the button.
-            if self.is_paused:
-                self.logger.info(
-                    f"paused — ignoring {event.event_type} (resume to re-enable)"
-                )
-                return
-
-            self.logger.info(
-                f"{_Y}Button {want}: {event.event_type}{_R} → dispatching"
+            _rule_interpreter.execute_event(
+                host=self,
+                spec=self._runtime.rule_spec,
+                event=event,
+                debounce_state=self._runtime.debounce_state,
             )
-            if event.event_type == 'pushed':
-                self._toggle_pool_water()
-            elif event.event_type == 'doubleTapped':
-                self._toggle_pump()
-            elif event.event_type == 'held':
-                self._all_off()
-
         except Exception as e:
             self.logger.error(f"on_event failed: {event}: {e}", exc_info=True)
 
@@ -255,108 +311,3 @@ class RulesApp(BaseApp):
         correct for this app.
         """
         self.logger.debug("master() no-op (event-driven app)")
-
-    # =========================================================================
-    # Debounce
-    # =========================================================================
-
-    def _debounced(self, event_type: str) -> bool:
-        """
-        Return True if an action of ``event_type`` was already accepted
-        within ``debounceSeconds`` (so this one should be dropped). On
-        False, records now as the new last-action time for that type.
-        """
-        window = float(self.get_setting('debounceSeconds', 3) or 0)
-        now = _monotonic_time.monotonic()
-        last = self._runtime.last_action_monotonic.get(event_type, 0.0)
-        if window > 0 and (now - last) < window:
-            return True
-        self._runtime.last_action_monotonic[event_type] = now
-        return False
-
-    # =========================================================================
-    # Case: pool_button — actions
-    # =========================================================================
-
-    def _toggle_pool_water(self) -> None:
-        """
-        Toggle every ``pool_water_switches`` device to the SAME target
-        state. Target: both-on → off; otherwise → on. Enforces the
-        no-asymmetry invariant even if the switches started mismatched.
-        """
-        if self.is_paused:   # hard pause-guard rule
-            return
-        ids = self.get_devices('pool_water_switches')
-        if not ids:
-            self.logger.warning("pool_water: no switches configured")
-            return
-
-        all_on = all(self._switch_is_on(d) for d in ids)
-        target = 'off' if all_on else 'on'
-        self.logger.info(
-            f"{_Y}pool water → {target}{_R} (was "
-            f"{'all on' if all_on else 'mixed/off'}, "
-            f"{len(ids)} switch{'es' if len(ids) != 1 else ''})"
-        )
-        self._set_switches(ids, target)
-
-    def _toggle_pump(self) -> None:
-        """Toggle the single ``pump_switch`` (off→on / on→off)."""
-        if self.is_paused:   # hard pause-guard rule
-            return
-        ids = self.get_devices('pump_switch')
-        if not ids:
-            self.logger.warning("pump: no switch configured")
-            return
-        target = 'off' if self._switch_is_on(ids[0]) else 'on'
-        self.logger.info(f"{_Y}pump → {target}{_R}")
-        self._set_switches(ids[:1], target)
-
-    def _all_off(self) -> None:
-        """Turn every pool-water switch AND the pump off."""
-        if self.is_paused:   # hard pause-guard rule
-            return
-        ids = self.get_devices('pool_water_switches') + self.get_devices('pump_switch')
-        if not ids:
-            self.logger.warning("all-off: no switches configured")
-            return
-        self.logger.info(f"{_Y}all off{_R} ({len(ids)} switches)")
-        self._set_switches(ids, 'off')
-
-    # =========================================================================
-    # Switch helpers
-    # =========================================================================
-
-    def _switch_is_on(self, canonical_id) -> bool:
-        """
-        Read a switch's cached state. Returns True only on an explicit
-        'on'; unknown / missing / off all read as False (so the toggle's
-        "are they all on?" test fails safe toward turning things ON).
-        """
-        device = self.get_device_state(canonical_id)
-        if not device:
-            return False
-        return (device.get('attributes', {}) or {}).get('switch') == 'on'
-
-    def _set_switches(self, canonical_ids: List, target: str) -> None:
-        """
-        Send ``target`` ('on'|'off') to each canonical switch id, verified.
-        Logs per-device success / failure; one bad switch does not abort
-        the rest.
-        """
-        for cid in canonical_ids:
-            try:
-                result = self.send_command(cid, target, verify=True)
-                if result.success and result.verified:
-                    self.logger.info(f"  {_G}{cid} → {target}{_R}")
-                elif result.success:
-                    self.logger.warning(
-                        f"  {cid} → {target} sent but NOT verified "
-                        f"(actual={result.actual_state})"
-                    )
-                else:
-                    self.logger.warning(
-                        f"  {_R_RED}{cid} → {target} FAILED: {result.error}{_R}"
-                    )
-            except Exception as e:
-                self.logger.error(f"  {cid} → {target} raised: {e}", exc_info=True)

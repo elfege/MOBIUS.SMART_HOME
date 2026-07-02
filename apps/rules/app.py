@@ -184,17 +184,23 @@ class RulesApp(BaseApp):
 
     @classmethod
     def get_device_categories(cls) -> List[Dict[str, Any]]:
-        """Return the device pickers for the Rules wizard (pool_button case)."""
+        """Device pickers for the Rules wizard.
+
+        The Rules app is multi-shape (pool_button, tv_mode, …): a given rule_spec
+        references only SOME of these categories, so none is universally required.
+        Each is ``required: False`` and the active rule_spec defines what an
+        instance actually uses — pick the categories your rule references.
+        """
         return [
             {
                 "key": "trigger_button",
-                "label": "Trigger Button",
+                "label": "Trigger Button (pool_button rule)",
                 "capability": "pushableButton",
                 "multiple": False,
-                "required": True,
+                "required": False,
                 "description": (
                     "The button whose pushed / doubleTapped / held events "
-                    "drive this rule."
+                    "drive a pool_button rule."
                 ),
             },
             {
@@ -202,7 +208,7 @@ class RulesApp(BaseApp):
                 "label": "Pool Water Switches (toggled together)",
                 "capability": "switch",
                 "multiple": True,
-                "required": True,
+                "required": False,
                 "description": (
                     "Single tap toggles ALL of these to the SAME state "
                     "(e.g. Pool Water Hot + Pool Water Cold)."
@@ -213,10 +219,22 @@ class RulesApp(BaseApp):
                 "label": "Pump Switch (double-tap toggles)",
                 "capability": "switch",
                 "multiple": False,
-                "required": True,
+                "required": False,
                 "description": (
                     "Double tap toggles this switch (e.g. Swimming Pool "
                     "small pump)."
+                ),
+            },
+            {
+                "key": "tv",
+                "label": "TV (tv_mode rule)",
+                "capability": "switch",
+                "multiple": False,
+                "required": False,
+                "description": (
+                    "The TV device/driver whose on/off drives the location mode "
+                    "(e.g. on → WatchingTV). Replaces the disabled HE Mode "
+                    "Manager / Rule-Machine 'TV mode manager' apps."
                 ),
             },
         ]
@@ -244,8 +262,15 @@ class RulesApp(BaseApp):
             f"loaded)"
         )
 
-        if not self.get_devices('trigger_button'):
-            self.logger.warning("no trigger_button selected — instance is idle")
+        # Warn only if NO trigger device is wired for ANY rule (then the
+        # instance genuinely can't fire). Spec-aware, so a tv_mode rule that
+        # triggers on 'tv' is not falsely reported idle over a missing
+        # 'trigger_button' (that check was pool_button-specific).
+        trigger_cats = {r.when.device_category for r in spec.rules}
+        if not any(self.get_devices(c) for c in trigger_cats):
+            self.logger.warning(
+                f"no trigger devices selected for {sorted(trigger_cats)} — instance is idle"
+            )
 
     # =========================================================================
     # Spec resolution — new ``rule_spec`` field, with legacy ``case`` fallback

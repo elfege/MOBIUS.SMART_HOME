@@ -779,6 +779,33 @@ export class InstanceWizardController {
                    'suppressTvWakeOnPowerSeconds', 'timezone']
         },
         {
+            // Sonos alarm schedule (SONOS app type). timezone is claimed by the
+            // screen_time group for STP, so it only lands here for the alarm app.
+            id: 'schedule',
+            title: 'Schedule',
+            description: 'When the alarm fires',
+            keys: ['alarmTime', 'days', 'timezone']
+        },
+        {
+            // Audio announcement (STP warnings + SONOS alarm). The speaker and
+            // voice fields here are upgraded to dynamic multi-select / live-voice
+            // pickers by _enhanceSonosFields() after render.
+            id: 'audio',
+            title: 'Audio Announcement',
+            description: 'Sonos speaker(s), voice, and message',
+            keys: ['announceRoom', 'room', 'voice', 'source', 'ttsText', 'mp3Url',
+                   'announceVolume', 'volume', 'warningLeadMinutes',
+                   'warningMessage', 'cutoffMessage']
+        },
+        {
+            // Pull "Resume on mode change" out of the catch-all into its own
+            // card (operator directive 2026-06-22). Universal pause setting.
+            id: 'resume_mode',
+            title: 'Resume on Mode Change',
+            description: 'Auto-resume this instance on a Hubitat mode change',
+            keys: ['resumeOnModeChange']
+        },
+        {
             id: 'advanced',
             title: 'Advanced',
             description: 'Memoization and fail-safe options',
@@ -894,6 +921,10 @@ export class InstanceWizardController {
 
         // Populate mode checkboxes for array-type settings
         this._populateModeCheckboxes(container);
+
+        // Sonos fields: live voice list + speaker multi-select (dynamic; the
+        // generic renderer only does static enums). No-op for non-Sonos apps.
+        this._enhanceSonosFields(container);
 
         // Bind timeWithMode toggle to show/hide per-mode timeouts
         this._bindModeTimeoutToggle(container);
@@ -1769,6 +1800,143 @@ export class InstanceWizardController {
      * @param {object} prop - Schema property
      * @returns {string} HTML string
      */
+    /**
+     * Post-render enhancement for Sonos fields (operator UX 2026-06-22).
+     * The generic renderer only does STATIC enums, so these dynamic widgets
+     * can't live in the schema:
+     *   - voice <select>  → live Anamnesis voices (/api/sonos/voices, friendly names)
+     *   - speaker field   → multi-select checkbox dropdown of discovered speakers
+     *     (/api/sonos/speakers), stored comma-separated under the same key (so no
+     *     schema-type / save-path change).
+     * Gated on field presence — a complete no-op for non-Sonos apps.
+     */
+    async _enhanceSonosFields(container) {
+        const voiceSel = container.querySelector('select[name="voice"]');
+        if (voiceSel) {
+            try {
+                const d = await fetch('/api/sonos/voices').then(r => r.json());
+                const opts = d.voices || [];
+                if (opts.length) {
+                    const cur = this.settings.voice || voiceSel.value || d.default || opts[0].id;
+                    this._buildVoicePicker(voiceSel, opts, cur);
+                }
+            } catch (e) { /* keep static enum fallback */ }
+        }
+
+        const roomField = container.querySelector('[name="announceRoom"], [name="room"]');
+        if (roomField) {
+            try {
+                const d = await fetch('/api/sonos/speakers').then(r => r.json());
+                const rooms = [...new Set(Object.values(d.speakers || {}))].sort();
+                if (rooms.length) this._buildSpeakerMultiSelect(roomField, rooms);
+            } catch (e) { /* leave as plain text input */ }
+        }
+    }
+
+    /** Replace the voice <select> with a custom picker: a dropdown where each
+     *  voice row has a ▶ button that auditions it IN THE BROWSER
+     *  (/api/sonos/voice-preview), and clicking the row selects it. Stores the
+     *  voice id in this.settings.voice + a hidden input named "voice". */
+    _buildVoicePicker(selectEl, voices, current) {
+        let selected = current;
+        const nameOf = (id) => (voices.find(v => v.id === id) || {}).name || id;
+
+        const wrap = document.createElement('div');
+        wrap.className = 'mode-dropdown sonos-voice-select';
+        wrap.innerHTML = `
+            <button type="button" class="mode-dropdown-toggle">
+                <span class="mode-dropdown-label">${utils.escapeHtml(nameOf(selected))}</span>
+                <span class="mode-dropdown-arrow">&#9662;</span>
+            </button>
+            <div class="mode-dropdown-menu" style="display:none;">
+                ${voices.map(v => `
+                    <div class="mode-dropdown-item voice-row" data-voice="${utils.escapeHtml(v.id)}"
+                         style="display:flex;gap:.5rem;align-items:center;padding:.25rem .5rem;cursor:pointer;">
+                        <button type="button" class="voice-preview-btn" title="Play sample"
+                                style="border:none;background:none;cursor:pointer;font-size:1rem;">&#9658;</button>
+                        <span style="flex:1;">${utils.escapeHtml(v.name)}</span>
+                        <span class="voice-check" style="width:1rem;">${v.id === selected ? '&#10003;' : ''}</span>
+                    </div>`).join('')}
+            </div>`;
+        const hidden = document.createElement('input');
+        hidden.type = 'hidden'; hidden.name = 'voice'; hidden.value = selected;
+        selectEl.replaceWith(wrap);
+        wrap.appendChild(hidden);
+        this.settings.voice = selected;
+
+        const menu = wrap.querySelector('.mode-dropdown-menu');
+        const lbl = wrap.querySelector('.mode-dropdown-label');
+        wrap.querySelector('.mode-dropdown-toggle').addEventListener('click', () => {
+            menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+        });
+
+        let audio = null;
+        wrap.querySelectorAll('.voice-row').forEach(row => {
+            const id = row.dataset.voice;
+            // ▶ preview (don't let it select the row)
+            row.querySelector('.voice-preview-btn').addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (audio) { audio.pause(); }
+                audio = new Audio(`/api/sonos/voice-preview?voice=${encodeURIComponent(id)}`);
+                audio.play().catch(() => {});
+            });
+            // click row → select this voice
+            row.addEventListener('click', () => {
+                selected = id;
+                hidden.value = id;
+                this.settings.voice = id;
+                lbl.textContent = nameOf(id);
+                wrap.querySelectorAll('.voice-row .voice-check').forEach(c => c.innerHTML = '');
+                row.querySelector('.voice-check').innerHTML = '&#10003;';
+                menu.style.display = 'none';
+            });
+        });
+    }
+
+    /** Replace a speaker text input with a multi-select checkbox dropdown.
+     *  Selection is stored comma-separated in this.settings[key] + a hidden
+     *  input of the same name, so the existing save path picks it up. */
+    _buildSpeakerMultiSelect(field, rooms) {
+        const key = field.getAttribute('name');
+        const selected = new Set(String(this.settings[key] || field.value || '')
+            .split(',').map(s => s.trim()).filter(Boolean));
+        const labelText = () => selected.size ? [...selected].join(', ') : 'Select speaker(s)…';
+
+        const wrap = document.createElement('div');
+        wrap.className = 'mode-dropdown sonos-speaker-select';
+        wrap.innerHTML = `
+            <button type="button" class="mode-dropdown-toggle">
+                <span class="mode-dropdown-label">${utils.escapeHtml(labelText())}</span>
+                <span class="mode-dropdown-arrow">&#9662;</span>
+            </button>
+            <div class="mode-dropdown-menu" style="display:none;">
+                ${rooms.map(r => `
+                    <label class="mode-dropdown-item" style="display:flex;gap:.5rem;align-items:center;padding:.25rem .5rem;">
+                        <input type="checkbox" value="${utils.escapeHtml(r)}" ${selected.has(r) ? 'checked' : ''}>
+                        ${utils.escapeHtml(r)}
+                    </label>`).join('')}
+            </div>`;
+        const hidden = document.createElement('input');
+        hidden.type = 'hidden'; hidden.name = key; hidden.value = [...selected].join(',');
+        field.replaceWith(wrap);
+        wrap.appendChild(hidden);
+
+        const menu = wrap.querySelector('.mode-dropdown-menu');
+        const lbl = wrap.querySelector('.mode-dropdown-label');
+        wrap.querySelector('.mode-dropdown-toggle').addEventListener('click', () => {
+            menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+        });
+        wrap.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+            cb.addEventListener('change', () => {
+                cb.checked ? selected.add(cb.value) : selected.delete(cb.value);
+                const val = [...selected].join(',');
+                hidden.value = val;
+                this.settings[key] = val;
+                lbl.textContent = labelText();
+            });
+        });
+    }
+
     renderSettingField(key, prop) {
         const title = prop.title || key;
         const description = prop.description || '';

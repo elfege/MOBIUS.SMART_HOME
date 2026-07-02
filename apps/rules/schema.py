@@ -148,8 +148,22 @@ class ActionToggleIndependent(BaseModel):
     device_category: str = Field(..., min_length=1)
 
 
+class ActionSetMode(BaseModel):
+    """Set the Hubitat LOCATION mode (not a device command).
+
+    Used by mode-automation rules — e.g. a TV turning on → ``set_mode`` to
+    "WatchingTV" (replaces the disabled HE Mode Manager / Rule-Machine apps).
+    The mode is given by NAME; the interpreter resolves it to the hub's mode id.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["set_mode"]
+    mode: str = Field(..., min_length=1, description="Location mode name, e.g. 'WatchingTV'.")
+
+
 Action = Annotated[
-    Union[ActionSetState, ActionToggleUniform, ActionToggleIndependent],
+    Union[ActionSetState, ActionToggleUniform, ActionToggleIndependent, ActionSetMode],
     Field(discriminator="kind"),
 ]
 

@@ -557,6 +557,51 @@ def run_db_migrations():
         "capabilities, attributes, last_synced_at, hub_id, is_name_duplicate, "
         "is_present FROM dshub.devices",
 
+        # 2026-06-22 — SONOS driver/app per-speaker state (values→DB, operator
+        # directive). Holds: saved_volume (setVolume→restoreVolume undo) and the
+        # volume-LOCK option (persist_volume + persisted_level) — when locked,
+        # webhook_router re-asserts persisted_level if another system changes it.
+        # See docs/plans/sonos_driver_and_app_db_backed_*.md.
+        """CREATE TABLE IF NOT EXISTS dsapp.sonos_speakers (
+            ip               varchar(50) PRIMARY KEY,
+            room             varchar(120),
+            saved_volume     integer,
+            persist_volume   boolean NOT NULL DEFAULT false,
+            persisted_level  integer,
+            updated_at       timestamptz NOT NULL DEFAULT now()
+        )""",
+        # api view so PostgREST (api schema) can read/write speaker state.
+        "CREATE OR REPLACE VIEW api.sonos_speakers AS "
+        "SELECT ip, room, saved_volume, persist_volume, persisted_level, updated_at "
+        "FROM dsapp.sonos_speakers",
+
+        # 2026-06-24 — GENERAL manual-override log (operator directive). Any app
+        # records here when a user overrides the app's intended device state
+        # (evt.value != app target). Two uses: (1) troubleshoot false pos/neg,
+        # (2) training base for a future state-prediction NN where "user
+        # intervened" is the negative-reward signal. context JSONB = the feature
+        # snapshot. See services/manual_override_log.py +
+        # docs/plans/fan_automation_simplify_*.md §10.
+        """CREATE TABLE IF NOT EXISTS dsapp.manual_overrides (
+            id            bigserial PRIMARY KEY,
+            ts            timestamptz NOT NULL DEFAULT now(),
+            instance_id   integer,
+            app_type      varchar(60),
+            device_id     bigint,
+            device_label  varchar(160),
+            attribute     varchar(40),
+            expected      varchar(40),
+            actual        varchar(40),
+            location_mode varchar(60),
+            context       jsonb,
+            cleared_at    timestamptz
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_manual_overrides_instance "
+        "ON dsapp.manual_overrides (instance_id, ts DESC)",
+        "CREATE OR REPLACE VIEW api.manual_overrides AS "
+        "SELECT id, ts, instance_id, app_type, device_id, device_label, attribute, "
+        "expected, actual, location_mode, context, cleared_at FROM dsapp.manual_overrides",
+
         # Tell PostgREST to reload its schema cache. Without this, columns
         # added by ALTER TABLE above are invisible to PostgREST's OpenAPI
         # and POST/PATCH requests fail with PGRST204 "column does not exist".
@@ -813,6 +858,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"device_reclassify schedule failed: {e}")
 
+    # Sonos volume LOCK enforcement (2026-06-22, operator: "persist volume level
+    # when other system changes it"). Polls speakers with persist_volume=true and
+    # re-asserts their persisted_level over UPnP. Poll-based (not Hubitat-event-
+    # based) to avoid fuzzy device-name→speaker mapping. No-op when none locked.
+    try:
+        from services.scheduler_service import get_scheduler
+        from services.sonos import enforce_locked_volumes as _enforce_sonos_vol
+        get_scheduler()._scheduler.add_job(
+            func=_enforce_sonos_vol,
+            trigger='interval',
+            seconds=30,
+            id='sonos_volume_enforce',
+            replace_existing=True,
+        )
+        logger.info("sonos_volume_enforce: scheduled every 30s")
+    except Exception as e:
+        logger.warning(f"sonos_volume_enforce schedule failed: {e}")
+
     # Hubitat admin-API contract-drift watch (2026-05-26).
     # Firmware 2.5.0.143 changed POST /device/runmethod from form-encoded to
     # JSON with no backward compat, silently breaking every command. This
@@ -915,6 +978,21 @@ app = FastAPI(
 # Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+
+# Static-asset cache control (2026-06-22). Without this, browsers heuristically
+# cache JS/CSS and operators don't see UI changes until a manual hard-refresh —
+# the recurring "I still don't see the new dropdown" problem. `no-cache` forces
+# the browser to REVALIDATE every load (StaticFiles sets ETag/Last-Modified, so
+# unchanged files still return a cheap 304); changed files are fetched fresh.
+# Lightweight interim fix for the versioned-asset TODO (#19).
+@app.middleware("http")
+async def _revalidate_static_assets(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
+
 # Jinja2 templates
 templates = Jinja2Templates(directory="templates")
 
@@ -935,6 +1013,18 @@ app.include_router(samsung_tv_router)
 # See docs/plans/samsung_tv_multi_instance_refactor_per_instance_ip_mac_token_in_database.md
 from apps.samsung_tv.instance_router import router as samsung_tv_instance_router  # noqa: E402
 app.include_router(samsung_tv_instance_router)
+
+# Certificate-installation routes (/install-cert, /api/cert/status). Serves the
+# shared MOBIUS local CA so users trust HTTPS once instead of clicking through
+# the browser warning each load. Ported from NVR; see services/cert_routes.py.
+from services.cert_routes import register_cert_routes  # noqa: E402
+register_cert_routes(app, templates)
+
+# Sonos announcement subsystem routes (/api/sonos/clip, /speakers, /announce).
+# Clips are served over PLAIN http here (Sonos won't fetch self-signed HTTPS).
+# See services/sonos/ — local UPnP control, no Hubitat, no cloud.
+from services.sonos.routes import register_sonos_routes  # noqa: E402
+register_sonos_routes(app)
 
 
 # =============================================================================
@@ -2944,6 +3034,37 @@ async def get_current_mode():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/modes/set", tags=["modes"])
+async def set_mode(request: Request):
+    """Set the Hubitat location mode. Body ``{mode_id}`` (or ``{name}``).
+
+    Powers the navbar mode dropdown (change location mode from the global app,
+    operator directive 2026-06-22)."""
+    from services.hubitat_client import get_default_client
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    client = get_default_client()
+    mode_id = (body or {}).get("mode_id")
+    if mode_id is None:
+        # Resolve by name if id not given.
+        name = (body or {}).get("name")
+        if not name:
+            raise HTTPException(status_code=400, detail="mode_id or name required")
+        match = next((m for m in (client.get_modes() or [])
+                      if str(m.get("name")) == str(name)), None)
+        if not match:
+            raise HTTPException(status_code=404, detail=f"mode {name!r} not found")
+        mode_id = match.get("id")
+    try:
+        ok = client.set_mode(str(mode_id))
+        return {"ok": bool(ok), "mode_id": mode_id}
+    except Exception as e:
+        logger.error(f"Failed to set mode {mode_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # =============================================================================
 # Web UI
 # =============================================================================
@@ -3009,6 +3130,13 @@ async def matter_page(request: Request):
 async def hubs_page(request: Request):
     """Hub configuration page — edit hub_config rows."""
     return templates.TemplateResponse(request, "hubs.html")
+
+
+@app.get("/sonos", response_class=HTMLResponse, include_in_schema=False)
+async def sonos_page(request: Request):
+    """Sonos driver — standalone speaker controller (Drivers section).
+    TTS announce, set/restore/lock volume, play mp3, stop. See services/sonos/."""
+    return templates.TemplateResponse(request, "sonos.html")
 
 
 @app.get("/admin/settings", response_class=HTMLResponse, include_in_schema=False)

@@ -59,6 +59,15 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
 
+      # HOT-RELOAD NOTE (verified 2026-06-24): uvicorn --reload's WatchFiles DOES
+      # detect edits to the DIRECTORY mounts (./apps, ./services, ./templates,
+      # ./static) across the bind mount on this host — no polling needed. The ONE
+      # exception is ./app.py, mounted as a SINGLE FILE (./app.py:/app/app.py):
+      # atomic-write editors replace the host inode, which a file-level bind mount
+      # doesn't track, so app.py edits are invisible in-container until ./start.sh
+      # (or a docker cp). Keep app logic in apps/ + services/ for live reload;
+      # app.py (routes/wiring/migrations) changes need ./start.sh.
+
       # Hubitat credentials (standardized names, mapped from AWS by start.sh)
       HUBITAT_API_TOKEN_MAIN: ${HUBITAT_API_TOKEN_MAIN}
       HUBITAT_HUB_IP_MAIN: ${HUBITAT_HUB_IP_MAIN}
@@ -90,6 +99,12 @@ services:
       # Server configuration
       SERVER_IP: ${SERVER_IP:-<LAN_IP>}
 
+      # Sonos announcement subsystem (services/sonos). SSDP multicast doesn't
+      # cross the Docker bridge, so seed the speaker IPs for in-container
+      # discovery; unicast control + room-name lookup work over the bridge.
+      # Override in .env if DHCP moves them (reserved leases recommended).
+      SONOS_SPEAKER_IPS: ${SONOS_SPEAKER_IPS:-<LAN_IP>,<LAN_IP>,<LAN_IP>,<LAN_IP>,<LAN_IP>,<LAN_IP>,<LAN_IP>}
+
       # Device Commander configuration (defensive command execution)
       DEVICE_CMD_TIMEOUT: "${DEVICE_CMD_TIMEOUT:-30}"
       DEVICE_CMD_VERIFY_RETRIES: "${DEVICE_CMD_VERIFY_RETRIES:-3}"
@@ -116,6 +131,11 @@ services:
       - ./config:/app/config
       - ./templates:/app/templates
       - ./static:/app/static
+      # Read-only mount of the shared MOBIUS local CA so the /install-cert
+      # routes (services/cert_routes.py) can serve ca.pem. This is the SAME
+      # PEM nginx serves as the TLS root, so the fingerprint on the install
+      # page always matches the live certificate.
+      - ./nginx/certs:/app/nginx/certs:ro
       - app_logs:/app/logs
       - ./state:/app/state
     depends_on:

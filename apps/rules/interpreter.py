@@ -57,6 +57,7 @@ from typing import Any, Dict, List, Protocol
 
 from apps.rules.schema import (
     Action,
+    ActionSetMode,
     ActionSetState,
     ActionToggleIndependent,
     ActionToggleUniform,
@@ -233,10 +234,38 @@ def _dispatch_action(host: RuleHost, action: Action) -> None:
         _exec_toggle_uniform(host, action)
     elif isinstance(action, ActionToggleIndependent):
         _exec_toggle_independent(host, action)
+    elif isinstance(action, ActionSetMode):
+        _exec_set_mode(host, action)
     else:
         host.logger.error(
             f"unknown action kind {type(action).__name__} — schema/dispatch out of sync"
         )
+
+
+def _exec_set_mode(host: RuleHost, action: ActionSetMode) -> None:
+    """Set the Hubitat LOCATION mode by name (resolves name → mode id).
+
+    Not a device command — goes through the hubitat client's set_mode. Idempotent:
+    skips if the location is already in that mode. Pause-guarded."""
+    if host.is_paused:
+        return
+    try:
+        from services.hubitat_client import get_default_client
+        client = get_default_client()
+        _, current_name = client.get_current_mode()
+        if str(current_name) == action.mode:
+            host.logger.debug(f"set_mode: already in {action.mode!r} — no-op")
+            return
+        match = next((m for m in (client.get_modes() or [])
+                      if str(m.get("name")) == action.mode), None)
+        if not match:
+            host.logger.warning(f"set_mode: mode {action.mode!r} not found on hub")
+            return
+        ok = client.set_mode(str(match.get("id")))
+        host.logger.info(f"{_Y}set_mode → {action.mode}{_R} "
+                         f"(was {current_name}){'' if ok else ' [FAILED]'}")
+    except Exception as e:
+        host.logger.error(f"set_mode {action.mode!r} failed: {e}", exc_info=True)
 
 
 def _exec_set_state(host: RuleHost, action: ActionSetState) -> None:

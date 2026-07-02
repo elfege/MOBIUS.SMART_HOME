@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Install Certificate - MOBIUS.HOME</title>
+    <link rel="icon" type="image/png" href="/static/img/mobius.png">
+    <link rel="apple-touch-icon" href="/static/img/mobius.png">
+    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/static/css/components/cert-install.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body class="cert-install-page">
+    <div class="cert-install-container">
+        <div class="cert-install-panel">
+
+            <!-- Header -->
+            <div class="cert-header">
+                <div class="cert-logo">
+                    <img src="/static/img/mobius.png" alt="MOBIUS.HOME" class="cert-logo-img">
+                    <h1>MOBIUS.HOME</h1>
+                </div>
+                <h2><i class="fas fa-shield-alt"></i> Secure Your Connection</h2>
+                <p class="cert-subtitle">
+                    Install the MOBIUS Home certificate authority on this device to remove
+                    browser security warnings permanently.
+                </p>
+            </div>
+
+            {% if not ca_available %}
+            <!-- CA not generated yet -->
+            <div class="cert-error">
+                <i class="fas fa-exclamation-triangle"></i>
+                <p>
+                    The CA certificate has not been generated yet.<br>
+                    Run <code>./0_MAINTENANCE_SCRIPTS/make_ca_signed_tls.sh</code> on the server,
+                    then restart Smart Home.
+                </p>
+            </div>
+
+            {% else %}
+            <!-- Platform cards — JS will highlight the detected one -->
+            <div class="platform-cards" id="platformCards">
+
+                <!-- iOS -->
+                <div class="platform-card" data-platform="ios">
+                    <div class="platform-card-header">
+                        <i class="fab fa-apple"></i>
+                        <span>iPhone / iPad</span>
+                        <span class="detected-badge" id="badge-ios">Detected</span>
+                    </div>
+                    <div class="platform-card-body">
+                        <a href="/install-cert/mobileconfig" class="btn btn-primary cert-download-btn">
+                            <i class="fas fa-download"></i> Install Profile
+                        </a>
+                        <div class="platform-steps">
+                            <div class="step">
+                                <span class="step-num">1</span>
+                                <span>Tap <strong>Install Profile</strong> above</span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">2</span>
+                                <span>When prompted, tap <strong>Allow</strong></span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">3</span>
+                                <span>Go to <strong>Settings &rarr; General &rarr; VPN & Device Management</strong></span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">4</span>
+                                <span>Tap the <strong>MOBIUS Home</strong> profile &rarr; <strong>Install</strong></span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">5</span>
+                                <span>Go to <strong>Settings &rarr; General &rarr; About &rarr; Certificate Trust Settings</strong></span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">6</span>
+                                <span>Enable full trust for <strong>MOBIUS Local CA</strong></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- macOS -->
+                <div class="platform-card" data-platform="macos">
+                    <div class="platform-card-header">
+                        <i class="fab fa-apple"></i>
+                        <span>macOS</span>
+                        <span class="detected-badge" id="badge-macos">Detected</span>
+                    </div>
+                    <div class="platform-card-body">
+                        <a href="/install-cert/download" class="btn btn-primary cert-download-btn">
+                            <i class="fas fa-download"></i> Download Certificate
+                        </a>
+                        <div class="platform-steps">
+                            <div class="step">
+                                <span class="step-num">1</span>
+                                <span>Click <strong>Download Certificate</strong> above</span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">2</span>
+                                <span>Double-click the downloaded <code>.crt</code> file</span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">3</span>
+                                <span>Keychain Access opens &mdash; add to <strong>System</strong> keychain</span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">4</span>
+                                <span>Double-click the cert in Keychain &rarr; <strong>Trust</strong> &rarr; set to <strong>Always Trust</strong></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Windows -->
+                <div class="platform-card" data-platform="windows">
+                    <div class="platform-card-header">
+                        <i class="fab fa-windows"></i>
+                        <span>Windows</span>
+                        <span class="detected-badge" id="badge-windows">Detected</span>
+                    </div>
+                    <div class="platform-card-body">
+                        <a href="/install-cert/download" class="btn btn-primary cert-download-btn">
+                            <i class="fas fa-download"></i> Download Certificate
+                        </a>
+                        <p class="platform-intro">
+                            One install covers Chrome, Edge, and any other browser on this PC
+                            (they all use the same Windows certificate store). Firefox is the
+                            one exception — see the note at the bottom of this card.
+                        </p>
+                        <div class="platform-steps">
+                            <div class="step">
+                                <span class="step-num">1</span>
+                                <span>
+                                    Click the blue <strong>Download Certificate</strong> button above.
+                                    Your browser will save a file called
+                                    <code>MOBIUS_Local_CA.crt</code> &mdash; usually in your
+                                    <strong>Downloads</strong> folder.
+                                </span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">2</span>
+                                <span>
+                                    Open <strong>File Explorer</strong>
+                                    (the yellow folder icon in the taskbar), click
+                                    <strong>Downloads</strong> on the left, and find
+                                    <code>MOBIUS_Local_CA.crt</code>.
+                                </span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">3</span>
+                                <span>
+                                    <strong>Double-click the file</strong>.
+                                    A small window titled <em>Certificate</em> will pop up.
+                                    Click the button at the bottom labelled
+                                    <strong>Install Certificate&hellip;</strong>
+                                </span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">4</span>
+                                <span>
+                                    The <em>Certificate Import Wizard</em> opens. Under
+                                    <strong>Store Location</strong>, click the
+                                    <strong>Local Machine</strong> radio button
+                                    (NOT &ldquo;Current User&rdquo; &mdash; this matters), then
+                                    <strong>Next</strong>.
+                                </span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">5</span>
+                                <span>
+                                    If Windows shows a blue <strong>User Account Control</strong>
+                                    pop-up asking for permission, click <strong>Yes</strong>.
+                                </span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">6</span>
+                                <span>
+                                    Click <strong>Place all certificates in the following store</strong>
+                                    (the second radio button), then click <strong>Browse&hellip;</strong>
+                                </span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">7</span>
+                                <span>
+                                    A list appears. Find and click
+                                    <strong>Trusted Root Certification Authorities</strong>
+                                    (you may need to scroll), then click <strong>OK</strong>.
+                                </span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">8</span>
+                                <span>
+                                    Click <strong>Next</strong>, then <strong>Finish</strong>.
+                                    Windows shows a red&shy;dish <strong>Security Warning</strong>
+                                    saying &ldquo;Windows can't validate that the certificate is
+                                    actually from <em>MOBIUS Local CA</em>.&rdquo; This is expected
+                                    &mdash; click <strong>Yes</strong> anyway. (You generated
+                                    this CA yourself; the warning exists because Windows has
+                                    never seen it before.)
+                                </span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">9</span>
+                                <span>
+                                    <strong>Close every Chrome / Edge window</strong> on the
+                                    computer (not just the current tab &mdash; the whole
+                                    application). On the keyboard,
+                                    <kbd>Ctrl</kbd>&nbsp;+&nbsp;<kbd>Shift</kbd>&nbsp;+&nbsp;<kbd>Q</kbd>
+                                    quits Chrome. Then reopen and visit
+                                    <code>https://<LAN_IP>:8445</code> &mdash; the address
+                                    bar should show a padlock, not &ldquo;Not secure.&rdquo;
+                                </span>
+                            </div>
+                        </div>
+                        <div class="platform-note">
+                            <i class="fas fa-info-circle"></i>
+                            <strong>Firefox users:</strong> Firefox keeps its own
+                            certificate list separate from Windows. Open Firefox,
+                            click the three-line menu in the top right, go to
+                            <strong>Settings &rarr; Privacy &amp; Security</strong>,
+                            scroll down to <strong>Certificates</strong>, click
+                            <strong>View Certificates&hellip;</strong> &rarr;
+                            <strong>Authorities</strong> tab &rarr;
+                            <strong>Import&hellip;</strong>, select the
+                            <code>MOBIUS_Local_CA.crt</code> file, and check
+                            <strong>Trust this CA to identify websites</strong>.
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Linux -->
+                <div class="platform-card" data-platform="linux">
+                    <div class="platform-card-header">
+                        <i class="fab fa-linux"></i>
+                        <span>Linux</span>
+                        <span class="detected-badge" id="badge-linux">Detected</span>
+                    </div>
+                    <div class="platform-card-body">
+                        <a href="/install-cert/download" class="btn btn-primary cert-download-btn">
+                            <i class="fas fa-download"></i> Download Certificate
+                        </a>
+                        <p class="platform-intro">
+                            Linux makes you pick the right install path depending on which
+                            browser you actually use. Chrome 105+ ignores the system trust
+                            store on Linux &mdash; the OS-level <code>update-ca-certificates</code>
+                            command only helps Firefox, <code>curl</code>, and a handful of
+                            other tools. For Chrome you need a separate policy file.
+                        </p>
+
+                        <h4 class="platform-section-heading">
+                            <i class="fas fa-globe"></i> Google Chrome / Chromium (recommended)
+                        </h4>
+                        <p class="platform-section-desc">
+                            One-shot install. The CA stays trusted across Chrome updates and
+                            survives server-cert rotations (only the CA is pinned).
+                        </p>
+                        <div class="platform-steps">
+                            <div class="step">
+                                <span class="step-num">1</span>
+                                <span>Click <strong>Download Certificate</strong> above &mdash; saves <code>MOBIUS_Local_CA.crt</code> to <code>~/Downloads/</code>.</span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">2</span>
+                                <span>Open a terminal and create the Chrome policy file (you'll need <code>sudo</code>):</span>
+                            </div>
+                            <div class="step-code">
+<pre><code>sudo mkdir -p /etc/opt/chrome/policies/managed
+
+CA_B64=$(base64 -w0 < ~/Downloads/MOBIUS_Local_CA.crt)
+
+sudo tee /etc/opt/chrome/policies/managed/mobius-home-ca.json &gt; /dev/null &lt;&lt;EOF
+{
+  "CertificateManagementPolicyV1": {
+    "trust_anchors": [
+      { "type": "x509_root", "value": "$CA_B64" }
+    ]
+  }
+}
+EOF</code></pre>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">3</span>
+                                <span>
+                                    <strong>Fully quit Chrome</strong> (not just close the
+                                    window &mdash; <code>pkill chrome</code> if needed),
+                                    then relaunch. Visit
+                                    <code>chrome://policy/</code> &mdash; you should see
+                                    <strong>CertificateManagementPolicyV1</strong> listed.
+                                </span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">4</span>
+                                <span>
+                                    Open <code>https://<LAN_IP>:8445</code> &mdash; padlock,
+                                    not &ldquo;Not secure.&rdquo;
+                                </span>
+                            </div>
+                        </div>
+                        <p class="platform-section-desc">
+                            For <strong>Chromium</strong> instead of Chrome, the path is
+                            <code>/etc/chromium/policies/managed/</code>. Everything else
+                            is identical.
+                        </p>
+
+                        <h4 class="platform-section-heading">
+                            <i class="fas fa-fire"></i> Firefox
+                        </h4>
+                        <p class="platform-section-desc">
+                            Firefox uses its own trust store. Either the GUI or the
+                            command-line works; pick whichever is convenient.
+                        </p>
+                        <div class="platform-steps">
+                            <div class="step">
+                                <span class="step-num">1</span>
+                                <span>
+                                    GUI: <strong>Settings &rarr; Privacy &amp; Security
+                                    &rarr; View Certificates&hellip; &rarr; Authorities tab
+                                    &rarr; Import&hellip;</strong> &mdash; pick
+                                    <code>MOBIUS_Local_CA.crt</code>, check
+                                    <strong>Trust this CA to identify websites</strong>.
+                                </span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">2</span>
+                                <span>
+                                    CLI alternative (works for all NSS-backed apps):
+                                </span>
+                            </div>
+                            <div class="step-code">
+                                <code>certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "MOBIUS Local CA" -i ~/Downloads/MOBIUS_Local_CA.crt</code>
+                            </div>
+                        </div>
+
+                        <h4 class="platform-section-heading">
+                            <i class="fas fa-terminal"></i> System tools (curl / wget / system Python)
+                        </h4>
+                        <p class="platform-section-desc">
+                            Optional. Only run this if you call Smart Home from scripts or
+                            other CLI tools that consult the system trust store.
+                        </p>
+                        <div class="step-code">
+<pre><code>sudo cp ~/Downloads/MOBIUS_Local_CA.crt /usr/local/share/ca-certificates/
+sudo update-ca-certificates</code></pre>
+                        </div>
+
+                        <div class="platform-note">
+                            <i class="fas fa-info-circle"></i>
+                            <strong>Why Chrome needs its own thing:</strong>
+                            Since Chrome 105 (released August 2022), Chrome on Linux uses
+                            its own bundled Chrome Root Store and ignores both the OS trust
+                            store (<code>/etc/ssl/certs</code>) and the NSS database
+                            (<code>~/.pki/nssdb</code>). The Enterprise Policy file above
+                            is the supported way to add a private CA.
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Android -->
+                <div class="platform-card" data-platform="android">
+                    <div class="platform-card-header">
+                        <i class="fab fa-android"></i>
+                        <span>Android</span>
+                        <span class="detected-badge" id="badge-android">Detected</span>
+                    </div>
+                    <div class="platform-card-body">
+                        <a href="/install-cert/download" class="btn btn-primary cert-download-btn">
+                            <i class="fas fa-download"></i> Download Certificate
+                        </a>
+                        <div class="platform-steps">
+                            <div class="step">
+                                <span class="step-num">1</span>
+                                <span>Tap <strong>Download Certificate</strong> above</span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">2</span>
+                                <span>Open the downloaded file (or go to <strong>Settings &rarr; Security &rarr; Install from storage</strong>)</span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">3</span>
+                                <span>Name it <strong>MOBIUS Local CA</strong></span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">4</span>
+                                <span>Select <strong>CA certificate</strong> when asked for credential use</span>
+                            </div>
+                            <div class="step">
+                                <span class="step-num">5</span>
+                                <span>Tap <strong>Install anyway</strong> on the warning prompt</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Certificate fingerprint for verification -->
+            {% if fingerprint %}
+            <div class="cert-fingerprint">
+                <h3><i class="fas fa-fingerprint"></i> Certificate Fingerprint (SHA-256)</h3>
+                <code class="fingerprint-value">{{ fingerprint }}</code>
+                <p class="fingerprint-note">
+                    Compare this with the fingerprint shown during OS installation
+                    to verify you're installing the correct certificate.
+                </p>
+                {% if expiry %}
+                <p class="fingerprint-note">CA expires: {{ expiry }}</p>
+                {% endif %}
+            </div>
+            {% endif %}
+
+            <!-- Back link -->
+            <div class="cert-footer">
+                <a href="/" class="btn btn-secondary">
+                    <i class="fas fa-arrow-left"></i> Back to Dashboard
+                </a>
+            </div>
+
+            {% endif %}
+        </div>
+    </div>
+
+    <script src="/static/js/cert-install.js"></script>
+</body>
+</html>

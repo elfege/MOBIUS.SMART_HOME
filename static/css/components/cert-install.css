@@ -1,0 +1,538 @@
+/* ============================================================================
+   CERT-INSTALL.CSS - Certificate installation page styles
+
+   Standalone page for guided CA certificate installation.
+   Dark theme matching the NVR UI.
+   ============================================================================ */
+
+/* ---------------------------------------------------------------------------
+   Page layout — scrollable, centered content
+   --------------------------------------------------------------------------- */
+.cert-install-page {
+    overflow: auto;
+    height: 100vh;
+    background: #1a1a1a;
+}
+
+.cert-install-container {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem;
+}
+
+.cert-install-panel {
+    background: #242424;
+    border-radius: 12px;
+    padding: 2rem;
+    border: 1px solid #333;
+}
+
+/* ---------------------------------------------------------------------------
+   Header
+   --------------------------------------------------------------------------- */
+.cert-header {
+    text-align: center;
+    margin-bottom: 2rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid #333;
+}
+
+.cert-logo {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.cert-logo-img {
+    height: 32px;
+    width: auto;
+}
+
+.cert-logo h1 {
+    font-size: 1.4rem;
+    color: #fff;
+    margin: 0;
+}
+
+.cert-header h2 {
+    font-size: 1.3rem;
+    color: #4fc3f7;
+    margin-bottom: 0.5rem;
+}
+
+.cert-header h2 i {
+    margin-right: 0.4rem;
+}
+
+.cert-subtitle {
+    color: #aaa;
+    font-size: 0.95rem;
+    line-height: 1.5;
+    max-width: 600px;
+    margin: 0 auto;
+}
+
+/* ---------------------------------------------------------------------------
+   Error state (CA not generated)
+   --------------------------------------------------------------------------- */
+.cert-error {
+    background: rgba(244, 67, 54, 0.1);
+    border: 1px solid rgba(244, 67, 54, 0.3);
+    border-radius: 8px;
+    padding: 1.5rem;
+    text-align: center;
+    color: #ef9a9a;
+}
+
+.cert-error i {
+    font-size: 2rem;
+    display: block;
+    margin-bottom: 0.75rem;
+    color: #f44336;
+}
+
+.cert-error code {
+    background: rgba(255, 255, 255, 0.1);
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+}
+
+/* ---------------------------------------------------------------------------
+   Platform cards
+   --------------------------------------------------------------------------- */
+.platform-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.platform-card {
+    background: #2a2a2a;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+    overflow: hidden;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+/* Detected platform gets highlighted */
+.platform-card.detected {
+    border-color: #4fc3f7;
+    box-shadow: 0 0 12px rgba(79, 195, 247, 0.15);
+    order: -1;
+}
+
+.platform-card-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.85rem 1.25rem;
+    background: #2f2f2f;
+    border-bottom: 1px solid #3a3a3a;
+    cursor: pointer;
+    user-select: none;
+}
+
+.platform-card-header i {
+    font-size: 1.3rem;
+    color: #aaa;
+    width: 24px;
+    text-align: center;
+}
+
+.platform-card.detected .platform-card-header i {
+    color: #4fc3f7;
+}
+
+.platform-card-header span {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #ddd;
+}
+
+.detected-badge {
+    display: none;
+    margin-left: auto;
+    background: #4fc3f7;
+    color: #1a1a1a;
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 0.2rem 0.6rem;
+    border-radius: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.platform-card.detected .detected-badge {
+    display: inline-block;
+}
+
+/* Card body — collapsed by default, expanded for detected platform */
+.platform-card-body {
+    display: none;
+    padding: 1.25rem;
+}
+
+.platform-card.detected .platform-card-body,
+.platform-card.expanded .platform-card-body {
+    display: block;
+}
+
+/* ---------------------------------------------------------------------------
+   Download button inside cards
+   --------------------------------------------------------------------------- */
+.cert-download-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.65rem 1.5rem;
+    background: #4fc3f7;
+    color: #1a1a1a;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 0.2s;
+    margin-bottom: 1rem;
+}
+
+.cert-download-btn:hover {
+    background: #81d4fa;
+}
+
+.cert-download-btn:active {
+    background: #29b6f6;
+}
+
+/* ---------------------------------------------------------------------------
+   Step-by-step instructions
+   --------------------------------------------------------------------------- */
+.platform-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.step {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    font-size: 0.9rem;
+    color: #ccc;
+    line-height: 1.5;
+}
+
+.step-num {
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    background: #3a3a3a;
+    color: #4fc3f7;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: 700;
+}
+
+.step strong {
+    color: #fff;
+}
+
+.step code {
+    background: rgba(255, 255, 255, 0.08);
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    font-size: 0.85rem;
+}
+
+/* Code blocks for Linux terminal commands */
+.step-code {
+    margin-left: 2.25rem;
+    margin-top: -0.2rem;
+    margin-bottom: 0.3rem;
+    position: relative;          /* anchor for the .copy-btn */
+}
+
+.step-code code,
+.step-code pre {
+    display: block;
+    background: #1a1a1a;
+    color: #81c784;
+    padding: 0.5rem 0.75rem;
+    border-radius: 4px;
+    font-size: 0.82rem;
+    font-family: 'Fira Code', 'Consolas', 'Monaco', monospace;
+    overflow-x: auto;
+    margin: 0;
+}
+
+/* Single-line snippets keep their no-wrap style; multi-line <pre> blocks
+   (e.g., the Chrome policy heredoc) wrap naturally and preserve newlines. */
+.step-code > code {
+    white-space: nowrap;
+}
+
+.step-code pre {
+    white-space: pre;
+    line-height: 1.45;
+}
+
+.step-code pre code {
+    background: transparent;
+    padding: 0;
+    color: inherit;
+    font-size: inherit;
+    white-space: pre;
+}
+
+/* Copy button injected by cert-install.js */
+.copy-btn {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #ddd;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    z-index: 1;
+}
+
+.copy-btn:hover {
+    background: rgba(74, 144, 226, 0.25);
+    color: #fff;
+    border-color: rgba(74, 144, 226, 0.6);
+}
+
+.copy-btn.copied {
+    background: rgba(40, 167, 69, 0.3);
+    color: #b6f0c6;
+    border-color: rgba(40, 167, 69, 0.7);
+}
+
+.copy-btn.copy-failed {
+    background: rgba(220, 53, 69, 0.3);
+    color: #ffc4c9;
+    border-color: rgba(220, 53, 69, 0.7);
+}
+
+/* New per-platform structural classes used by cert_install.html */
+.platform-intro {
+    margin: 0 0 1rem 0;
+    color: #bbb;
+    font-size: 0.88rem;
+    line-height: 1.5;
+}
+
+.platform-section-heading {
+    margin: 1.25rem 0 0.35rem 0;
+    font-size: 0.95rem;
+    color: #eaeaea;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    padding-bottom: 0.3rem;
+}
+
+.platform-section-heading i {
+    color: #4a90e2;
+}
+
+.platform-section-desc {
+    margin: 0 0 0.6rem 0;
+    color: #aaa;
+    font-size: 0.82rem;
+    line-height: 1.5;
+}
+
+.platform-note {
+    margin-top: 1rem;
+    padding: 0.7rem 0.9rem;
+    background: rgba(74, 144, 226, 0.08);
+    border-left: 3px solid #4a90e2;
+    border-radius: 3px;
+    font-size: 0.82rem;
+    color: #cfd6df;
+    line-height: 1.55;
+}
+
+.platform-note i {
+    color: #4a90e2;
+    margin-right: 0.3rem;
+}
+
+.platform-note kbd {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-family: 'Fira Code', 'Consolas', monospace;
+    font-size: 0.78em;
+}
+
+/* ---------------------------------------------------------------------------
+   Fingerprint section
+   --------------------------------------------------------------------------- */
+.cert-fingerprint {
+    margin-top: 2rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid #333;
+    text-align: center;
+}
+
+.cert-fingerprint h3 {
+    font-size: 0.95rem;
+    color: #aaa;
+    margin-bottom: 0.75rem;
+}
+
+.cert-fingerprint h3 i {
+    margin-right: 0.4rem;
+    color: #4fc3f7;
+}
+
+.fingerprint-value {
+    display: block;
+    background: #1a1a1a;
+    color: #81c784;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-family: 'Fira Code', 'Consolas', 'Monaco', monospace;
+    word-break: break-all;
+    letter-spacing: 0.02em;
+}
+
+.fingerprint-note {
+    color: #777;
+    font-size: 0.8rem;
+    margin-top: 0.5rem;
+}
+
+/* ---------------------------------------------------------------------------
+   Footer / back link
+   --------------------------------------------------------------------------- */
+.cert-footer {
+    margin-top: 2rem;
+    text-align: center;
+}
+
+.btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1.25rem;
+    background: transparent;
+    color: #aaa;
+    border: 1px solid #555;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    text-decoration: none;
+    transition: color 0.2s, border-color 0.2s;
+}
+
+.btn-secondary:hover {
+    color: #fff;
+    border-color: #888;
+}
+
+/* ---------------------------------------------------------------------------
+   Certificate install banner (for embedding in other pages)
+   --------------------------------------------------------------------------- */
+.cert-banner {
+    position: fixed;
+    top: 44px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1100;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 1rem;
+    background: rgba(20, 20, 28, 0.95);
+    border: 1px solid rgba(79, 195, 247, 0.3);
+    border-radius: 6px;
+    font-size: 0.85rem;
+    color: #b0bec5;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    max-width: 90vw;
+}
+
+.cert-banner i.fa-shield-alt {
+    color: #4fc3f7;
+    font-size: 1.1rem;
+    flex-shrink: 0;
+}
+
+.cert-banner a {
+    color: #4fc3f7;
+    text-decoration: none;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.cert-banner a:hover {
+    text-decoration: underline;
+}
+
+.cert-banner-dismiss {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: #666;
+    cursor: pointer;
+    font-size: 1.1rem;
+    padding: 0.2rem;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.cert-banner-dismiss:hover {
+    color: #aaa;
+}
+
+/* ---------------------------------------------------------------------------
+   Responsive
+   --------------------------------------------------------------------------- */
+@media (max-width: 600px) {
+    .cert-install-container {
+        padding: 1rem;
+    }
+
+    .cert-install-panel {
+        padding: 1.25rem;
+    }
+
+    .cert-header h2 {
+        font-size: 1.1rem;
+    }
+
+    .platform-card-header {
+        padding: 0.75rem 1rem;
+    }
+
+    .platform-card-body {
+        padding: 1rem;
+    }
+
+    .fingerprint-value {
+        font-size: 0.65rem;
+    }
+}

@@ -85,6 +85,11 @@ def initialize_registry(instance_manager=None) -> None:
     from apps.rules.app import RulesApp
     register_app_type(RulesApp)
 
+    # SONOS alarm app — scheduled TTS/mp3 announcement on a Sonos speaker
+    # (local UPnP). Companion to the SONOS driver (/sonos controller page).
+    from apps.sonos.app import SonosApp
+    register_app_type(SonosApp)
+
     # Register with instance manager if provided
     if instance_manager:
         for type_name, app_class in _app_types.items():

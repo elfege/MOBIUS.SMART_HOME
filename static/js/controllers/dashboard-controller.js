@@ -632,6 +632,44 @@ export class DashboardController {
                     </div>
                 </div>
             </div>`;
+
+        // Sonos driver (the second driver). Local UPnP speakers; drilling in
+        // opens the /sonos controller (TTS, set/restore/lock volume, play, stop).
+        let sonosCount = 0;
+        try {
+            const sp = await fetch('/api/sonos/speakers').then(r => r.ok ? r.json() : null);
+            if (sp && sp.speakers) {
+                sonosCount = new Set(Object.values(sp.speakers)).size;  // distinct rooms
+            }
+        } catch (_) { /* keep 0 */ }
+        el.insertAdjacentHTML('beforeend', `
+            <div class="app-group" data-driver="sonos">
+                <button class="app-group-header" aria-expanded="false"
+                        onclick="dashboard.toggleGroup(this, 'driver-group-sonos')">
+                    <span class="app-group-caret">▸</span>
+                    <span class="app-group-name">Sonos</span>
+                    <span class="app-group-count">${sonosCount} room${sonosCount === 1 ? '' : 's'}</span>
+                </button>
+                <div class="instances-grid app-group-instances" id="driver-group-sonos"
+                     style="display:none;">
+                    <div class="instance-card driver-instance-card" style="cursor:pointer;"
+                         onclick="window.location='/sonos'"
+                         title="Open the Sonos controller">
+                        <div class="card-header">
+                            <h3>Sonos Speakers</h3>
+                            <span class="app-type-badge">Sonos</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="card-body-top">
+                                <span class="status-indicator active">CONTROLLER</span>
+                                <div class="card-stats">
+                                    <span class="card-stat">Open controller →</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>`);
     }
 
     /* =========================================================================

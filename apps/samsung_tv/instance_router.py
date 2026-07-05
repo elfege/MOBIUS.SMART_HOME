@@ -113,6 +113,8 @@ _MANAGE_HTML = """<!doctype html><html><head><meta charset="utf-8">
  .run{font-size:.7rem;padding:2px 8px;border-radius:99px}.on{background:#14532d;color:#86efac}.off{background:#3f1d1d;color:#fca5a5}
  .bar{display:flex;gap:8px;align-items:center;justify-content:space-between}
  .muted{color:#7c8aa0;font-size:.75rem}
+ .ctl{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
+ .ctl button{background:#334155;color:#e6edf3;flex:1 0 30%}
 </style></head><body>
 <div class="bar"><h1>Samsung TVs</h1><button class="save" onclick="load()">Refresh</button></div>
 <div id="list">loading...</div>
@@ -141,8 +143,19 @@ function card(t){const run=t._is_running?'<span class="run on">running</span>':'
  +'<div class=grid><div><label>Port</label><input id=port_'+t.id+' value="'+p+'" placeholder=auto></div>'
  +'<div><label>SSL</label><select id=ssl_'+t.id+'><option value=false '+(!t.use_ssl?'selected':'')+'>no</option>'
  +'<option value=true '+(t.use_ssl?'selected':'')+'>yes</option></select></div></div>'
- +'<br><div class=grid><button class=save onclick="save('+t.id+')">Save</button>'
+ +'<div class=ctl><button onclick="pwr('+t.id+',1)">On</button><button onclick="pwr('+t.id+',0)">Off</button>'
+ +'<button onclick="key('+t.id+',&#39;KEY_VOLUP&#39;)">Vol+</button>'
+ +'<button onclick="key('+t.id+',&#39;KEY_VOLDOWN&#39;)">Vol-</button>'
+ +'<button onclick="key('+t.id+',&#39;KEY_MUTE&#39;)">Mute</button>'
+ +'<button onclick="key('+t.id+',&#39;KEY_HOME&#39;)">Home</button></div>'
+ +'<div class=grid><button class=save onclick="save('+t.id+')">Save</button>'
  +'<button class=del onclick="del('+t.id+',\\''+esc(t.label)+'\\')">Remove</button></div></div>';}
+async function pwr(id,on){msg('power '+(on?'on':'off')+'...');
+ const r=await fetch(B+'/api/'+id+'/'+(on?'on':'off'),{method:'POST'});
+ msg('power '+(on?'ON':'OFF')+': '+(r.ok?'sent':'failed '+r.status));}
+async function key(id,k){msg(k+'...');
+ const r=await fetch(B+'/api/'+id+'/key/'+k,{method:'POST'});
+ msg(k+': '+(r.ok?'sent OK':'FAILED '+r.status+' - TV may not support IP key control'));}
 async function save(id){const b={tv_ip:val('ip_'+id),mac_address:val('mac_'+id),use_ssl:val('ssl_'+id)==='true',
   port:val('port_'+id)===''?null:parseInt(val('port_'+id),10)};msg('saving...');
  const r=await fetch(B+'/api/'+id+'/configure',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});

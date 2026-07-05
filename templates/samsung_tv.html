@@ -705,7 +705,7 @@
 (function () {
     "use strict";
 
-    const API_BASE      = "/samsung-tv/api";
+    const API_BASE      = "{{ api_base or '/samsung-tv/api' }}";
     const POLL_INTERVAL = 5000;   // ms — status refresh frequency
     let   _pollTimer    = null;
     let   _termCount    = 0;

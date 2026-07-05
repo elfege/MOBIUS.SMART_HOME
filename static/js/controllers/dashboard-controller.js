@@ -607,8 +607,8 @@ export class DashboardController {
             const addr = utils.escapeHtml(t.tv_ip || '') + (t.port ? ':' + t.port : '');
             return `
                     <div class="instance-card driver-instance-card" style="cursor:pointer;"
-                         onclick="window.location='/samsung-tv'"
-                         title="Open the Samsung TV remote">
+                         onclick="window.location='/samsung-tv/${t.id}'"
+                         title="Open this TV's remote controller">
                         <div class="card-header">
                             <h3>${utils.escapeHtml(t.label || 'TV')}</h3>
                             <span class="app-type-badge">Samsung TV</span>

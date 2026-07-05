@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from services.samsung_tv_registry import get_samsung_tv_registry
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/samsung-tv", tags=["samsung-tv-instance"])
+templates = Jinja2Templates(directory="templates")
 
 
 # =============================================================================
@@ -116,7 +118,10 @@ _MANAGE_HTML = """<!doctype html><html><head><meta charset="utf-8">
  .ctl{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
  .ctl button{background:#334155;color:#e6edf3;flex:1 0 30%}
 </style></head><body>
-<div class="bar"><h1>Samsung TVs</h1><button class="save" onclick="load()">Refresh</button></div>
+<div class="bar"><h1>Samsung TVs</h1><div>
+ <a href="/" style="color:#93a2b8;margin-right:12px">Dashboard</a>
+ <a href="#" onclick="location.reload();return false" style="color:#93a2b8;margin-right:12px">&#8635; Reload</a>
+ <button class="save" onclick="load()">Refresh</button></div></div>
 <div id="list">loading...</div>
 <div class="row"><h3>Add TV</h3>
  <label>Label</label><input id="a_label" placeholder="Office TV">
@@ -143,6 +148,7 @@ function card(t){const run=t._is_running?'<span class="run on">running</span>':'
  +'<div class=grid><div><label>Port</label><input id=port_'+t.id+' value="'+p+'" placeholder=auto></div>'
  +'<div><label>SSL</label><select id=ssl_'+t.id+'><option value=false '+(!t.use_ssl?'selected':'')+'>no</option>'
  +'<option value=true '+(t.use_ssl?'selected':'')+'>yes</option></select></div></div>'
+ +'<button class=add onclick="window.location=\\'/samsung-tv/'+t.id+'\\'">Open Remote Controller</button>'
  +'<div class=ctl><button onclick="pwr('+t.id+',1)">On</button><button onclick="pwr('+t.id+',0)">Off</button>'
  +'<button onclick="key('+t.id+',&#39;KEY_VOLUP&#39;)">Vol+</button>'
  +'<button onclick="key('+t.id+',&#39;KEY_VOLDOWN&#39;)">Vol-</button>'
@@ -198,6 +204,14 @@ async def samsung_tv_page(request: Request, instance_id: int):
         )
     client = registry.get(instance_id)
     running = client is not None
+    # Per-instance remote: render the SAME full controller template as the
+    # legacy /samsung-tv page, but pointed at THIS instance's API base
+    # (template's API_BASE is Jinja-parameterized; legacy render falls back
+    # to '/samsung-tv/api'). Placeholder below is now unreachable.
+    return templates.TemplateResponse(
+        request, "samsung_tv.html",
+        {"api_base": f"/samsung-tv/api/{instance_id}"},
+    )
     return HTMLResponse(
         f"""<!doctype html>
         <html><head><title>Samsung TV {instance_id}</title></head>
@@ -243,6 +257,30 @@ async def api_key(instance_id: int, key: str) -> Dict[str, Any]:
     """Send an arbitrary Samsung remote key (e.g. KEY_VOLUP, KEY_HDMI)."""
     client = _require_client(instance_id)
     return await client.send_key(key)
+
+
+@router.get("/api/{instance_id}/status")
+async def api_status(instance_id: int) -> Dict[str, Any]:
+    """Status of THIS TV instance — same shape as the legacy /api/status."""
+    client = _require_client(instance_id)
+    return client.get_status()
+
+
+@router.get("/api/{instance_id}/callbacks")
+async def api_callbacks(instance_id: int) -> Dict[str, Any]:
+    """Hubitat callback URLs stored on this instance's row."""
+    row = get_samsung_tv_registry().get_row(instance_id) or {}
+    return {"callbacks": row.get("callbacks") or {}}
+
+
+@router.post("/api/{instance_id}/register")
+@router.post("/api/{instance_id}/unregister-url")
+@router.post("/api/{instance_id}/test/push")
+@router.post("/api/{instance_id}/test/wol")
+async def api_not_ported(instance_id: int) -> Dict[str, Any]:
+    """Legacy hub-callback/test endpoints not yet ported per-instance —
+    answer JSON (not 404) so the shared template degrades gracefully."""
+    return {"ok": False, "detail": "not available per-instance yet"}
 
 
 @router.post("/api/{instance_id}/configure")

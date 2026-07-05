@@ -226,6 +226,7 @@ async def samsung_tv_page(request: Request, instance_id: int):
         {
             "status":   status,
             "tv_ip":    row.get("tv_ip"),
+            "port":     row.get("port"),
             "api_base": f"/samsung-tv/api/{instance_id}",
         },
     )

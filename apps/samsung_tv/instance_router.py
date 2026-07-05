@@ -208,9 +208,26 @@ async def samsung_tv_page(request: Request, instance_id: int):
     # legacy /samsung-tv page, but pointed at THIS instance's API base
     # (template's API_BASE is Jinja-parameterized; legacy render falls back
     # to '/samsung-tv/api'). Placeholder below is now unreachable.
+    if client is not None:
+        status = client.get_status()
+    else:
+        # Client not running (disabled/paused) — stub so the page renders;
+        # the JS status poll takes over from there.
+        status = {
+            "name": row.get("samsung_name") or row.get("label") or "tv",
+            "tv_ip": row.get("tv_ip"), "mac": row.get("mac_address"),
+            "conn_state": "disconnected", "power_state": "unknown",
+            "use_ssl": bool(row.get("use_ssl")), "queued_commands": 0,
+            "retry_count": 0, "last_error": "client not running",
+            "token_set": bool(row.get("token")),
+        }
     return templates.TemplateResponse(
         request, "samsung_tv.html",
-        {"api_base": f"/samsung-tv/api/{instance_id}"},
+        {
+            "status":   status,
+            "tv_ip":    row.get("tv_ip"),
+            "api_base": f"/samsung-tv/api/{instance_id}",
+        },
     )
     return HTMLResponse(
         f"""<!doctype html>

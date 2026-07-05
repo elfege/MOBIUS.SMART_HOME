@@ -14,7 +14,7 @@
     <!-- CSS Variables (must load first) -->
     <link rel="stylesheet" href="/static/css/variables.css">
     <!-- Main CSS -->
-    <link rel="stylesheet" href="/static/css/main.css?v=20260705b">
+    <link rel="stylesheet" href="/static/css/main.css?v=20260705e">
     <!-- KPI Modal CSS -->
     <link rel="stylesheet" href="/static/css/kpi-modal.css">
     <!-- Neutral theme overlay (2026-05-17) — desaturates the palette,
@@ -38,7 +38,10 @@
                     <span class="logo-text">MOBIUS<span class="logo-dot">.</span>HOME</span>
                 </a>
             </div>
-            <nav class="main-nav">
+            <button class="nav-toggle" aria-label="Menu" aria-expanded="false"
+                    onclick="const n=document.querySelector('.main-nav');n.classList.toggle('open');this.setAttribute('aria-expanded',n.classList.contains('open'))">&#9776;</button>
+            <nav class="main-nav"
+                 onclick="if(event.target.closest('a')){this.classList.remove('open')}">
                 <a href="/" class="nav-link">Dashboard</a>
                 <a href="#" class="nav-link" title="Reload the web app (full refresh)"
                    onclick="window.location.reload();return false;">&#8635; Reload</a>

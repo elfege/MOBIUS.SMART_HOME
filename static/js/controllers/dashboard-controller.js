@@ -607,8 +607,8 @@ export class DashboardController {
             const addr = utils.escapeHtml(t.tv_ip || '') + (t.port ? ':' + t.port : '');
             return `
                     <div class="instance-card driver-instance-card" style="cursor:pointer;"
-                         onclick="window.location='/samsung-tv/manage'"
-                         title="Manage TVs">
+                         onclick="window.location='/samsung-tv'"
+                         title="Open the Samsung TV remote">
                         <div class="card-header">
                             <h3>${utils.escapeHtml(t.label || 'TV')}</h3>
                             <span class="app-type-badge">Samsung TV</span>
@@ -629,6 +629,18 @@ export class DashboardController {
                         </div></div>
                     </div>`;
 
+        // Separate card for add/remove/configure so the TV cards keep their
+        // original behavior: click a TV -> the full remote controller page.
+        const manageCard = `
+                    <div class="instance-card driver-instance-card" style="cursor:pointer;"
+                         onclick="window.location='/samsung-tv/manage'"
+                         title="Add / remove / configure TVs">
+                        <div class="card-header"><h3>Manage TVs</h3></div>
+                        <div class="card-body"><div class="card-body-top">
+                            <div class="card-stats"><span class="card-stat">add · remove · IP / MAC / port →</span></div>
+                        </div></div>
+                    </div>`;
+
         el.innerHTML = `
             <div class="app-group" data-driver="samsung_tv">
                 <button class="app-group-header" aria-expanded="false"
@@ -639,7 +651,7 @@ export class DashboardController {
                 </button>
                 <div class="instances-grid app-group-instances" id="driver-group-samsung_tv"
                      style="display:none;">
-                    ${tvCards}
+                    ${tvCards}${tvs.length ? manageCard : ''}
                 </div>
             </div>`;
 

@@ -227,14 +227,21 @@ class RulesApp(BaseApp):
             },
             {
                 "key": "tv",
-                "label": "TV (tv_mode rule)",
-                "capability": "switch",
-                "multiple": False,
+                # "Switch" (capital S) matches the stored capability case — the
+                # roster stores Hubitat's "Switch", and the case-SENSITIVE
+                # /api/devices?capability= path returns 0 for lowercase "switch".
+                # Aligns with fan_automation / power_management / screen_time.
+                "capability": "Switch",
+                "label": "TV(s) (tv_mode rule)",
+                "multiple": True,
                 "required": False,
                 "description": (
-                    "The TV device/driver whose on/off drives the location mode "
-                    "(e.g. on → WatchingTV). Replaces the disabled HE Mode "
-                    "Manager / Rule-Machine 'TV mode manager' apps."
+                    "The TV device(s)/driver(s) whose on/off drives the location "
+                    "mode (e.g. any one on → WatchingTV). Select one or more — "
+                    "the interpreter matches an event from ANY device in this "
+                    "category (membership test), so multiple TVs each drive the "
+                    "mode. Replaces the disabled HE Mode Manager / Rule-Machine "
+                    "'TV mode manager' apps."
                 ),
             },
         ]

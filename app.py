@@ -3004,13 +3004,35 @@ async def run_all_test_scenarios(instance_id: int):
     return {"message": "All scenarios started", "instance_id": instance_id}
 
 
+def _mode_client():
+    """Return the client that owns LOCATION-MODE operations, honoring the
+    ``maker_api_enabled`` system setting — the SAME transport switch device
+    commands use (see device_commander). Default (False, since 2026-05-17) →
+    Hubitat admin API against the ``is_primary`` hub (standalone, no Maker app
+    needed); True → legacy Maker API (switchback).
+
+    Consolidates the three mode routes onto ONE transport-selection point so
+    the mode path can never again silently diverge from the rest of the app —
+    which is exactly how the "can't change modes" bug hid (2026-07-04)."""
+    from services.settings_resolver import get_resolver
+    if get_resolver().get_system('maker_api_enabled', False):
+        from services.hubitat_client import get_default_client
+        return get_default_client()
+    from services.hubitat_admin_client import get_client
+    from services.mode_poller import _authoritative_hub
+    hub = _authoritative_hub()
+    if not hub:
+        raise HTTPException(status_code=503,
+                            detail="no primary hub configured for modes")
+    hub_name, hub_ip = hub
+    return get_client(hub_ip, hub_name)
+
+
 @app.get("/api/modes", tags=["modes"])
 async def get_modes():
     """Get available location modes."""
-    from services.hubitat_client import get_default_client
-
     try:
-        client = get_default_client()
+        client = _mode_client()
         modes = client.get_modes()
         return modes
 
@@ -3022,10 +3044,8 @@ async def get_modes():
 @app.get("/api/modes/current", tags=["modes"])
 async def get_current_mode():
     """Get current location mode."""
-    from services.hubitat_client import get_default_client
-
     try:
-        client = get_default_client()
+        client = _mode_client()
         mode_id, mode_name = client.get_current_mode()
         return {"id": mode_id, "name": mode_name}
 
@@ -3040,12 +3060,11 @@ async def set_mode(request: Request):
 
     Powers the navbar mode dropdown (change location mode from the global app,
     operator directive 2026-06-22)."""
-    from services.hubitat_client import get_default_client
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body")
-    client = get_default_client()
+    client = _mode_client()
     mode_id = (body or {}).get("mode_id")
     if mode_id is None:
         # Resolve by name if id not given.

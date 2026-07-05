@@ -200,6 +200,7 @@ class SamsungTVConfig:
     mac_address:   str
     token:         str  = ""
     use_ssl:       bool = True
+    ws_port:       Optional[int] = None   # UI-selectable remote-control port
     poll_interval: int  = _POLL_INTERVAL
     max_retries:   int  = 0          # 0 = unlimited
     name:          str  = "samsung_tv"
@@ -1041,6 +1042,10 @@ class SamsungTVClient:
         else:
             scheme = "ws"
             port   = _WS_PORT
+        # Per-instance override (UI-selectable). Lets a TV whose remote-control
+        # channel is on a non-standard port be driven without a code change.
+        if self.config.ws_port:
+            port = self.config.ws_port
 
         token_param = f"&token={self.config.token}" if self.config.token else ""
         return (

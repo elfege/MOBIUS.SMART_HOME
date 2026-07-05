@@ -47,6 +47,7 @@ class TVConfigureBody(BaseModel):
     samsung_name: Optional[str]  = None
     app_name:     Optional[str]  = None
     label:        Optional[str]  = None
+    port:         Optional[int]  = None
 
 
 # =============================================================================
@@ -96,6 +97,72 @@ def _require_client(instance_id: int):
 # =============================================================================
 # UI route (placeholder until templates/samsung_tv.html is restored)
 # =============================================================================
+
+
+_MANAGE_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Samsung TVs</title><style>
+ body{font-family:system-ui,sans-serif;background:#0f141b;color:#e6edf3;margin:0;padding:16px}
+ h1{font-size:1.2rem;margin:.2rem 0} h3{margin:.2rem 0}
+ .row{background:#1a2230;border:1px solid #2b3648;border-radius:10px;padding:12px;margin:10px 0}
+ label{display:block;font-size:.72rem;color:#93a2b8;margin:6px 0 2px}
+ input,select{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #35415a;background:#0d1219;color:#e6edf3;font-size:16px}
+ .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+ button{padding:12px 14px;border:0;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer}
+ .save{background:#2563eb;color:#fff}.del{background:#7f1d1d;color:#fff}.add{background:#15803d;color:#fff;width:100%}
+ .run{font-size:.7rem;padding:2px 8px;border-radius:99px}.on{background:#14532d;color:#86efac}.off{background:#3f1d1d;color:#fca5a5}
+ .bar{display:flex;gap:8px;align-items:center;justify-content:space-between}
+ .muted{color:#7c8aa0;font-size:.75rem}
+</style></head><body>
+<div class="bar"><h1>Samsung TVs</h1><button class="save" onclick="load()">Refresh</button></div>
+<div id="list">loading...</div>
+<div class="row"><h3>Add TV</h3>
+ <label>Label</label><input id="a_label" placeholder="Office TV">
+ <div class="grid"><div><label>IP</label><input id="a_ip" placeholder="<LAN_IP>"></div>
+ <div><label>MAC</label><input id="a_mac" placeholder="84:A4:66:AD:EE:0B"></div></div>
+ <div class="grid"><div><label>Port</label><select id="a_port">
+  <option value="">auto (8001/8002)</option><option>8001</option><option>8002</option><option>8000</option><option>8080</option><option>55000</option></select></div>
+ <div><label>SSL (WSS)</label><select id="a_ssl"><option value="false">no</option><option value="true">yes</option></select></div></div>
+ <br><button class="add" onclick="addTv()">Add TV</button></div>
+<p class="muted" id="msg"></p>
+<script>
+const B='/samsung-tv';
+function val(id){return document.getElementById(id).value.trim()}
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function msg(m){document.getElementById('msg').textContent=m}
+async function load(){const el=document.getElementById('list');el.textContent='loading...';
+ try{const r=await fetch(B+'/api/list');const d=await r.json();const xs=d.instances||[];
+  el.innerHTML=xs.length?xs.map(card).join(''):'<p class=muted>no TVs</p>';}catch(e){el.textContent='error: '+e}}
+function card(t){const run=t._is_running?'<span class="run on">running</span>':'<span class="run off">stopped</span>';
+ const p=t.port==null?'':t.port;
+ return '<div class=row><div class=bar><b>'+esc(t.label)+'</b>'+run+' <span class=muted>id '+t.id+'</span></div>'
+ +'<div class=grid><div><label>IP</label><input id=ip_'+t.id+' value="'+esc(t.tv_ip)+'"></div>'
+ +'<div><label>MAC</label><input id=mac_'+t.id+' value="'+esc(t.mac_address)+'"></div></div>'
+ +'<div class=grid><div><label>Port</label><input id=port_'+t.id+' value="'+p+'" placeholder=auto></div>'
+ +'<div><label>SSL</label><select id=ssl_'+t.id+'><option value=false '+(!t.use_ssl?'selected':'')+'>no</option>'
+ +'<option value=true '+(t.use_ssl?'selected':'')+'>yes</option></select></div></div>'
+ +'<br><div class=grid><button class=save onclick="save('+t.id+')">Save</button>'
+ +'<button class=del onclick="del('+t.id+',\\''+esc(t.label)+'\\')">Remove</button></div></div>';}
+async function save(id){const b={tv_ip:val('ip_'+id),mac_address:val('mac_'+id),use_ssl:val('ssl_'+id)==='true',
+  port:val('port_'+id)===''?null:parseInt(val('port_'+id),10)};msg('saving...');
+ const r=await fetch(B+'/api/'+id+'/configure',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+ msg(r.ok?'saved, reconnecting...':'save failed '+r.status);load();}
+async function del(id,label){if(!confirm('Remove '+label+'?'))return;msg('removing...');
+ const r=await fetch(B+'/api/'+id,{method:'DELETE'});msg(r.ok?'removed':'delete failed '+r.status);load();}
+async function addTv(){const b={label:val('a_label'),tv_ip:val('a_ip'),mac_address:val('a_mac'),
+  use_ssl:val('a_ssl')==='true',port:val('a_port')===''?null:parseInt(val('a_port'),10)};
+ if(!b.label||!b.tv_ip){msg('label + IP required');return}msg('adding...');
+ const r=await fetch(B+'/api/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+ msg(r.ok?'added':'add failed '+r.status);
+ if(r.ok){document.getElementById('a_label').value='';document.getElementById('a_ip').value='';document.getElementById('a_mac').value=''}load();}
+load();
+</script></body></html>"""
+
+
+@router.get("/manage", response_class=HTMLResponse)
+async def manage_page() -> HTMLResponse:
+    """Multi-TV management UI: list / add / edit (incl. port) / remove."""
+    return HTMLResponse(_MANAGE_HTML)
 
 
 @router.get("/{instance_id}", response_class=HTMLResponse)
@@ -207,6 +274,8 @@ async def api_configure(
         patch["app_name"] = body.app_name
     if body.label is not None:
         patch["label"] = body.label
+    if body.port is not None:
+        patch["port"] = body.port or None
 
     if not patch:
         return {"ok": True, "noop": True, "row": row}
@@ -236,6 +305,78 @@ async def api_list() -> Dict[str, Any]:
     """
     registry = get_samsung_tv_registry()
     return {"instances": registry.list_instances()}
+
+
+class TVCreateBody(BaseModel):
+    """Body for ``POST /samsung-tv/api/create`` — add a new TV instance."""
+    label:        str
+    tv_ip:        str
+    mac_address:  Optional[str] = None
+    use_ssl:      bool          = False
+    port:         Optional[int] = None
+    samsung_name: Optional[str] = None
+    app_name:     Optional[str] = "Smart Home Controller"
+
+
+@router.post("/api/create")
+async def api_create(body: TVCreateBody) -> Dict[str, Any]:
+    """Insert a new samsung_tv_instances row and start its client."""
+    import os
+    import asyncio as _asyncio
+    import requests as _requests
+    pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+    row = {
+        "label":        body.label,
+        "tv_ip":        body.tv_ip,
+        "mac_address":  (body.mac_address or "").replace(":", "").upper() or None,
+        "use_ssl":      body.use_ssl,
+        "port":         body.port or None,
+        "samsung_name": body.samsung_name or body.label.lower().replace(" ", "_"),
+        "app_name":     body.app_name or "Smart Home Controller",
+        "token":        None,
+        "callbacks":    {},
+        "is_enabled":   True,
+        "is_paused":    False,
+    }
+
+    def _insert() -> Dict[str, Any]:
+        r = _requests.post(
+            f"{pg}/samsung_tv_instances", json=row,
+            headers={"Prefer": "return=representation"}, timeout=6,
+        )
+        r.raise_for_status()
+        d = r.json()
+        return d[0] if isinstance(d, list) else d
+
+    try:
+        created = await _asyncio.to_thread(_insert)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"create failed: {e}")
+    # Spawn the client for the new row.
+    await get_samsung_tv_registry().reload_instance(int(created["id"]))
+    return {"ok": True, "row": created}
+
+
+@router.delete("/api/{instance_id}")
+async def api_delete(instance_id: int) -> Dict[str, Any]:
+    """Stop the client for a TV instance and delete its DB row."""
+    import os
+    import asyncio as _asyncio
+    import requests as _requests
+    await get_samsung_tv_registry().remove_instance(instance_id)
+    pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+
+    def _del() -> None:
+        r = _requests.delete(
+            f"{pg}/samsung_tv_instances?id=eq.{instance_id}", timeout=6,
+        )
+        r.raise_for_status()
+
+    try:
+        await _asyncio.to_thread(_del)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"delete failed: {e}")
+    return {"ok": True, "deleted": instance_id}
 
 
 # =============================================================================

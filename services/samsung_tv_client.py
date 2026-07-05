@@ -583,13 +583,22 @@ class SamsungTVClient:
         else:
             # Samsung TVs with Instant On keep the network active even in
             # standby — HTTP 200 still returns but PowerState != "on".
-            power_field = (resp.get("device") or {}).get("PowerState", "")
-            if power_field == "on":
+            device = resp.get("device") or {}
+            if "PowerState" not in device:
+                # Pre-2016 models (e.g. 2014 H-series, msfVersion 2.0.x) don't
+                # expose a PowerState field at all. For them a 200 from the HTTP
+                # info endpoint means the set is ON — a fully-off/standby TV of
+                # that era drops its :8001 server entirely (which is exactly why
+                # power_on() has to Wake-on-LAN it). Without this fallback every
+                # pre-2016 Samsung reads permanently "off". (2026-07-05)
+                observation = TVPowerState.ON
+                obs_reason  = "http200_no_PowerState_field(pre-2016)"
+            elif device.get("PowerState") == "on":
                 observation = TVPowerState.ON
                 obs_reason  = "PowerState=on"
             else:
                 observation = TVPowerState.OFF
-                obs_reason  = f"PowerState={power_field or 'MISSING'}"
+                obs_reason  = f"PowerState={device.get('PowerState') or 'MISSING'}"
 
         self._last_observation = observation
 

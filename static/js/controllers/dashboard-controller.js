@@ -592,17 +592,42 @@ export class DashboardController {
         if (!el) return;
         window.dashboard = this;  // ensure inline onclick handlers resolve
 
-        // Device label comes from SAMSUNG_TV_NAME (a slug, e.g. "living_room_tv")
-        // via /samsung-tv/api/status, title-cased for display. Falls back to a
-        // generic label if the controller isn't reachable.
-        let tvLabel = 'Samsung TV';
+        // Data-driven: one card per samsung_tv_instances row (add/remove/edit
+        // live at /samsung-tv/manage). No longer hardcoded to a single TV.
+        let tvs = [];
         try {
-            const s = await fetch('/samsung-tv/api/status').then(r => r.ok ? r.json() : null);
-            if (s && s.name) {
-                tvLabel = String(s.name).replace(/_/g, ' ')
-                    .replace(/\b\w/g, c => c.toUpperCase());
-            }
-        } catch (_) { /* keep fallback label */ }
+            const d = await fetch('/samsung-tv/api/list').then(r => r.ok ? r.json() : null);
+            if (d && Array.isArray(d.instances)) tvs = d.instances;
+        } catch (_) { /* leave empty */ }
+
+        const tvCards = tvs.length ? tvs.map(t => {
+            const badge = t._is_running
+                ? '<span class="status-indicator active">RUNNING</span>'
+                : '<span class="status-indicator">STOPPED</span>';
+            const addr = utils.escapeHtml(t.tv_ip || '') + (t.port ? ':' + t.port : '');
+            return `
+                    <div class="instance-card driver-instance-card" style="cursor:pointer;"
+                         onclick="window.location='/samsung-tv/manage'"
+                         title="Manage TVs">
+                        <div class="card-header">
+                            <h3>${utils.escapeHtml(t.label || 'TV')}</h3>
+                            <span class="app-type-badge">Samsung TV</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="card-body-top">
+                                ${badge}
+                                <div class="card-stats"><span class="card-stat">${addr}</span></div>
+                            </div>
+                        </div>
+                    </div>`;
+        }).join('') : `
+                    <div class="instance-card driver-instance-card" style="cursor:pointer;"
+                         onclick="window.location='/samsung-tv/manage'" title="Add a TV">
+                        <div class="card-header"><h3>No TVs yet</h3></div>
+                        <div class="card-body"><div class="card-body-top">
+                            <div class="card-stats"><span class="card-stat">+ Add a TV →</span></div>
+                        </div></div>
+                    </div>`;
 
         el.innerHTML = `
             <div class="app-group" data-driver="samsung_tv">
@@ -610,26 +635,11 @@ export class DashboardController {
                         onclick="dashboard.toggleGroup(this, 'driver-group-samsung_tv')">
                     <span class="app-group-caret">▸</span>
                     <span class="app-group-name">Samsung TV</span>
-                    <span class="app-group-count">1 device</span>
+                    <span class="app-group-count">${tvs.length} device${tvs.length === 1 ? '' : 's'}</span>
                 </button>
                 <div class="instances-grid app-group-instances" id="driver-group-samsung_tv"
                      style="display:none;">
-                    <div class="instance-card driver-instance-card" style="cursor:pointer;"
-                         onclick="window.location='/samsung-tv'"
-                         title="Open the Samsung TV controller">
-                        <div class="card-header">
-                            <h3>${utils.escapeHtml(tvLabel)}</h3>
-                            <span class="app-type-badge">Samsung TV</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="card-body-top">
-                                <span class="status-indicator active">CONTROLLER</span>
-                                <div class="card-stats">
-                                    <span class="card-stat">Open controller →</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+                    ${tvCards}
                 </div>
             </div>`;
 

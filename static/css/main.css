@@ -94,9 +94,9 @@ body {
 }
 
 .nav-link.btn-add {
-    background: var(--color-primary);
-    color: white;
-    padding: 0.5rem 1rem;
+    color: var(--color-primary);
+    padding: 0.3rem 0.6rem;
+    border: 1px solid var(--color-border);
     border-radius: var(--radius);
 }
 
@@ -1275,13 +1275,19 @@ a.debug-device:hover {
     /* Navbar — let it wrap, shrink cross-app links to a separate row
        below the local nav. Tighter gaps prevent right-edge clipping on
        narrow phones. */
+    /* Single horizontal row that SCROLLS instead of wrapping into ugly
+       stacked rows on iOS/narrow phones. */
     .main-nav {
         width: 100%;
-        gap: 0.6rem;
-        row-gap: 0.5rem;
-        flex-wrap: wrap;
+        gap: 0.9rem;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
         justify-content: flex-start;
     }
+    .main-nav::-webkit-scrollbar { display: none; }
+    .main-nav > * { flex: 0 0 auto; }
 
     .nav-link {
         font-size: 0.875rem;

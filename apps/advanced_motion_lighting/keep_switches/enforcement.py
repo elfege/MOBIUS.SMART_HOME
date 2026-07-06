@@ -68,11 +68,15 @@ class KeepSwitchEnforcementMixin:
             if not enforce_off:
                 break
             try:
-                live_device = self.get_device_state_live(device_id)
-                if not live_device:
+                # event_log SOT — NOT get_device_state_live() (Maker API).
+                # The live API returns None on hubs emitting invalid JSON
+                # (home_2 was doing exactly this), which silently skipped
+                # enforcement. Reading the same source as motion and the
+                # on/off path keeps state consistent across the app.
+                actual = self.get_switch_state(device_id)
+                if actual is None:
                     continue
-                device_name = self._extract_device_name(live_device, device_id)
-                actual = self._extract_switch_state(live_device)
+                device_name = self._resolve_device_name(device_id)
                 key = f"keep:{device_id}"
 
                 if actual == 'on':
@@ -120,11 +124,15 @@ class KeepSwitchEnforcementMixin:
             if not enforce_on:
                 break
             try:
-                live_device = self.get_device_state_live(device_id)
-                if not live_device:
+                # event_log SOT — NOT get_device_state_live() (Maker API).
+                # The live API returns None on hubs emitting invalid JSON
+                # (home_2 was doing exactly this), which silently skipped
+                # enforcement. Reading the same source as motion and the
+                # on/off path keeps state consistent across the app.
+                actual = self.get_switch_state(device_id)
+                if actual is None:
                     continue
-                device_name = self._extract_device_name(live_device, device_id)
-                actual = self._extract_switch_state(live_device)
+                device_name = self._resolve_device_name(device_id)
                 key = f"keep:{device_id}"
 
                 if actual == 'off':

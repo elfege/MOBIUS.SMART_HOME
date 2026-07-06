@@ -46,6 +46,40 @@ class LightControllerMixin:
                 if device else device_id
             )
 
+            # --- Authoritative live-state overlay (event_log = SOT) ---
+            # get_device_state() gives us STATIC metadata (name / capabilities)
+            # from the device_cache mirror, but that mirror's switch/level
+            # values go stale silently — root cause of the recurring
+            # "lights won't turn on" regression (canon 104 froze 'on' for two
+            # days while the light was really off, so the skip below suppressed
+            # every turn-on). Overlay the TRUE current switch (and level, when
+            # dimming) from event_log so _turn_on/_turn_off_switch and the
+            # stale-memo check read reality, not a 2-day-old cache value.
+            live_switch = self.get_switch_state(device_id)
+            if live_switch is not None:
+                cached_switch = (
+                    (device.get('attributes') or {}).get('switch')
+                    if device else None
+                )
+                if cached_switch is not None and cached_switch != live_switch:
+                    # device_cache has drifted from the event_log SOT — this is
+                    # the exact silent condition that has dark-kitchened us
+                    # repeatedly. Make it LOUD so the next drift is caught in
+                    # logs, not by a resident flipping a switch in the dark.
+                    self.logger.warning(
+                        f"device_cache DRIFT for {_C}{device_name}{_R} "
+                        f"(canon={device_id}): cache switch='{cached_switch}' "
+                        f"but event_log='{live_switch}' — trusting event_log"
+                    )
+                device = dict(device) if device else {}
+                attrs = dict(device.get('attributes') or {})
+                attrs['switch'] = live_switch
+                if self.get_setting('useDim', False):
+                    live_level = self.get_latest_attribute(device_id, 'level')
+                    if live_level is not None:
+                        attrs['level'] = live_level
+                device['attributes'] = attrs
+
             # Memo check with stale detection
             if self._should_skip_due_to_memo(device_name, action):
                 if device:

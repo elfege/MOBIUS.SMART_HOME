@@ -27,6 +27,16 @@ import requests
 class MotionDetectionMixin:
     """Mixin: motion activity check via in-memory cache + event_log SQL."""
 
+    # A motion sensor continuously 'active' for longer than this — with NO
+    # inactive transition — is treated as stuck/failed and ignored. Real
+    # occupancy cycles a PIR active/inactive; hours of unbroken 'active' means
+    # a dead or latched sensor (dead battery, stuck relay). Reconcile polls
+    # that merely re-confirm 'active' are NOT transitions and do not reset the
+    # clock. Per-instance overridable via the 'stuckSensorSeconds' setting.
+    # (canon 235 "Motion Sensor kitchen" was stuck 'active' 20h+, pinning the
+    # kitchen lights on and defeating every timeout — 2026-07-05.)
+    DEFAULT_STUCK_ACTIVE_SECONDS = 4 * 3600
+
     def _is_motion_active(self) -> bool:
         """
         Return True if motion should be considered "currently active" for
@@ -55,6 +65,14 @@ class MotionDetectionMixin:
           IN 'active' state for 14 minutes between events — events-in-window
           said "expired" but the sensor was literally still active the
           whole time.
+
+        STUCK-SENSOR GUARD (2026-07-05): a sensor jammed in 'active' with no
+          transition for longer than DEFAULT_STUCK_ACTIVE_SECONDS is treated
+          as failed and excluded from Rule 1, so a single dead/latched PIR
+          cannot pin the room 'active' forever. It is flagged non-functional
+          (surfaced by _health_check). This is distinct from a sensor legitimately
+          sitting 'inactive' for hours (empty room) — only stuck-ACTIVE is
+          neutralized, because only 'active' keeps lights on.
 
         Returns:
             True if motion is considered active (keep on), False otherwise.
@@ -105,10 +123,30 @@ class MotionDetectionMixin:
                     f"motion: per-sensor state query failed for canon={sid}: {e}"
                 )
 
-        # Rule 1: ANY sensor currently 'active' → motion is on.
-        currently_active = [
-            sid for sid, (val, _) in per_sensor_state.items() if val == 'active'
-        ]
+        # Rule 1: ANY sensor currently 'active' → motion is on — UNLESS the
+        # sensor is STUCK active. A dead/latched PIR reports 'active' forever
+        # (only the reconcile poll re-confirms it); without this guard one stuck
+        # sensor pins the room's lights on and no timeout can ever fire. A
+        # sensor is stuck when its current 'active' RUN began longer ago than
+        # the stuck threshold — reconcile re-confirmations do not count as a
+        # transition, so we anchor on the real inactive→active onset.
+        stuck_threshold = self._stuck_active_seconds()
+        currently_active = []
+        for sid, (val, _ts) in per_sensor_state.items():
+            if val != 'active':
+                continue
+            onset_age = self._active_onset_age_seconds(pg, sid)
+            if onset_age is not None and onset_age > stuck_threshold:
+                # Mark non-functional so _health_check surfaces it, and ignore
+                # its jammed 'active' for the motion decision.
+                self._functional_sensors[str(sid)] = False
+                self.logger.warning(
+                    f"motion: sensor canon={sid} STUCK 'active' for "
+                    f"{onset_age / 3600:.1f}h with no transition — treating as "
+                    f"FAILED and ignoring (dead/latched sensor?)"
+                )
+                continue
+            currently_active.append(sid)
         if currently_active:
             self.logger.debug(
                 f"motion: sensors {currently_active} currently in ACTIVE state"
@@ -219,3 +257,80 @@ class MotionDetectionMixin:
 
         # No active event in the timeout window → motion is off.
         return False
+
+    def _stuck_active_seconds(self) -> int:
+        """
+        Threshold (seconds) beyond which an unbroken 'active' run means the
+        sensor is stuck/failed. Per-instance overridable via the
+        'stuckSensorSeconds' setting; defaults to DEFAULT_STUCK_ACTIVE_SECONDS.
+
+        A non-numeric or non-positive override is ignored (falls back to the
+        default) — a threshold of 0 would flag EVERY active sensor as stuck.
+        """
+        try:
+            val = int(self.get_setting(
+                'stuckSensorSeconds', self.DEFAULT_STUCK_ACTIVE_SECONDS
+            ))
+        except (TypeError, ValueError):
+            return self.DEFAULT_STUCK_ACTIVE_SECONDS
+        return val if val > 0 else self.DEFAULT_STUCK_ACTIVE_SECONDS
+
+    def _active_onset_age_seconds(self, pg: str, sid) -> Optional[float]:
+        """
+        Seconds the sensor has been CONTINUOUSLY 'active' — i.e.
+        now - (first 'active' event after its most recent 'inactive' event).
+
+        Reconcile polls that merely re-confirm 'active' do NOT reset this; only
+        a real inactive→active transition does. For a sensor that has never
+        gone inactive (classic stuck sensor), the onset is its earliest 'active'
+        event, yielding a very large age.
+
+        Returns None when the age cannot be determined (query error), so the
+        caller does NOT falsely flag a sensor as stuck during a transient DB
+        blip — a stuck sensor stays stuck and will be caught next cycle.
+        """
+        try:
+            # Most recent inactive event = the boundary the current active run
+            # started after. May be absent for a never-inactive sensor.
+            r_inactive = requests.get(
+                f"{pg}/event_log",
+                params={
+                    'canonical_device_id': f'eq.{sid}',
+                    'event_type': 'eq.motion',
+                    'event_value': 'eq.inactive',
+                    'select': 'received_at',
+                    'order': 'received_at.desc',
+                    'limit': '1',
+                },
+                timeout=3,
+            )
+            if r_inactive.status_code != 200:
+                return None
+            rows = r_inactive.json()
+            last_inactive_iso = rows[0].get('received_at') if rows else ''
+
+            # First 'active' event AFTER that inactive = onset of the current
+            # active run. With no prior inactive, the earliest active event.
+            params = {
+                'canonical_device_id': f'eq.{sid}',
+                'event_type': 'eq.motion',
+                'event_value': 'eq.active',
+                'select': 'received_at',
+                'order': 'received_at.asc',
+                'limit': '1',
+            }
+            if last_inactive_iso:
+                params['received_at'] = f'gt.{last_inactive_iso}'
+            r_onset = requests.get(f"{pg}/event_log", params=params, timeout=3)
+            if r_onset.status_code != 200 or not r_onset.json():
+                return None
+            onset_iso = r_onset.json()[0].get('received_at')
+            if not onset_iso:
+                return None
+            onset_at = datetime.fromisoformat(onset_iso.replace('Z', '+00:00'))
+            return (datetime.now(timezone.utc) - onset_at).total_seconds()
+        except Exception as e:
+            self.logger.warning(
+                f"motion: active-onset age query failed for canon={sid}: {e}"
+            )
+            return None

@@ -44,6 +44,18 @@ def _make_instance(timeout_seconds: int = 1200):
     inst._is_motion_active = (
         MotionDetectionMixin._is_motion_active.__get__(inst)
     )
+    # Bind the real stuck-sensor helpers too — _is_motion_active calls them,
+    # and an unbound MagicMock would make the threshold comparison a
+    # MagicMock>MagicMock TypeError.
+    inst._stuck_active_seconds = (
+        MotionDetectionMixin._stuck_active_seconds.__get__(inst)
+    )
+    inst._active_onset_age_seconds = (
+        MotionDetectionMixin._active_onset_age_seconds.__get__(inst)
+    )
+    inst.DEFAULT_STUCK_ACTIVE_SECONDS = (
+        MotionDetectionMixin.DEFAULT_STUCK_ACTIVE_SECONDS
+    )
     inst._functional_sensors = {"167": True, "63": True, "240": True}
     inst._runtime = SimpleNamespace(last_motion_time=None)
     inst._get_timeout_seconds = lambda: timeout_seconds
@@ -103,20 +115,94 @@ def test_any_sensor_currently_active_returns_true():
         assert inst._is_motion_active() is True
 
 
-def test_any_sensor_active_event_arbitrarily_old_still_counts():
-    """An 'active' state with a 12-hour-old timestamp still means the
-    sensor's CURRENT STATE is active (it just hasn't transitioned since).
-    The previous "events-in-window" logic would have missed this case;
-    the canonical state-based logic catches it."""
+def test_sparse_active_within_stuck_threshold_still_counts():
+    """A sensor holding 'active' with sparse events (the GE sensor stays
+    active for ~14 min between re-reports) still means its CURRENT STATE is
+    active — as long as the continuous-active run is shorter than the stuck
+    threshold. This is the original 2026-05-19 concern (events-in-window logic
+    missed the still-active-between-events case).
+
+    SUPERSEDES the earlier `test_any_sensor_active_event_arbitrarily_old_still_counts`,
+    which used a 12-HOUR-old active event and asserted it still counts. Per the
+    operator's stuck-sensor directive (2026-07-05), an unbroken 'active' run
+    longer than DEFAULT_STUCK_ACTIVE_SECONDS is now a dead/latched sensor and is
+    ignored — see test_stuck_active_sensor_is_ignored."""
     inst = _make_instance()
-    long_ago = datetime.now(timezone.utc) - timedelta(hours=12)
+    now = datetime.now(timezone.utc)
+    active_since = now - timedelta(minutes=14)     # well under the 4h threshold
+    prior_inactive = now - timedelta(minutes=20)
 
     def handler(url, params=None, timeout=None):
-        return _ok_response([_row(received_at=_iso(long_ago),
+        event_value_filter = params.get('event_value')
+        if event_value_filter is None:
+            return _ok_response([_row(received_at=_iso(active_since),
+                                       event_value="active")])
+        if event_value_filter == 'eq.inactive':
+            return _ok_response([_row(received_at=_iso(prior_inactive),
+                                       event_value="inactive")])
+        if event_value_filter == 'eq.active':
+            return _ok_response([_row(received_at=_iso(active_since),
+                                       event_value="active")])
+        return _ok_response([])
+
+    with _patched_get(handler):
+        assert inst._is_motion_active() is True
+
+
+def test_stuck_active_sensor_is_ignored():
+    """A sensor jammed 'active' with no transition for longer than the stuck
+    threshold (a dead/latched PIR — canon 235 was stuck 'active' 37h) is
+    treated as FAILED and excluded from Rule 1. As the sole sensor with no
+    other signal, motion resolves to False so the room's lights can finally
+    time out. The sensor is also flagged non-functional for _health_check."""
+    inst = _make_instance()
+    inst._functional_sensors = {"167": True}
+    now = datetime.now(timezone.utc)
+    stuck_since = now - timedelta(hours=40)        # >> 4h; never went inactive
+
+    def handler(url, params=None, timeout=None):
+        event_value_filter = params.get('event_value')
+        if event_value_filter == 'eq.inactive':
+            return _ok_response([])                 # never inactive → stuck
+        # latest-state query and active-onset query both see the old active
+        return _ok_response([_row(received_at=_iso(stuck_since),
+                                   event_value="active")])
+
+    with _patched_get(handler):
+        assert inst._is_motion_active() is False
+    assert inst._functional_sensors["167"] is False
+
+
+def test_stuck_sensor_ignored_but_healthy_active_keeps_on():
+    """One stuck sensor must not poison the decision: a co-located HEALTHY
+    sensor that is genuinely active still keeps the lights on, and only the
+    stuck one is flagged non-functional."""
+    inst = _make_instance()
+    inst._functional_sensors = {"167": True, "63": True}
+    now = datetime.now(timezone.utc)
+    stuck_since = now - timedelta(hours=40)
+    healthy_active = now - timedelta(minutes=3)
+    healthy_prior_inactive = now - timedelta(minutes=10)
+
+    def handler(url, params=None, timeout=None):
+        sid = params['canonical_device_id'].split('eq.')[-1]
+        event_value_filter = params.get('event_value')
+        if sid == "167":                            # stuck sensor
+            if event_value_filter == 'eq.inactive':
+                return _ok_response([])
+            return _ok_response([_row(received_at=_iso(stuck_since),
+                                       event_value="active")])
+        # sid 63 — healthy, currently active since 3 min ago
+        if event_value_filter == 'eq.inactive':
+            return _ok_response([_row(received_at=_iso(healthy_prior_inactive),
+                                       event_value="inactive")])
+        return _ok_response([_row(received_at=_iso(healthy_active),
                                    event_value="active")])
 
     with _patched_get(handler):
         assert inst._is_motion_active() is True
+    assert inst._functional_sensors["167"] is False   # stuck flagged
+    assert inst._functional_sensors["63"] is True      # healthy preserved
 
 
 # ---------------------------------------------------------------------------

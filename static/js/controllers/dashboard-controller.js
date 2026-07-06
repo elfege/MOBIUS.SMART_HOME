@@ -901,6 +901,11 @@ export class DashboardController {
                 snap.lastMotionAt = data.last_motion_time
                     ? new Date(data.last_motion_time)
                     : null;
+                // Off-timer anchor (inactive transition) the countdown runs
+                // from — for the tooltip. Distinct from lastMotionAt (active).
+                snap.offAnchorAt = data.off_anchor_at
+                    ? new Date(data.off_anchor_at)
+                    : null;
                 snap.timeoutSeconds = data.timeout_seconds;
                 // 'seconds' | 'minutes' — drives countdown formatting.
                 snap.timeUnit = data.time_unit || 'seconds';
@@ -955,23 +960,24 @@ export class DashboardController {
             return `${t}s`;
         };
 
-        // Countdown rendering. Three states:
-        //   remaining > 0  → "off in N"
-        //   remaining ≤ 0  → "timeout elapsed (Nago)"
-        //   remaining null → "timeout: N (no recent motion)"
-        //                    — surfaces the configured window even when
-        //                      we have no last_motion_time to anchor to.
+        // Countdown rendering. The off-timer only runs once the room goes
+        // QUIET (inactive), so while motion is active there is NO countdown —
+        // the light is staying on. Four states:
+        //   motion active   → "staying on (motion active)"  (no ticking)
+        //   remaining > 0   → "off in N"   (counting down from the inactive
+        //                     transition — an honest, non-phantom countdown)
+        //   remaining ≤ 0   → "off"        (timeout elapsed → light is off)
+        //   remaining null  → "timeout: N (idle)"  (no transition to anchor)
+        const tHtml = snap.timeoutSeconds ? fmt(snap.timeoutSeconds) : '?';
         let countdownHtml;
-        if (snap.remaining === null) {
-            const tHtml = snap.timeoutSeconds
-                ? fmt(snap.timeoutSeconds)
-                : '?';
-            countdownHtml = `<span class="debug-status-muted">timeout: ${tHtml} (no recent motion)</span>`;
+        if (snap.isMotion === true) {
+            countdownHtml = `<span class="debug-status-countdown" title="off timer starts when the room goes quiet; timeout: ${tHtml}">staying on (motion active)</span>`;
+        } else if (snap.remaining === null) {
+            countdownHtml = `<span class="debug-status-muted">timeout: ${tHtml} (idle)</span>`;
         } else if (snap.remaining > 0) {
-            countdownHtml = `<span class="debug-status-countdown" title="last motion: ${snap.lastMotionAt ? snap.lastMotionAt.toLocaleTimeString() : '?'}; timeout: ${fmt(snap.timeoutSeconds || 0)}">off in ${fmt(snap.remaining)}</span>`;
+            countdownHtml = `<span class="debug-status-countdown" title="room quiet since ${snap.offAnchorAt ? snap.offAnchorAt.toLocaleTimeString() : '?'}; timeout: ${tHtml}">off in ${fmt(snap.remaining)}</span>`;
         } else {
-            const overdue = Math.abs(Math.floor(snap.remaining));
-            countdownHtml = `<span class="debug-status-overdue">timeout elapsed (${fmt(overdue)} ago)</span>`;
+            countdownHtml = `<span class="debug-status-muted">off</span>`;
         }
 
         const modeHtml = snap.mode

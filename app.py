@@ -1331,19 +1331,26 @@ async def get_instance_runtime_status(instance_id: int):
     Live runtime state of a running instance — what the debug-panel
     countdown reads to show "time until next turn-off".
 
+    The off-timer starts when the room goes QUIET (the inactive transition),
+    not when motion began — so the countdown is anchored on that transition,
+    the SAME anchor master() uses to decide off (via off_timer_status()). While
+    motion is active the light is staying on, so there is no countdown.
+
     Returns a small JSON with:
       - last_motion_time:  ISO UTC of the most recent motion=active event
-                           seen by this instance (None if never)
+                           (informational/tooltip only — NOT the anchor)
       - timeout_seconds:   current effective no-motion timeout, after
                            per-mode lookup + system-floor clamp
-      - timeout_at:        ISO UTC of when AML will next decide off
-                           (= last_motion_time + timeout_seconds);
-                           None if last_motion_time is None
-      - remaining_seconds: float — positive means "off pending in N s",
-                           zero/negative means "should have fired by now"
-                           (master() picks it up on the next tick)
+      - off_anchor_at:     ISO UTC of the inactive transition the countdown
+                           runs from; None while motion is active or cold
+      - timeout_at:        ISO UTC of when AML will decide off
+                           (= off_anchor_at + timeout_seconds); None when
+                           motion is active or no transition yet
+      - remaining_seconds: float when counting down (off_anchor + timeout -
+                           now); None while motion is active (staying on) or
+                           when there is no anchor yet (idle)
       - current_mode:      string from location_modes (DB-read, not Maker)
-      - is_motion_active:  current Tier-1+Tier-2 verdict
+      - is_motion_active:  current verdict (True → staying on, no countdown)
       - is_paused:         persisted pause state
       - is_running:        whether the instance is loaded in-memory
 
@@ -1382,6 +1389,10 @@ async def get_instance_runtime_status(instance_id: int):
     # other app types may not have them — defend with getattr.
     rt = getattr(running, "_runtime", None)
     last_motion = getattr(rt, "last_motion_time", None) if rt else None
+    if last_motion is not None:
+        # Informational only (tooltip). NOT the countdown anchor — the off
+        # timer starts when the room goes quiet, not when motion began.
+        out["last_motion_time"] = last_motion.isoformat()
 
     timeout_seconds = None
     try:
@@ -1398,17 +1409,53 @@ async def get_instance_runtime_status(instance_id: int):
     except Exception:
         pass
 
+    # Countdown: anchor on the OFF-timer start (the inactive transition),
+    # shared with master()'s off decision via off_timer_status() so the bar
+    # can never disagree with reality. While motion is active the light is
+    # staying on → no countdown (remaining_seconds=None).
+    off_status = None
     try:
-        if hasattr(running, "_is_motion_active"):
-            out["is_motion_active"] = bool(running._is_motion_active())
-    except Exception:
-        pass
+        if hasattr(running, "off_timer_status"):
+            off_status = running.off_timer_status()
+    except Exception as e:
+        logger.debug(f"runtime-status: off_timer_status failed: {e}")
 
-    if last_motion is not None:
-        # last_motion_time is set tz-aware (datetime.now(timezone.utc));
-        # serialize to ISO and compute remaining if we have a timeout.
-        out["last_motion_time"] = last_motion.isoformat()
+    if off_status is not None:
+        out["is_motion_active"] = bool(off_status.get("is_active"))
         if timeout_seconds is not None:
+            out["timeout_seconds"] = timeout_seconds
+        anchor_iso = off_status.get("off_anchor_iso")
+        if off_status.get("is_active"):
+            # Staying on — no countdown to show.
+            out["remaining_seconds"] = None
+            out["off_anchor_at"] = None
+        elif anchor_iso and timeout_seconds is not None:
+            from datetime import timedelta
+            try:
+                anchor_at = datetime.fromisoformat(
+                    anchor_iso.replace("Z", "+00:00")
+                )
+                timeout_at = anchor_at + timedelta(seconds=timeout_seconds)
+                out["off_anchor_at"] = anchor_at.isoformat()
+                out["timeout_at"] = timeout_at.isoformat()
+                out["remaining_seconds"] = (
+                    timeout_at - datetime.now(timezone.utc)
+                ).total_seconds()
+            except Exception as e:
+                logger.debug(
+                    f"runtime-status: bad off_anchor {anchor_iso!r}: {e}"
+                )
+        # else: inactive but no transition yet (cold) — leave remaining None;
+        # timeout_seconds above surfaces the configured idle window.
+    else:
+        # Non-AML app types without off_timer_status (e.g. FanAutomation):
+        # fall back to the legacy is_motion_active + last_motion anchoring.
+        try:
+            if hasattr(running, "_is_motion_active"):
+                out["is_motion_active"] = bool(running._is_motion_active())
+        except Exception:
+            pass
+        if last_motion is not None and timeout_seconds is not None:
             from datetime import timedelta
             timeout_at = last_motion + timedelta(seconds=timeout_seconds)
             out["timeout_at"] = timeout_at.isoformat()
@@ -1416,10 +1463,8 @@ async def get_instance_runtime_status(instance_id: int):
             out["remaining_seconds"] = (
                 timeout_at - datetime.now(timezone.utc)
             ).total_seconds()
-    elif timeout_seconds is not None:
-        # No motion observed yet this process lifetime — surface the
-        # configured timeout for the user but no countdown to anchor it to.
-        out["timeout_seconds"] = timeout_seconds
+        elif timeout_seconds is not None:
+            out["timeout_seconds"] = timeout_seconds
 
     return out
 

@@ -53,6 +53,20 @@ def _make_instance(timeout_seconds: int = 1200):
     inst._active_onset_age_seconds = (
         MotionDetectionMixin._active_onset_age_seconds.__get__(inst)
     )
+    # _is_motion_active now delegates to these extracted helpers; bind the
+    # real methods so they don't resolve to auto-MagicMocks.
+    inst._gather_per_sensor_state = (
+        MotionDetectionMixin._gather_per_sensor_state.__get__(inst)
+    )
+    inst._currently_active_nonstuck = (
+        MotionDetectionMixin._currently_active_nonstuck.__get__(inst)
+    )
+    inst._latest_inactive_transition_iso = (
+        MotionDetectionMixin._latest_inactive_transition_iso.__get__(inst)
+    )
+    inst.off_timer_status = (
+        MotionDetectionMixin.off_timer_status.__get__(inst)
+    )
     inst.DEFAULT_STUCK_ACTIVE_SECONDS = (
         MotionDetectionMixin.DEFAULT_STUCK_ACTIVE_SECONDS
     )
@@ -349,3 +363,59 @@ def test_no_functional_sensors_without_setting_returns_false():
     inst.get_setting = MagicMock(return_value=False)
 
     assert inst._is_motion_active() is False
+
+
+# ---------------------------------------------------------------------------
+# off_timer_status(): the UI countdown source — shares the anchor with
+# _is_motion_active so the displayed countdown can't diverge from master().
+# ---------------------------------------------------------------------------
+
+
+def test_off_timer_status_active_has_no_countdown():
+    """When a sensor is genuinely active, off_timer_status reports is_active
+    True and no anchor — the UI shows "staying on", not a ticking countdown."""
+    inst = _make_instance()
+    inst._functional_sensors = {"167": True}
+    now = datetime.now(timezone.utc)
+
+    def handler(url, params=None, timeout=None):
+        event_value_filter = params.get('event_value')
+        if event_value_filter == 'eq.inactive':
+            return _ok_response([_row(received_at=_iso(now - timedelta(minutes=20)),
+                                       event_value="inactive")])
+        # latest state and onset both see a recent active (not stuck)
+        return _ok_response([_row(received_at=_iso(now - timedelta(minutes=5)),
+                                   event_value="active")])
+
+    with _patched_get(handler):
+        status = inst.off_timer_status()
+    assert status['is_active'] is True
+    assert status['off_anchor_iso'] is None
+
+
+def test_off_timer_status_inactive_anchors_on_transition():
+    """When the room is quiet, off_timer_status reports is_active False and the
+    anchor = the inactive TRANSITION (first inactive after last active) — the
+    SAME anchor _is_motion_active counts the timeout from."""
+    inst = _make_instance()
+    inst._functional_sensors = {"167": True}
+    now = datetime.now(timezone.utc)
+    transition = now - timedelta(seconds=90)
+
+    def handler(url, params=None, timeout=None):
+        event_value_filter = params.get('event_value')
+        if event_value_filter is None:
+            return _ok_response([_row(received_at=_iso(transition),
+                                       event_value="inactive")])
+        if event_value_filter == 'eq.active':
+            return _ok_response([_row(received_at=_iso(now - timedelta(minutes=10)),
+                                       event_value="active")])
+        if event_value_filter == 'eq.inactive':
+            return _ok_response([_row(received_at=_iso(transition),
+                                       event_value="inactive")])
+        return _ok_response([])
+
+    with _patched_get(handler):
+        status = inst.off_timer_status()
+    assert status['is_active'] is False
+    assert status['off_anchor_iso'] == _iso(transition)

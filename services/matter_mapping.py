@@ -133,7 +133,10 @@ def resolve_device_to_node(canonical_id) -> Optional[Dict[str, Any]]:
         canonical_id: canonical devices.id (what apps/device_commander use).
 
     Returns:
-        {node_id, endpoint_id, is_online, unique_id, device_name} or None.
+        {node_id, endpoint_id, is_online, unique_id, device_name}, or None —
+        including when the mapping is AMBIGUOUS (>1 commissioned node matches the
+        same (hub_ip, hubitat_device_id)): it refuses rather than guess a node,
+        so a command never actuates the wrong device (Phase-2 hardening 2026-07-08).
     """
     if canonical_id is None:
         return None
@@ -159,13 +162,28 @@ def resolve_device_to_node(canonical_id) -> Optional[Dict[str, Any]]:
                 "hubitat_device_id": f"eq.{dev['hubitat_id']}",
                 "our_node_id": "not.is.null",
                 "select": "our_node_id,is_online,unique_id,device_name",
-                "limit": "1",
             },
             timeout=5,
         )
         if rh.status_code != 200 or not rh.json():
             return None
-        hmd = rh.json()[0]
+        rows = rh.json()
+        # Phase-2 info-only hardening (2026-07-08): NEVER actuate on an
+        # AMBIGUOUS mapping. If more than one commissioned node matches the
+        # same (hub_ip, hubitat_device_id) — duplicate our_node_id, stale
+        # re-paired rows — refuse and fall back to Hubitat rather than guess a
+        # node and risk actuating the WRONG physical device. (Matter-primary is
+        # OFF by default; this is defense-in-depth for when it's ever enabled.)
+        if len(rows) != 1:
+            logger.warning(
+                "resolve_device_to_node: AMBIGUOUS Matter mapping for canonical "
+                "%s (hub_ip=%s hubitat_id=%s -> %d commissioned nodes %s) — "
+                "refusing Matter path, using Hubitat.",
+                canonical_id, dev.get("hub_ip"), dev.get("hubitat_id"),
+                len(rows), [r.get("our_node_id") for r in rows],
+            )
+            return None
+        hmd = rows[0]
 
         # matter_endpoint_id lives in device_matter_map (default 1); most
         # single-endpoint devices are endpoint 1. Look it up best-effort.

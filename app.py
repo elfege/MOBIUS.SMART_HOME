@@ -3343,6 +3343,35 @@ async def list_hub_health():
     raise HTTPException(status_code=r.status_code, detail=r.text)
 
 
+@app.post("/api/hubs/{hub_ip}/reboot", tags=["hubs"])
+async def reboot_hub(hub_ip: str):
+    """
+    Reboot a Hubitat hub (Settings -> Reboot Hub) via the admin API. The hub
+    goes offline ~2-3 minutes. Primary use: revive a hung Matter bridge /
+    eventsocket, which on Hubitat only recover on a reboot. UI gates this behind
+    a confirmation modal.
+    """
+    hub_name = "default"
+    try:
+        r = await aget(
+            f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/hub_config",
+            params={"hub_ip": f"eq.{hub_ip}", "select": "hub_name", "limit": "1"},
+            timeout=5,
+        )
+        if r.status_code == 200 and r.json():
+            hub_name = r.json()[0].get("hub_name", "default")
+    except Exception:
+        pass
+    from services.hubitat_admin_client import get_client
+    try:
+        client = get_client(hub_ip, hub_name)
+        ok = await asyncio.to_thread(client.reboot)
+        return {"hub_ip": hub_ip, "hub_name": hub_name, "reboot_initiated": bool(ok)}
+    except Exception as e:
+        logger.error(f"reboot_hub {hub_ip} failed: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"reboot failed: {e}")
+
+
 @app.get("/api/hubs", tags=["hubs"])
 async def list_hubs():
     """List all configured Hubitat hubs (rows of hub_config)."""

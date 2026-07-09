@@ -177,6 +177,26 @@ function renderHub(hub, health) {
         }
     });
 
+    $form.find('.btn-reboot').on('click', async function () {
+        const ip = $form.find('input[name=hub_ip]').val();
+        const name = $form.find('input[name=hub_name]').val() || ip;
+        if (!ip) return;
+        if (!confirm(
+            `Reboot hub "${name}" (${ip})?\n\n` +
+            `The hub goes OFFLINE for ~2-3 minutes and all its automations pause. ` +
+            `Use this to try reviving a dead Matter bridge / eventsocket.`
+        )) return;
+        try {
+            setStatus($form, 'Rebooting…');
+            const res = await fetchJSON(`/api/hubs/${ip}/reboot`, { method: 'POST' });
+            setStatus($form, res.reboot_initiated
+                ? 'Reboot initiated — hub offline ~2-3 min'
+                : 'Reboot request sent');
+        } catch (err) {
+            setStatus($form, 'Reboot failed: ' + err.message, true);
+        }
+    });
+
     return node;
 }
 

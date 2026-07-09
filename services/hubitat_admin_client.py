@@ -161,6 +161,32 @@ class HubitatAdminClient:
 
     # ---------------- public API ----------------
 
+    def reboot(self) -> bool:
+        """
+        Reboot this Hubitat hub via the local admin endpoint (Settings ->
+        Reboot Hub posts to ``/hub/reboot``). The hub goes offline ~2-3 minutes.
+
+        Primary use: try to revive a hung Matter bridge or local eventsocket —
+        both are known to die on Hubitat and only recover on a reboot (operator
+        report 2026-07-08: Matter bridge dead on .69 and .70).
+
+        Returns True if the reboot was accepted. NOTE: the hub frequently drops
+        the connection *as it reboots*, so a dropped/timed-out request is
+        treated as SUCCESS (the reboot began) rather than a failure.
+        """
+        logger.warning("hubitat_admin [%s] REBOOT requested via /hub/reboot", self.hub_name)
+        try:
+            r = self._request("POST", "/hub/reboot", timeout=8)
+            ok = 200 <= r.status_code < 400
+            logger.warning("hubitat_admin [%s] reboot -> HTTP %s", self.hub_name, r.status_code)
+            return ok
+        except Exception as e:  # noqa: BLE001 - connection drop == hub is rebooting == success
+            logger.warning(
+                "hubitat_admin [%s] reboot request dropped (hub likely rebooting): %s",
+                self.hub_name, e,
+            )
+            return True
+
     def get_all_devices(self) -> List[Dict[str, Any]]:
         """GET /device/list/data → list of device dicts.
 

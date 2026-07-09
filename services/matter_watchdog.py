@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 _CHECK_INTERVAL_S = 30          # seconds between watchdog sweeps
 _REINTERVIEW_COOLDOWN_S = 300   # per-node: at most one re-interview / 5 min
 _MAX_REINTERVIEWS_PER_SWEEP = 2  # gentleness: never re-interview more than N/sweep
+_STALE_AFTER_FAILS = 3          # consecutive failed heals -> stop retrying, flag removal
 
 # --- shared health snapshot (read by the /api/matter/watchdog route) ------
 _state: Dict[str, Any] = {
@@ -54,9 +55,11 @@ _state: Dict[str, Any] = {
     "nodes_total": 0,
     "nodes_available": 0,
     "nodes_unavailable": [],     # list[node_id]
+    "removal_candidates": [],    # node_ids that failed >= _STALE_AFTER_FAILS heals (dead/replaced)
     "last_reinterview": {},      # node_id -> ISO8601 of last heal attempt
 }
-_reinterview_ts: Dict[int, float] = {}   # node_id -> monotonic ts (rate limiting)
+_reinterview_ts: Dict[int, float] = {}    # node_id -> monotonic ts (rate limiting)
+_reinterview_fails: Dict[int, int] = {}   # node_id -> consecutive failed heals
 _task: Optional[asyncio.Task] = None
 
 
@@ -98,6 +101,14 @@ async def _sweep() -> None:
     unavailable: List[int] = [
         n.get("node_id") for n in nodes if _available(n) is False
     ]
+    # Nodes that recovered since the last sweep: clear their stale/fail tracking
+    # so a device that comes back online is no longer flagged for removal.
+    for nid in list(_state["removal_candidates"]):
+        if nid not in unavailable:
+            _state["removal_candidates"].remove(nid)
+    for nid in list(_reinterview_fails):
+        if nid not in unavailable:
+            _reinterview_fails.pop(nid, None)
     # Publish the scan result FIRST, so the health snapshot is accurate even if
     # the (bounded) re-interviews below are slow.
     _state["nodes_total"] = len(nodes)
@@ -106,10 +117,15 @@ async def _sweep() -> None:
     _state["last_error"] = None
 
     # Heal stale sessions — rate-limited per node, capped per sweep, and each
-    # call time-bounded so a hung interview can NEVER stall the watchdog.
+    # call time-bounded so a hung interview can NEVER stall the watchdog. A node
+    # that fails _STALE_AFTER_FAILS heals in a row is a dead/replaced commission
+    # (device gone, not merely asleep) -> stop retrying and flag it as a removal
+    # candidate so the UI surfaces it for decommission instead of retrying forever.
     now = time.monotonic()
     healed = 0
     for nid in unavailable:
+        if nid in _state["removal_candidates"]:
+            continue  # already given up on -> don't burn heals on a dead node
         if healed >= _MAX_REINTERVIEWS_PER_SWEEP:
             break
         if (now - _reinterview_ts.get(nid, 0.0)) < _REINTERVIEW_COOLDOWN_S:
@@ -119,9 +135,22 @@ async def _sweep() -> None:
         try:
             await asyncio.wait_for(client.interview_node(nid), timeout=8.0)
             _state["last_reinterview"][str(nid)] = _iso_now()
+            _reinterview_fails.pop(nid, None)
             logger.info("[matter-watchdog] re-interviewed stale node %s", nid)
         except Exception as e:  # noqa: BLE001
-            logger.warning("[matter-watchdog] re-interview node %s failed: %s", nid, e)
+            fails = _reinterview_fails.get(nid, 0) + 1
+            _reinterview_fails[nid] = fails
+            if fails >= _STALE_AFTER_FAILS and nid not in _state["removal_candidates"]:
+                _state["removal_candidates"].append(nid)
+                logger.warning(
+                    "[matter-watchdog] node %s persistently unreachable "
+                    "(%d failed heals) -> flagged as removal candidate", nid, fails,
+                )
+            else:
+                logger.warning(
+                    "[matter-watchdog] re-interview node %s failed (%d/%d): %s",
+                    nid, fails, _STALE_AFTER_FAILS, e,
+                )
 
 
 async def _loop() -> None:

@@ -56,6 +56,13 @@ $(document).ready(function () {
      * Fetch matter-server connection status and render the status panel.
      */
     function loadStatus() {
+        // Immediate feedback so Refresh isn't perceived as doing nothing while
+        // the request is in flight (fixes the "not as soon as I hit refresh"
+        // lag). Replaced by the real state when the calls resolve.
+        $('#status-panel').html(
+            '<div class="status-item"><span class="status-dot checking"></span>' +
+            '<span class="status-value">Checking…</span></div>'
+        );
         $.getJSON('/api/matter/status')
             .done(function (data) {
                 const $panel = $('#status-panel');
@@ -97,6 +104,10 @@ $(document).ready(function () {
                 $panel.find('.status-value').addClass('copyable').on('click', function () {
                     copyToClipboard($(this).text().trim(), this);
                 });
+
+                // Fold in the self-healing watchdog health (connection kept
+                // alive + per-node reachability + stale removal candidates).
+                loadWatchdogHealth($panel);
             })
             .fail(function () {
                 $('#status-panel').html(
@@ -104,6 +115,51 @@ $(document).ready(function () {
                     '<span class="status-value">Cannot reach API</span></div>'
                 );
             });
+    }
+
+    /**
+     * Append the Matter self-healing watchdog health to the status panel:
+     * whether the watchdog is running, node reachability (available vs stale),
+     * removal-candidate nodes (persistently dead — surfaced for decommission),
+     * and the last error. Best-effort + read-only; silent if unavailable.
+     */
+    function loadWatchdogHealth($panel) {
+        $.getJSON('/api/matter/watchdog').done(function (w) {
+            if (!w || !w.running) { return; }
+            const unreachable = w.nodes_unavailable || [];
+            const removal = w.removal_candidates || [];
+            let html = `
+                <div class="status-item">
+                    <span class="status-label">Watchdog:</span>
+                    <span class="status-value">running</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Nodes:</span>
+                    <span class="status-value">${w.nodes_available}/${w.nodes_total} reachable</span>
+                </div>`;
+            if (removal.length) {
+                html += `
+                <div class="status-item">
+                    <span class="status-dot disconnected"></span>
+                    <span class="status-label">Stale (remove):</span>
+                    <span class="status-value">${removal.join(', ')}</span>
+                </div>`;
+            } else if (unreachable.length) {
+                html += `
+                <div class="status-item">
+                    <span class="status-label">Unreachable:</span>
+                    <span class="status-value">${unreachable.join(', ')}</span>
+                </div>`;
+            }
+            if (w.last_error) {
+                html += `
+                <div class="status-item">
+                    <span class="status-label">Last error:</span>
+                    <span class="status-value">${w.last_error}</span>
+                </div>`;
+            }
+            $panel.append(html);
+        });
     }
 
     /**

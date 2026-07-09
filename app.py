@@ -3523,25 +3523,42 @@ async def delete_hub(hub_id: int):
     """
     postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
     try:
-        # 1) Detach devices from this hub so the FK doesn't block the delete.
-        detached = 0
+        # 1) INTELLIGENT CASCADE (NOT a SQL CASCADE — that would DELETE the
+        #    devices). devices.hub_id is NOT NULL, so we can't detach; instead
+        #    reassign this hub's devices to another remaining hub (prefer the
+        #    primary) so the FK is satisfied and NO device is lost. The
+        #    classifier (step 3) then re-homes each to the hub that actually
+        #    owns it — correct for the common case where the deleted hub held
+        #    only hubMesh MIRRORS whose native devices live on other hubs.
+        tr = await aget(
+            f"{postgrest_url}/hub_config",
+            params={"id": f"neq.{hub_id}", "select": "id,is_primary",
+                    "order": "is_primary.desc.nullslast", "limit": "1"},
+            timeout=5,
+        )
+        target = (tr.json()[0]["id"]
+                  if (tr.status_code == 200 and tr.json()) else None)
+        if target is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot delete the only remaining hub — its devices have nowhere to go.",
+            )
         pr = await apatch(
             f"{postgrest_url}/devices",
             params={"hub_id": f"eq.{hub_id}"},
-            json={"hub_id": None},
+            json={"hub_id": target},
             headers={"Prefer": "return=representation"},
-            timeout=10,
+            timeout=15,
         )
-        if pr.status_code in (200, 204):
-            try:
-                detached = len(pr.json()) if pr.text else 0
-            except Exception:
-                detached = 0
-        else:
-            logger.warning(
-                "delete_hub: detach devices for hub %s -> %s %s",
-                hub_id, pr.status_code, pr.text[:200],
+        if pr.status_code not in (200, 204):
+            raise HTTPException(
+                status_code=pr.status_code,
+                detail=f"reassign devices failed: {pr.text[:200]}",
             )
+        try:
+            reassigned = len(pr.json()) if pr.text else 0
+        except Exception:
+            reassigned = 0
 
         # 2) Delete the hub.
         d = await adelete(
@@ -3571,7 +3588,8 @@ async def delete_hub(hub_id: int):
 
         return {
             "ok": True, "id": hub_id,
-            "detached_devices": detached, "reclassified": reclassified,
+            "reassigned_devices": reassigned, "reassigned_to_hub_id": target,
+            "reclassified": reclassified,
         }
     except HTTPException:
         raise

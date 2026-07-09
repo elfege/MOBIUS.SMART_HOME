@@ -3514,22 +3514,36 @@ async def create_hub(body: Dict[str, Any]):
 @app.delete("/api/hubs/{hub_id}", tags=["hubs"])
 async def delete_hub(hub_id: int):
     """
-    Delete a hub. Refuses if any device still references this hub via FK.
-    User must move or remove those devices first (or run a fresh classifier
-    cycle that lets them be re-homed).
+    Delete a hub. Devices still homed to this hub are DETACHED (hub_id set NULL)
+    and then re-classified internally against the remaining hubs — so a hub can
+    ALWAYS be removed. Devices that also live on another hub (hubMesh) get
+    re-homed there by the classifier; devices unique to the removed hub become
+    unclassified (hub_id NULL) until they reappear elsewhere. (Was: refused with
+    409 while any device referenced the hub — operator directive 2026-07-09.)
     """
     postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
     try:
-        r = await aget(
+        # 1) Detach devices from this hub so the FK doesn't block the delete.
+        detached = 0
+        pr = await apatch(
             f"{postgrest_url}/devices",
-            params={"hub_id": f"eq.{hub_id}", "select": "id", "limit": "1"},
-            timeout=5,
+            params={"hub_id": f"eq.{hub_id}"},
+            json={"hub_id": None},
+            headers={"Prefer": "return=representation"},
+            timeout=10,
         )
-        if r.status_code == 200 and r.json():
-            raise HTTPException(
-                status_code=409,
-                detail="Hub has devices; remove or re-classify them first",
+        if pr.status_code in (200, 204):
+            try:
+                detached = len(pr.json()) if pr.text else 0
+            except Exception:
+                detached = 0
+        else:
+            logger.warning(
+                "delete_hub: detach devices for hub %s -> %s %s",
+                hub_id, pr.status_code, pr.text[:200],
             )
+
+        # 2) Delete the hub.
         d = await adelete(
             f"{postgrest_url}/hub_config",
             params={"id": f"eq.{hub_id}"},
@@ -3538,7 +3552,27 @@ async def delete_hub(hub_id: int):
         if d.status_code not in (200, 204):
             raise HTTPException(status_code=d.status_code, detail=d.text)
         _invalidate_hub_caches()
-        return {"ok": True, "id": hub_id}
+
+        # 3) Re-classify internally — re-home the detached devices to the
+        #    remaining hubs. Best-effort: a classifier hiccup must not fail the
+        #    delete (the hub is already gone).
+        reclassified = False
+        try:
+            import asyncio as _asyncio
+            from services.device_to_hubs_classifier import (
+                run_classification, invalidate_cache,
+            )
+            loop = _asyncio.get_running_loop()
+            await loop.run_in_executor(None, run_classification)
+            invalidate_cache()
+            reclassified = True
+        except Exception as e:
+            logger.warning("delete_hub: post-delete reclassification failed: %s", e)
+
+        return {
+            "ok": True, "id": hub_id,
+            "detached_devices": detached, "reclassified": reclassified,
+        }
     except HTTPException:
         raise
     except Exception as e:

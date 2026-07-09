@@ -995,8 +995,13 @@ class DeviceCommander:
             if node.get("is_online") is False:
                 return None                       # offline → Hubitat
             client = mc.get_matter_client()
-            if not client.is_connected:
-                return None                       # matter-server down → Hubitat
+            # Self-heal the connection ON DEMAND rather than bailing on a stale
+            # is_connected flag. An idle-dropped WS otherwise pins EVERY command
+            # to Hubitat forever, because nothing else re-connects it (the
+            # lazy-connection bug, 2026-07-08). Reconnect via the main loop;
+            # only fall back to Hubitat if it genuinely cannot connect.
+            if not mc.run_on_loop(client._ensure_connected(), timeout=6.0):
+                return None                       # matter-server unreachable → Hubitat
 
             node_id = node["node_id"]
             endpoint_id = node.get("endpoint_id", 1) or 1

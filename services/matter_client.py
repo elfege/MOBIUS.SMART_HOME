@@ -423,6 +423,20 @@ class MatterClient:
         logger.info(f"Removing Matter node {node_id}")
         return await self._send_command("remove_node", {"node_id": node_id})
 
+    async def interview_node(self, node_id: int) -> Dict:
+        """
+        Force a fresh interview of a commissioned node — re-runs discovery,
+        re-establishes the operational (CASE) session, and re-subscribes. This
+        is the healing primitive for a node the server reports as "not (yet)
+        available": its session has gone stale and nothing else re-establishes
+        it (2026-07-08 self-healing watchdog). Idempotent; safe on a healthy node.
+
+        Args:
+            node_id: Node to re-interview.
+        """
+        logger.info(f"Re-interviewing Matter node {node_id} (session heal)")
+        return await self._send_command("interview_node", {"node_id": node_id})
+
     # =========================================================================
     # Device Commands
     # =========================================================================

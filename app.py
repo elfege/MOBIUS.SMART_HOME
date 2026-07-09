@@ -663,6 +663,13 @@ async def lifespan(app: FastAPI):
     from services.matter_discovery import start_matter_discovery, stop_matter_discovery
     start_matter_discovery(scan_interval=300)
 
+    # Start the Matter self-healing watchdog: its first sweep connects the
+    # matter_client at startup (killing the lazy-connection bug where an idle
+    # WS drop pinned every command to Hubitat), then keeps the connection alive
+    # and re-interviews stale "not available" nodes. See services/matter_watchdog.py.
+    from services.matter_watchdog import start_matter_watchdog
+    start_matter_watchdog()
+
     # Start device cache refresh (Matter-first, Maker API fallback)
     from services.device_cache_refresh import start_cache_refresh, stop_cache_refresh
     refresh_interval = int(os.environ.get('DEVICE_CACHE_REFRESH_INTERVAL', '120'))
@@ -948,6 +955,8 @@ async def lifespan(app: FastAPI):
 
     stop_watchdog()
     stop_cache_refresh()
+    from services.matter_watchdog import stop_matter_watchdog
+    stop_matter_watchdog()
     stop_matter_discovery()
     await stop_eventsocket()
     await stop_reconcile_poll()
@@ -2200,6 +2209,18 @@ class MatterMapRequest(BaseModel):
     matter_node_id: int
     matter_endpoint_id: int = 1
     device_name: Optional[str] = None
+
+
+@app.get("/api/matter/watchdog", tags=["matter"])
+async def matter_watchdog_health():
+    """
+    Matter self-healing watchdog health snapshot — for the UI status panel /
+    failure reports. Reports connection state, per-node reachability
+    (available vs "not available"), last re-interview attempts, last error and
+    last check time. See services/matter_watchdog.py.
+    """
+    from services.matter_watchdog import get_health
+    return get_health()
 
 
 @app.get("/api/matter/status", tags=["matter"])

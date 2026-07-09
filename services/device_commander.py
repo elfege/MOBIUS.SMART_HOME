@@ -160,6 +160,19 @@ class DeviceCommander:
         self._device_status: Dict[str, CommandStatus] = {}
         self._status_lock = threading.Lock()
 
+        # Per-device VERIFY circuit breaker (2026-07-09). A flaky Matter bridge
+        # returns HTTP 200 but never actuates the device, so the per-hub breaker
+        # never trips — yet verification keeps failing and apps (AML's 60s
+        # periodic eval, motion) re-issue every cycle, flooding the device's
+        # bounded driver queue ("Queue full"). After N consecutive verify
+        # failures we OPEN a per-device breaker: commands to that device are
+        # SKIPPED (no send/retry) for a cooldown, then one half-open attempt
+        # decides re-open vs close. device_id -> {"fails": int, "opened": monotonic}.
+        self._verify_breaker: Dict[str, Dict[str, float]] = {}
+        self._verify_breaker_lock = threading.Lock()
+        self._verify_fail_threshold = 4    # consecutive verify fails -> open
+        self._verify_backoff_s = 300.0     # cooldown while open (5 min)
+
         # Whether to log every command to the `device_commands` table.
         # Default on; set DEVICE_COMMANDS_LOGGING=false to disable if writes
         # become a bottleneck or PostgREST is misbehaving.
@@ -334,6 +347,37 @@ class DeviceCommander:
         """
         with self._status_lock:
             return self._device_status.get(device_id, CommandStatus.IDLE)
+
+    # =========================================================================
+    # Per-device VERIFY circuit breaker (stops flooding a device that never
+    # confirms — e.g. a dead Matter bridge that HTTP-200s but never actuates).
+    # =========================================================================
+
+    def _verify_backoff_active(self, device_id) -> bool:
+        """
+        True if this device's verify breaker is OPEN (in cooldown) — the caller
+        should SKIP commanding it. Open = >= threshold consecutive verify
+        failures AND still within the cooldown window; after the window one
+        half-open attempt is allowed (returns False) to test recovery.
+        """
+        with self._verify_breaker_lock:
+            b = self._verify_breaker.get(str(device_id))
+            if not b or b["fails"] < self._verify_fail_threshold:
+                return False
+            return (time.monotonic() - b["opened"]) < self._verify_backoff_s
+
+    def _record_verify_result(self, device_id, ok: bool) -> None:
+        """Reset the breaker on a verified success; count failures + open at threshold."""
+        did = str(device_id)
+        with self._verify_breaker_lock:
+            if ok:
+                self._verify_breaker.pop(did, None)
+                return
+            b = self._verify_breaker.get(did) or {"fails": 0.0, "opened": 0.0}
+            b["fails"] += 1
+            if b["fails"] >= self._verify_fail_threshold:
+                b["opened"] = time.monotonic()  # (re)open / refresh the cooldown
+            self._verify_breaker[did] = b
 
     # =========================================================================
     # Two-phase command logging (device_commands table)
@@ -636,6 +680,22 @@ class DeviceCommander:
             f"{'/' + str(args) if args else ''}{hub_tag})"
         )
 
+        # Per-device VERIFY breaker: if this device keeps failing verification
+        # (dead Matter bridge HTTP-200ing but not actuating), STOP hammering it —
+        # return a backed-off FAILED result WITHOUT sending, until the cooldown
+        # lapses. This is what breaks the AML periodic-eval re-issue flood that
+        # overflows the device's driver queue ("Queue full"). Only gates when
+        # verification is requested (fire-and-forget commands still pass).
+        if verify and self._verify_backoff_active(device_id):
+            result.status = CommandStatus.FAILED
+            result.error = (
+                "verify-backoff: commanding suppressed after repeated "
+                "verification failures (device not confirming)"
+            )
+            self._set_device_status(device_id, CommandStatus.FAILED)
+            logger.info(f"{log_prefix} SKIPPED — verify-backoff active")
+            return result
+
         try:
             for outer in range(self.operation_retries):
                 result.retries_used['outer'] = outer
@@ -806,6 +866,7 @@ class DeviceCommander:
                     self._update_cache_after_verify(
                         device_id, expected['attribute'], result.actual_state
                     )
+                    self._record_verify_result(device_id, True)  # close breaker
                     break
                 else:
                     logger.warning(
@@ -833,6 +894,7 @@ class DeviceCommander:
                     f"got {result.actual_state}"
                 )
                 self._set_device_status(device_id, CommandStatus.FAILED)
+                self._record_verify_result(device_id, False)  # count toward breaker
                 logger.error(f"{log_prefix} {result.error}")
 
         except Exception as e:

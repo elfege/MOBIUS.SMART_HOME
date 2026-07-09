@@ -3372,6 +3372,32 @@ async def reboot_hub(hub_ip: str):
         raise HTTPException(status_code=502, detail=f"reboot failed: {e}")
 
 
+@app.post("/api/hubs/reboot-all", tags=["hubs"])
+async def reboot_all_hubs():
+    """
+    Reboot ALL enabled Hubitat hubs. Each goes offline ~2-3 minutes. Use when
+    the Matter bridge / eventsockets are dead across the board. UI gates this
+    behind a confirmation modal.
+    """
+    r = await aget(
+        f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/hub_config",
+        params={"is_enabled": "eq.true", "select": "hub_ip,hub_name"},
+        timeout=5,
+    )
+    hubs = r.json() if r.status_code == 200 else []
+    from services.hubitat_admin_client import get_client
+    results = []
+    for h in hubs:
+        ip, name = h.get("hub_ip"), h.get("hub_name", "default")
+        try:
+            ok = await asyncio.to_thread(get_client(ip, name).reboot)
+        except Exception as e:  # one hub failing must not abort the rest
+            logger.error(f"reboot_all: {ip} failed: {e}")
+            ok = False
+        results.append({"hub_ip": ip, "hub_name": name, "reboot_initiated": bool(ok)})
+    return {"count": len(results), "results": results}
+
+
 @app.get("/api/hubs", tags=["hubs"])
 async def list_hubs():
     """List all configured Hubitat hubs (rows of hub_config)."""

@@ -232,6 +232,21 @@ $(function () {
             maker_api_token_env: '', is_primary: false, is_enabled: true,
         }));
     });
+    $('#btn-reboot-all-hubs').on('click', async function () {
+        if (!confirm(
+            'Reboot ALL enabled hubs?\n\n' +
+            'Every hub goes OFFLINE for ~2-3 minutes and all automations pause. ' +
+            'Use this when the Matter bridges / eventsockets are dead across the board.'
+        )) return;
+        const $btn = $(this).prop('disabled', true).text('⟳ Rebooting all…');
+        try {
+            const res = await fetchJSON('/api/hubs/reboot-all', { method: 'POST' });
+            const ok = (res.results || []).filter(r => r.reboot_initiated).length;
+            $btn.text(`⟳ Rebooted ${ok}/${res.count} — offline ~2-3 min`);
+        } catch (err) {
+            $btn.text('⟳ Reboot all failed').prop('disabled', false);
+        }
+    });
     // ↻ device-cache refresh — pops the modal (operator types device # or
     // 0 for all). Lives next to the hubs panel because hub-side driver
     // changes are the canonical reason you'd want to invalidate one row.

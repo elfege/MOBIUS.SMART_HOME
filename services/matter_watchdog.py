@@ -83,38 +83,45 @@ async def _sweep() -> None:
 
     # 2) per-node availability + session healing.
     try:
-        nodes: List[Dict[str, Any]] = await client.get_nodes()
+        nodes: List[Dict[str, Any]] = await asyncio.wait_for(
+            client.get_nodes(), timeout=8.0
+        )
     except Exception as e:  # noqa: BLE001
         _state["last_error"] = f"get_nodes: {e}"
         return
 
-    now = time.monotonic()
-    unavailable: List[int] = []
-    healed = 0
-    for n in nodes:
-        nid = n.get("node_id")
-        # python-matter-server exposes availability as `available`; fall back
-        # to `is_online` for older shapes.
-        avail = n.get("available")
-        if avail is None:
-            avail = n.get("is_online")
-        if avail is False:
-            unavailable.append(nid)
-            last = _reinterview_ts.get(nid, 0.0)
-            if healed < _MAX_REINTERVIEWS_PER_SWEEP and (now - last) >= _REINTERVIEW_COOLDOWN_S:
-                _reinterview_ts[nid] = now
-                healed += 1
-                try:
-                    await client.interview_node(nid)
-                    _state["last_reinterview"][str(nid)] = _iso_now()
-                    logger.info("[matter-watchdog] re-interviewed stale node %s", nid)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("[matter-watchdog] re-interview node %s failed: %s", nid, e)
+    def _available(n: Dict[str, Any]) -> Optional[bool]:
+        # python-matter-server exposes `available`; fall back to `is_online`.
+        a = n.get("available")
+        return n.get("is_online") if a is None else a
 
+    unavailable: List[int] = [
+        n.get("node_id") for n in nodes if _available(n) is False
+    ]
+    # Publish the scan result FIRST, so the health snapshot is accurate even if
+    # the (bounded) re-interviews below are slow.
     _state["nodes_total"] = len(nodes)
     _state["nodes_available"] = len(nodes) - len(unavailable)
     _state["nodes_unavailable"] = unavailable
     _state["last_error"] = None
+
+    # Heal stale sessions — rate-limited per node, capped per sweep, and each
+    # call time-bounded so a hung interview can NEVER stall the watchdog.
+    now = time.monotonic()
+    healed = 0
+    for nid in unavailable:
+        if healed >= _MAX_REINTERVIEWS_PER_SWEEP:
+            break
+        if (now - _reinterview_ts.get(nid, 0.0)) < _REINTERVIEW_COOLDOWN_S:
+            continue
+        _reinterview_ts[nid] = now
+        healed += 1
+        try:
+            await asyncio.wait_for(client.interview_node(nid), timeout=8.0)
+            _state["last_reinterview"][str(nid)] = _iso_now()
+            logger.info("[matter-watchdog] re-interviewed stale node %s", nid)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[matter-watchdog] re-interview node %s failed: %s", nid, e)
 
 
 async def _loop() -> None:

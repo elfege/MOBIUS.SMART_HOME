@@ -3230,10 +3230,16 @@ async def matter_page(request: Request):
     return templates.TemplateResponse(request, "matter.html")
 
 
-@app.get("/hubs", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/hubs", include_in_schema=False)
 async def hubs_page(request: Request):
-    """Hub configuration page — edit hub_config rows."""
-    return templates.TemplateResponse(request, "hubs.html")
+    """
+    DEPRECATED standalone hub page (was a DUPLICATE of Settings -> Hubs, with its
+    own copy of the hub-card template — the source of drift). Redirect to the one
+    canonical hub UI so there's no second page to keep in sync. templates/hubs.html
+    is now unused.
+    """
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/admin/settings", status_code=307)
 
 
 @app.get("/sonos", response_class=HTMLResponse, include_in_schema=False)

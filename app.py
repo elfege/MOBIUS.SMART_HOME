@@ -2223,6 +2223,25 @@ async def matter_watchdog_health():
     return get_health()
 
 
+class MatterRemoveBody(BaseModel):
+    """Body for POST /api/matter/devices/{node_id}/remove (optional reason)."""
+    reason: Optional[str] = None
+
+
+@app.post("/api/matter/devices/{node_id}/remove", tags=["matter"])
+async def matter_remove_device_endpoint(node_id: int, body: Optional[MatterRemoveBody] = None):
+    """
+    Remove a Matter device: decommission the node from OUR fabric (remove_node)
+    + SOFT-delete its registry row (keeps the row + canonical id so a
+    same-identity re-add reactivates it) + log to dshub.matter_removals. Use for
+    stale/ghost commissions — offline/replaced devices (e.g. nodes 27/93/94) and
+    half-commissioned orphans (e.g. ghost node 89). Safe on already-gone nodes.
+    """
+    from services.matter_removal import remove_matter_device
+    reason = (body.reason if body and body.reason else "")
+    return await remove_matter_device(node_id, reason=reason, performed_by="operator")
+
+
 @app.get("/api/matter/status", tags=["matter"])
 async def matter_status():
     """

@@ -419,9 +419,9 @@
    ============================================================================= */
 
 .device-cards-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-    gap: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
     margin-top: 1rem;
 }
 
@@ -456,34 +456,61 @@
     border-left: 3px solid var(--color-card-commissioned);
 }
 
-/* Card header: name + status + actions */
+/* Header = the full-width clickable accordion toggle (rendered as a <button>). */
 .device-card-header {
     display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    padding: 0.75rem 1rem 0.5rem;
+    align-items: center;
     gap: 0.5rem;
+    width: 100%;
+    padding: 0.6rem 0.9rem;
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
 }
 
-.device-card-title {
+.device-card-header:hover {
+    background: var(--color-card);
+}
+
+.device-card-chevron {
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+    transition: transform 0.15s ease;
+}
+
+/* Chevron points down when the card is expanded. */
+.device-card:not(.is-collapsed) .device-card-chevron {
+    transform: rotate(90deg);
+}
+
+.device-card-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 0.95rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Body collapses under the header. Collapsed by default; no persistence. */
+.device-card.is-collapsed .device-card-body {
+    display: none;
+}
+
+/* Action row lives in the body and WRAPS — buttons can never crush the name
+   the way the old flex-shrink:0 header actions did. */
+.device-card-actions {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.5rem;
-    flex: 1;
-    min-width: 0;
-}
-
-.device-card-title strong {
-    font-size: 0.95rem;
-    word-break: break-word;
-}
-
-.device-card-actions {
-    display: flex;
-    align-items: center;
     gap: 0.4rem;
-    flex-shrink: 0;
+    padding: 0.6rem 0.9rem;
+    border-top: 1px solid var(--color-border);
 }
 
 /* Summary row: manufacturer, hub, confidence */
@@ -491,7 +518,7 @@
     display: flex;
     align-items: center;
     gap: 0.75rem;
-    padding: 0 1rem 0.5rem;
+    padding: 0.4rem 0.9rem;
     font-size: 0.8rem;
     color: var(--color-text-muted);
     flex-wrap: wrap;
@@ -615,14 +642,6 @@
 
 /* Responsive: stack on small screens */
 @media (max-width: 768px) {
-    .device-cards-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .device-card-header {
-        flex-direction: column;
-    }
-
     .device-card-summary {
         flex-direction: column;
         align-items: flex-start;
@@ -725,3 +744,50 @@
 .matter-toast-success { background: var(--color-toast-success); }
 .matter-toast-error   { background: var(--color-toast-error); }
 .matter-toast-info    { background: var(--color-toast-info); }
+
+/* =============================================================================
+   Matter Debug Console (services/matter_debug.py surface)
+   Colorblind-safe: red (#e57373) = bad/orphan, blue (#89b4fa) = current/ours,
+   grey = neutral. No green/yellow/orange.
+   ============================================================================= */
+.matter-debug-overlay {
+    position: fixed; inset: 0; z-index: 10000;
+    background: rgba(10, 12, 16, 0.85);
+    display: flex; align-items: center; justify-content: center; padding: 2vh;
+}
+.matter-debug {
+    background: var(--color-bg, #1a1a2e);
+    border: 1px solid var(--color-border);
+    border-radius: 8px; width: min(1100px, 96vw); height: 88vh;
+    display: flex; flex-direction: column; overflow: hidden;
+}
+.matter-debug-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.6rem 1rem; border-bottom: 1px solid var(--color-border);
+}
+.matter-debug-head h3 { margin: 0; font-size: 1rem; }
+.matter-debug-body { display: flex; flex: 1; min-height: 0; }
+.matter-debug-col { flex: 1; min-width: 0; padding: 0.75rem 1rem; overflow: auto; }
+.matter-debug-logcol {
+    border-left: 1px solid var(--color-border); background: #0d0d0d;
+    padding: 0; display: flex; flex-direction: column;
+}
+.matter-debug-section { margin-bottom: 0.9rem; font-size: 0.85rem; line-height: 1.5; }
+.matter-debug-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.5rem; }
+.matter-debug-logbar {
+    padding: 0.4rem 0.75rem; border-bottom: 1px solid #333;
+    font-size: 0.8rem; color: #9aa7b0; flex-shrink: 0;
+}
+.matter-debug-log {
+    flex: 1; margin: 0; padding: 0.5rem 0.75rem; overflow: auto;
+    font-family: 'Courier New', monospace; font-size: 0.74rem; line-height: 1.35;
+    white-space: pre-wrap; word-break: break-word; color: #b5bdc8;
+}
+.dbg-mono { font-family: monospace; opacity: 0.7; font-size: 0.8rem; }
+.dbg-fab-table { width: 100%; border-collapse: collapse; margin-top: 0.4rem; font-size: 0.8rem; }
+.dbg-fab-table th, .dbg-fab-table td {
+    text-align: left; padding: 0.25rem 0.5rem; border-bottom: 1px solid var(--color-border);
+}
+.dbg-bad  { color: #e57373; }   /* CVD-safe red — orphan / error / unreachable */
+.dbg-warn { color: #b5bdc8; opacity: 0.85; }
+.dbg-cur  { color: #89b4fa; }   /* CVD-safe blue — our current fabric */

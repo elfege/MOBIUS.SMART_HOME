@@ -192,18 +192,16 @@ class MatterDiscoveryService:
                     device_name = device.get('name', device.get('label', 'Unknown'))
                     is_online = device.get('online', device.get('isOnline', False))
 
-                    # Name match to Maker API device
+                    # Name match to Maker API device — EXACT name.lower() ONLY
+                    # (operator directive 2026-07-09). Fuzzy/partial matching was
+                    # removed: any substring overlap counted, which produced
+                    # nonsensical cross-matches (e.g. "Light bedroom 1" ↔ "Light
+                    # Laundry"). Exact-only means a non-match stays UNMATCHED (the
+                    # operator resolves it via the card's "edit" dropdown) rather
+                    # than being silently mis-mapped to the wrong device.
                     match_name = device_name.strip().lower()
                     maker_match = maker_by_name.get(match_name)
                     confidence = 'exact' if maker_match else 'none'
-
-                    # Fuzzy match: try partial
-                    if not maker_match:
-                        for mk_name, mk_dev in maker_by_name.items():
-                            if match_name in mk_name or mk_name in match_name:
-                                maker_match = mk_dev
-                                confidence = 'fuzzy'
-                                break
 
                     ip_addr = device.get('ipAddress', device.get('ip', ''))
                     derived_mac = mac_from_ipv6_ll(ip_addr)
@@ -301,56 +299,16 @@ class MatterDiscoveryService:
 
         logger.info(f"Matter scan: {upserted} devices upserted, {len(errors)} hub errors")
 
-        # --- Phase 3: Auto-commission eligible devices ---
-        # Only attempt devices that are:
-        #   - online
-        #   - not yet commissioned
-        #   - under the max attempt limit
-        #   - past their exponential backoff cooldown
+        # --- Phase 3: REMOVED (2026-07-10, operator directive) ---
+        # The rolling AUTO-commissioner is GONE. It re-opened pairing windows and
+        # (re)added our fabric to devices on a 5-minute timer, exhausting device
+        # fabric slots / CHIP session pools and DOSing matter-server (the WS
+        # retransmission storm that made every command fail). Commissioning is now
+        # ONLY ever operator-initiated — the Commission button ->
+        # POST /api/matter/auto-commission, one device on demand. Discovery
+        # (Phases 1-2) and mapping reconcile (Phase 4) still run on the timer;
+        # commissioning NEVER does. Auto-discovery good, auto-commission bad.
         commissioned = 0
-        try:
-            resp = req.get(
-                f"{postgrest_url}/hubitat_matter_devices",
-                params={
-                    "is_online": "eq.true",
-                    "is_commissioned": "eq.false",
-                    "commission_attempts": f"lt.{MAX_COMMISSION_ATTEMPTS}",
-                    "select": "*"
-                },
-                headers={"Accept": "application/json"},
-                timeout=5
-            )
-            if resp.ok:
-                candidates = resp.json()
-                # Filter by backoff cooldown (can't do date math in PostgREST)
-                now = datetime.now(timezone.utc)
-                eligible = []
-                for dev in candidates:
-                    attempts = dev.get('commission_attempts', 0)
-                    last_attempt = dev.get('last_commission_attempt')
-                    if attempts > 0 and last_attempt:
-                        # Exponential backoff: base * 2^(attempts-1)
-                        backoff_secs = COMMISSION_BASE_BACKOFF_SECONDS * (2 ** (attempts - 1))
-                        try:
-                            last_ts = datetime.fromisoformat(last_attempt.replace('Z', '+00:00'))
-                            if now - last_ts < timedelta(seconds=backoff_secs):
-                                logger.debug(
-                                    f"Skipping {dev.get('device_name')} — "
-                                    f"backoff {backoff_secs}s, attempt {attempts}/{MAX_COMMISSION_ATTEMPTS}"
-                                )
-                                continue
-                        except (ValueError, TypeError):
-                            pass  # Malformed timestamp, allow retry
-                    eligible.append(dev)
-
-                if eligible:
-                    logger.info(
-                        f"Commission eligible: {len(eligible)} devices "
-                        f"(skipped {len(candidates) - len(eligible)} on backoff/limit)"
-                    )
-                    commissioned = await self._commission_devices(eligible)
-        except Exception as e:
-            logger.warning(f"Auto-commission phase failed: {e}")
 
         # --- Phase 4: Reconcile mappings ---
         # Match commissioned nodes to discovered devices and auto-create

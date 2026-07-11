@@ -45,6 +45,9 @@
                 <a href="/" class="nav-link">Dashboard</a>
                 <a href="#" class="nav-link" title="Reload the web app (full refresh)"
                    onclick="window.location.reload();return false;">&#8635; Reload</a>
+                <a href="#" id="nav-restart-app" class="nav-link"
+                   title="Restart the whole application (start.sh) — ~30-60s downtime, reconnects itself"
+                   onclick="return false;">&#10227; Restart</a>
                 {# Matter moved into Settings → Matter tab (operator directive 2026-06-17).
                    The top-level navbar should host primary workflows; Matter
                    commissioning is an infrastructure concern that belongs
@@ -77,6 +80,21 @@
             </nav>
         </div>
     </header>
+
+    {# Navbar "⟳ Restart" wiring — full application restart via start.sh
+       (trigger-file + host watcher, canonical RESTART.1-4). The shared
+       util is also imported by deletion flows to enforce a restart after
+       removing a hub / instance. #}
+    <script type="module">
+      import { triggerAppRestart } from '/static/js/utils/restart-app.js';
+      const _restartBtn = document.getElementById('nav-restart-app');
+      if (_restartBtn) {
+        _restartBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          triggerAppRestart('navbar restart button');
+        });
+      }
+    </script>
 
     {# Navbar location-mode selector — loader + user-change POST + polled
        auto-refresh. Runs on every page (base template).

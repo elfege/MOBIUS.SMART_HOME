@@ -81,7 +81,7 @@ def _log(dev: Optional[Dict[str, Any]], node_id: Optional[int], action: str,
 
 
 async def remove_matter_device(node_id: int, reason: str = "",
-                               performed_by: str = "api") -> Dict[str, Any]:
+                               performed_by: str = "api", force: bool = False) -> Dict[str, Any]:
     """
     Decommission a Matter node from OUR fabric + soft-delete its registry row.
 
@@ -91,46 +91,188 @@ async def remove_matter_device(node_id: int, reason: str = "",
     ('not found' / unreachable); that's captured, and the row is still
     soft-deleted + logged so ghost/stale nodes can be cleaned regardless.
 
+    force=True skips the fabric decommission entirely (DB-only soft-delete) — for
+    dead/ghost nodes where remove_node would hang or is pointless.
+
     Returns a dict describing what happened (decommissioned, soft_deleted, ...).
     """
     dev = _get_device_by_node(node_id)
     client = mc.get_matter_client()
     decommissioned = False
     decommission_error: Optional[str] = None
-    try:
-        await client.remove_node(node_id)
-        decommissioned = True
-    except Exception as e:  # noqa: BLE001 - node already gone/unreachable: still soft-delete
-        decommission_error = str(e)
-        logger.info("matter_removal: remove_node(%s) returned: %s", node_id, e)
-
-    if dev is not None:
+    if force:
+        decommission_error = "skipped (force)"
+    else:
         try:
-            requests.patch(
-                f"{_pg()}/matter_devices",
-                params={"id": f"eq.{dev['id']}"},
-                json={"active": False, "removed_at": _now_iso()},
-                headers={"Content-Type": "application/json", "Prefer": "return=minimal"},
-                timeout=5,
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning("matter_removal: soft-delete of device %s failed: %s", dev.get("id"), e)
+            await client.remove_node(node_id)
+            decommissioned = True
+        except Exception as e:  # noqa: BLE001 - node already gone/unreachable: still soft-delete
+            decommission_error = str(e)
+            logger.info("matter_removal: remove_node(%s) returned: %s", node_id, e)
 
-    _log(dev, node_id, "removed", decommissioned, reason, performed_by)
+    # Purge the row if the backing Hubitat device is gone (else soft-delete).
+    action = _purge_or_soft_delete(dev) if dev is not None else None
+
+    _log(dev, node_id, action or "removed", decommissioned, reason, performed_by)
     logger.info(
-        "matter_removal: removed node %s (decommissioned=%s soft_deleted=%s) by %s",
-        node_id, decommissioned, dev is not None, performed_by,
+        "matter_removal: %s node %s (decommissioned=%s) by %s",
+        action or "removed", node_id, decommissioned, performed_by,
     )
     return {
         "node_id": node_id,
         "decommissioned": decommissioned,
         "decommission_error": decommission_error,
-        "soft_deleted": dev is not None,
+        "soft_deleted": action == "removed",
+        "purged": action == "purged",
         "device": {
             "id": (dev or {}).get("id"),
             "label": (dev or {}).get("hubitat_device_label"),
         },
     }
+
+
+def _get_device_by_uid(unique_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch an ACTIVE matter_devices row by unique_id (the card key)."""
+    try:
+        r = requests.get(
+            f"{_pg()}/matter_devices",
+            params={"unique_id": f"eq.{unique_id}", "active": "eq.true", "limit": "1"},
+            timeout=5,
+        )
+        if r.status_code == 200 and r.json():
+            return r.json()[0]
+    except Exception as e:  # noqa: BLE001
+        logger.warning("matter_removal: uid lookup for %s failed: %s", unique_id, e)
+    return None
+
+
+def _hubitat_device_gone(hub_ip: Optional[str], device_id, hub_name: str = "") -> bool:
+    """
+    True ONLY when the Hubitat admin API confirms the device is gone.
+
+    Uses the STRUCTURED, AUTH-AWARE admin client (`get_device` → None on a real
+    404), not HTML scraping — so it survives Hubitat UI-copy changes (the "does
+    not exist on this hub" wording can change on a platform update) AND handles
+    login-secured hubs (a raw GET would get a login page and could FALSELY
+    purge). Best-effort: any error / uncertainty returns False, so we never
+    hard-delete a device that might still be there.
+    """
+    if not hub_ip or not device_id:
+        return False
+    try:
+        did = int(device_id)
+    except (TypeError, ValueError):
+        return False
+    try:
+        from services.hubitat_admin_client import get_client
+        client = get_client(str(hub_ip), hub_name or "matter-removal-check")
+        return client.get_device(did) is None   # None == 404 == gone
+    except Exception as e:  # noqa: BLE001 - uncertainty -> treat as present (safe)
+        logger.debug("matter_removal: admin existence check %s/%s failed: %s", hub_ip, device_id, e)
+        return False
+
+
+def _purge_or_soft_delete(dev: Dict[str, Any]) -> str:
+    """
+    Hard-DELETE the matter_devices row when its backing Hubitat device is
+    confirmed GONE (404 / 'does not exist') — otherwise soft-delete it
+    (active=false, removed_at, rediscoverable). Soft-deleting a device that was
+    actually deleted from Hubitat just resurrects it on the next scan, so those
+    get purged. Returns 'purged' or 'removed'.
+    """
+    hub_ip = dev.get("hub_ip")
+    hub_name = dev.get("hub_name") or ""
+    hub_dev_id = dev.get("hubitat_device_id") or dev.get("maker_api_device_id")
+    if _hubitat_device_gone(hub_ip, hub_dev_id, hub_name):
+        try:
+            requests.delete(
+                f"{_pg()}/matter_devices",
+                params={"id": f"eq.{dev['id']}"},
+                headers={"Prefer": "return=minimal"},
+                timeout=5,
+            )
+            logger.info("matter_removal: PURGED device %s (Hubitat %s/%s gone)",
+                        dev.get("id"), hub_ip, hub_dev_id)
+            return "purged"
+        except Exception as e:  # noqa: BLE001
+            logger.warning("matter_removal: purge of %s failed, soft-deleting: %s", dev.get("id"), e)
+    try:
+        requests.patch(
+            f"{_pg()}/matter_devices",
+            params={"id": f"eq.{dev['id']}"},
+            json={"active": False, "removed_at": _now_iso()},
+            headers={"Content-Type": "application/json", "Prefer": "return=minimal"},
+            timeout=5,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("matter_removal: soft-delete of %s failed: %s", dev.get("id"), e)
+    return "removed"
+
+
+async def remove_matter_device_by_uid(unique_id: str, reason: str = "",
+                                       performed_by: str = "api", force: bool = False) -> Dict[str, Any]:
+    """
+    Soft-remove a DISCOVERED device by unique_id (works for cards that aren't
+    commissioned and have no node_id). Decommissions its Matter node first if it
+    HAS one and not force. Row kept (active=false, removed_at=now) so a re-scan
+    reactivates it. Mirrors remove_matter_device but keyed on the card's uid.
+    """
+    dev = _get_device_by_uid(unique_id)
+    if dev is None:
+        return {"unique_id": unique_id, "soft_deleted": False, "reason": "no active device for uid"}
+    node_id = dev.get("matter_node_id")
+    decommissioned = False
+    decommission_error: Optional[str] = None
+    if node_id and not force:
+        try:
+            await mc.get_matter_client().remove_node(node_id)
+            decommissioned = True
+        except Exception as e:  # noqa: BLE001 - still soft-delete
+            decommission_error = str(e)
+            logger.info("matter_removal: remove_node(%s) returned: %s", node_id, e)
+    elif force:
+        decommission_error = "skipped (force)"
+    action = _purge_or_soft_delete(dev)   # 'purged' if Hubitat device is gone, else 'removed'
+    _log(dev, node_id, action, decommissioned, reason, performed_by)
+    return {
+        "unique_id": unique_id, "node_id": node_id,
+        "decommissioned": decommissioned, "decommission_error": decommission_error,
+        "soft_deleted": action == "removed", "purged": action == "purged",
+    }
+
+
+async def remove_all_discovered(force: bool = False, reason: str = "bulk remove",
+                                performed_by: str = "api") -> Dict[str, Any]:
+    """
+    Soft-remove ALL active discovered devices (decommissioning each node unless
+    force). Rows are kept + marked removed, so a re-scan brings them all back.
+    Returns {total, removed, force}.
+    """
+    try:
+        r = requests.get(
+            f"{_pg()}/matter_devices",
+            params={"active": "eq.true", "select": "id,unique_id,matter_node_id"},
+            timeout=10,
+        )
+        devices = r.json() if r.status_code == 200 else []
+    except Exception as e:  # noqa: BLE001
+        logger.warning("matter_removal: bulk list failed: %s", e)
+        devices = []
+    removed = 0
+    for dev in devices:
+        uid = dev.get("unique_id")
+        if not uid:
+            continue
+        try:
+            res = await remove_matter_device_by_uid(
+                uid, reason=reason, performed_by=performed_by, force=force)
+            if res.get("soft_deleted"):
+                removed += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning("matter_removal: bulk remove of %s failed: %s", uid, e)
+    logger.info("matter_removal: bulk removed %d/%d discovered devices (force=%s)",
+                removed, len(devices), force)
+    return {"total": len(devices), "removed": removed, "force": force}
 
 
 def reactivate_matter_device(unique_id: str, performed_by: str = "discovery") -> bool:

@@ -127,6 +127,10 @@ services:
       - ./app.py:/app/app.py
       - ./apps:/app/apps
       - ./services:/app/services
+      # Restart trigger tmpfs (canonical RESTART.1-4): the UI Restart button
+      # (POST /api/restart) writes "reboot" here; the host-side
+      # smarthome-restart-watcher.service picks it up and runs start.sh.
+      - /dev/shm/smarthome-restart:/dev/shm/smarthome-restart
       - ./models:/app/models
       - ./config:/app/config
       - ./templates:/app/templates

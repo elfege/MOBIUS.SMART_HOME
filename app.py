@@ -641,9 +641,51 @@ def run_db_migrations():
         logger.warning(f"DB migration skipped: {e}")
 
 
+def _wait_for_postgrest(timeout_s: float = 120.0, interval_s: float = 2.0) -> bool:
+    """
+    Block until PostgREST answers, or until timeout.
+
+    On a host reboot the app container can come up BEFORE postgrest is ready; the
+    first startup DB call then ReadTimeouts and the app crashes (exit 255)
+    instead of waiting — this caused the 2026-07-10 reboot outage (app + nginx +
+    matter-server all down, no automations). Retrying here makes startup
+    self-heal regardless of container start order. This is more robust than a
+    compose `depends_on: service_healthy`, which is NOT honored when the Docker
+    daemon restarts containers after a host reboot (only on `compose up`).
+
+    Any status < 500 means PostgREST is up and serving (a 404 on the bare path
+    still proves it's answering). Returns True if it became reachable; on timeout
+    logs an error and returns False (fail-loud, but let the app try rather than
+    hang forever).
+    """
+    import time as _time
+    import requests as _requests
+    pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    deadline = _time.monotonic() + timeout_s
+    attempt = 0
+    while _time.monotonic() < deadline:
+        attempt += 1
+        try:
+            r = _requests.get(f"{pg}/", timeout=5)
+            if r.status_code < 500:
+                logger.info(f"[startup] PostgREST ready after {attempt} attempt(s) (HTTP {r.status_code})")
+                return True
+        except Exception as e:  # noqa: BLE001 - not-ready yet; retry
+            if attempt == 1 or attempt % 5 == 0:
+                logger.warning(f"[startup] waiting for PostgREST ({pg}) — attempt {attempt}: {e}")
+        _time.sleep(interval_s)
+    logger.error(f"[startup] PostgREST not reachable after {timeout_s:.0f}s — continuing (startup may still fail)")
+    return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle: initialize services on startup, cleanup on shutdown."""
+    # Boot-race guard — wait for PostgREST before ANY DB-dependent init so a
+    # reboot (app up before postgrest ready) no longer crashes the app on
+    # ReadTimeout. See _wait_for_postgrest for why this beats depends_on.
+    _wait_for_postgrest()
+
     initialize_services()
 
     # Capture the main asyncio loop so worker-thread code (device_commander's
@@ -2223,23 +2265,98 @@ async def matter_watchdog_health():
     return get_health()
 
 
+@app.post("/api/matter/service/{action}", tags=["matter"])
+async def matter_service_control(action: str):
+    """
+    Stop / start / restart the matter-server CONTAINER from the UI.
+
+    The app container has no Docker socket (by design), so — exactly like
+    POST /api/restart — we write a trigger to the tmpfs file the host-side
+    smarthome-restart-watcher polls; the watcher runs the docker command
+    (`docker stop|start|restart smarthome-matter-server`, with a
+    `docker compose up -d matter-server` create-fallback for start/restart).
+
+    action ∈ {stop, start, restart}. Returns 503 if the trigger dir isn't
+    mounted (watcher not installed yet — run ./start.sh once on the host).
+    """
+    action = (action or "").lower()
+    if action not in ("stop", "start", "restart"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid action '{action}'. Use stop, start, or restart.",
+        )
+    trigger_dir = os.path.dirname(RESTART_TRIGGER_FILE)
+    if not os.path.isdir(trigger_dir):
+        raise HTTPException(
+            status_code=503,
+            detail="Restart watcher not available. Run ./start.sh once on the host to install it.",
+        )
+    logger.info(f"[Matter] service '{action}' requested via UI")
+
+    def _write_trigger():
+        import time as _time
+        _time.sleep(0.5)
+        try:
+            with open(RESTART_TRIGGER_FILE, 'w') as f:
+                f.write(f'matter:{action} {_time.time()}')
+            logger.info(f"[Matter] wrote 'matter:{action}' trigger — host watcher will act")
+        except Exception as e:
+            logger.error(f"[Matter] failed to write matter trigger: {e}")
+
+    import threading as _threading
+    _threading.Thread(target=_write_trigger, daemon=True, name=f'matter-{action}-trigger').start()
+    return {
+        "success": True,
+        "action": action,
+        "message": f"matter-server {action} initiated on the host (~10-30s). Refresh status to confirm.",
+    }
+
+
 class MatterRemoveBody(BaseModel):
-    """Body for POST /api/matter/devices/{node_id}/remove (optional reason)."""
+    """Body for the Matter remove endpoints (optional reason + force flag)."""
     reason: Optional[str] = None
+    force: Optional[bool] = False
 
 
 @app.post("/api/matter/devices/{node_id}/remove", tags=["matter"])
 async def matter_remove_device_endpoint(node_id: int, body: Optional[MatterRemoveBody] = None):
     """
-    Remove a Matter device: decommission the node from OUR fabric (remove_node)
+    Remove a COMMISSIONED Matter node: decommission from OUR fabric (remove_node)
     + SOFT-delete its registry row (keeps the row + canonical id so a
     same-identity re-add reactivates it) + log to dshub.matter_removals. Use for
-    stale/ghost commissions — offline/replaced devices (e.g. nodes 27/93/94) and
-    half-commissioned orphans (e.g. ghost node 89). Safe on already-gone nodes.
+    stale/ghost commissions. force=true skips the decommission (DB-only) for
+    dead/unreachable nodes. Safe on already-gone nodes.
     """
     from services.matter_removal import remove_matter_device
     reason = (body.reason if body and body.reason else "")
-    return await remove_matter_device(node_id, reason=reason, performed_by="operator")
+    force = bool(body and body.force)
+    return await remove_matter_device(node_id, reason=reason, performed_by="operator", force=force)
+
+
+@app.post("/api/matter/discovered/{unique_id}/remove", tags=["matter"])
+async def matter_remove_discovered_endpoint(unique_id: str, body: Optional[MatterRemoveBody] = None):
+    """
+    Remove a DISCOVERED device by unique_id (the card key) — works whether or not
+    it's commissioned. Decommissions its node if it has one (unless force), then
+    SOFT-deletes the row (kept + rediscoverable via a re-scan). force=true = DB-only.
+    """
+    from services.matter_removal import remove_matter_device_by_uid
+    reason = (body.reason if body and body.reason else "")
+    force = bool(body and body.force)
+    return await remove_matter_device_by_uid(unique_id, reason=reason, performed_by="operator", force=force)
+
+
+@app.post("/api/matter/discovered/remove-all", tags=["matter"])
+async def matter_remove_all_discovered_endpoint(body: Optional[MatterRemoveBody] = None):
+    """
+    Soft-remove ALL active discovered devices (decommission each unless force).
+    Rows are kept + marked removed, so a re-scan brings them all back. Returns
+    {total, removed, force}.
+    """
+    from services.matter_removal import remove_all_discovered
+    reason = (body.reason if body and body.reason else "bulk remove")
+    force = bool(body and body.force)
+    return await remove_all_discovered(force=force, reason=reason, performed_by="operator")
 
 
 @app.get("/api/matter/status", tags=["matter"])
@@ -2262,6 +2379,146 @@ async def matter_status():
             status["server_info_error"] = str(e)
 
     return status
+
+
+class MatterNodeCommandBody(BaseModel):
+    """Body for POST /api/matter/nodes/{node_id}/command — direct Matter test."""
+    command: str                       # 'on' | 'off'
+    endpoint_id: Optional[int] = 1
+
+
+@app.post("/api/matter/nodes/{node_id}/command", tags=["matter"])
+async def matter_node_command(node_id: int, body: MatterNodeCommandBody):
+    """
+    Command a Matter node DIRECTLY via matter-server (on/off) AND return the
+    VERBOSE backend trace so the operator sees exactly what happened — every
+    matter-client log line during the invoke, the raw result, and the real error
+    (no more opaque "Unknown error").
+
+    Always HTTP 200 with a structured body: {success, detail, result, endpoint,
+    trace:[{ts,level,msg}]}. Tests the MATTER device itself (OnOff cluster 6),
+    independent of any Hubitat mapping. success=false + detail + trace when the
+    invoke is dropped (the current "reads work, invokes fail" bug is visible here).
+    """
+    from services.matter_client import get_matter_client
+    from services.matter_debug import get_diagnostics
+    command = (body.command or "").strip().lower()
+    if command not in ("on", "off"):
+        raise HTTPException(status_code=400, detail="command must be 'on' or 'off'")
+    client = get_matter_client()
+    diag = get_diagnostics()
+    endpoint = body.endpoint_id if body.endpoint_id is not None else 1
+    seq0 = diag.oplog._seq          # op-log position BEFORE the command
+    ok, result, detail = False, None, None
+    logger.info(f"[matter cmd] node={node_id} ep={endpoint} cmd={command} -> invoke OnOff cluster 6")
+    try:
+        if not client.is_connected and not await client.connect():
+            detail = "Cannot connect to matter-server (is the container running?)"
+        else:
+            result = await client.send_hubitat_command(node_id, endpoint, command)
+            ok = result is not None
+            if not ok:
+                detail = (f"send returned no result for node {node_id} ep{endpoint} — "
+                          f"matter-server gave no ack (untranslatable, or the invoke was "
+                          f"dropped). See trace.")
+            logger.info(f"[matter cmd] node={node_id} cmd={command} result={result!r} ok={ok}")
+    except Exception as e:  # noqa: BLE001 - surface the real error to the UI
+        detail = f"{type(e).__name__}: {e}"
+        logger.error(f"[matter cmd] node={node_id} cmd={command} FAILED: {detail}")
+    trace = diag.op_log(since_seq=seq0, limit=120).get("records", [])
+    return {
+        "success": ok, "node_id": node_id, "command": command, "endpoint": endpoint,
+        "result": result, "detail": detail, "trace": trace,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Matter troubleshooting / diagnostics surface (services/matter_debug.py).
+# The operator (Matter debug console) and agents (these routes) call the SAME
+# MatterDiagnostics class — one source of truth for fabric state + repair.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/matter/nodes/{node_id}/fabrics", tags=["matter"])
+async def matter_node_fabrics(node_id: int):
+    """OperationalCredentials fabric table: count/5, per-fabric index/vendor/
+    label, which are OURS/current, and the orphan count."""
+    from services.matter_debug import get_diagnostics
+    try:
+        return await get_diagnostics().read_fabrics(node_id)
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.get("/api/matter/nodes/{node_id}/diagnostics", tags=["matter"])
+async def matter_node_diagnostics(node_id: int):
+    """Full per-node dump: fabrics + availability + OnOff/Level state + identity."""
+    from services.matter_debug import get_diagnostics
+    try:
+        return await get_diagnostics().node_diagnostics(node_id)
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.get("/api/matter/server/diagnostics", tags=["matter"])
+async def matter_server_diagnostics():
+    """matter-server health: connection, WS, circuit-breaker, node reachability."""
+    from services.matter_debug import get_diagnostics
+    return await get_diagnostics().server_diagnostics()
+
+
+@app.get("/api/matter/debug/log", tags=["matter"])
+async def matter_debug_log(since_seq: int = 0, limit: int = 200):
+    """Verbose live stream (ring buffer) of matter-client operations for the
+    debug console. Poll with the returned last_seq for an incremental tail."""
+    from services.matter_debug import get_diagnostics
+    return get_diagnostics().op_log(since_seq=since_seq, limit=limit)
+
+
+class MatterFabricRemoveBody(BaseModel):
+    """Optional reason for a fabric removal."""
+    reason: Optional[str] = None
+
+
+@app.post("/api/matter/nodes/{node_id}/fabrics/{fabric_index}/remove", tags=["matter"])
+async def matter_remove_fabric(node_id: int, fabric_index: int,
+                               body: Optional[MatterFabricRemoveBody] = None):
+    """RemoveFabric by index — frees ONE fabric slot (console clears a specific
+    orphaned fabric). Remote command; no device reset."""
+    from services.matter_debug import get_diagnostics
+    try:
+        return await get_diagnostics().remove_fabric(node_id, fabric_index)
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"RemoveFabric failed: {e}")
+
+
+class MatterDecommissionBody(BaseModel):
+    """keep_current=True clears ONLY orphaned OUR fabrics (device stays ours);
+    False fully leaves the device."""
+    keep_current: Optional[bool] = False
+
+
+@app.post("/api/matter/nodes/{node_id}/decommission", tags=["matter"])
+async def matter_decommission_node(node_id: int, body: Optional[MatterDecommissionBody] = None):
+    """Remove OUR fabrics from one device (frees the slots we filled)."""
+    from services.matter_debug import get_diagnostics
+    keep = bool(body and body.keep_current)
+    try:
+        return await get_diagnostics().decommission_node(node_id, keep_current=keep)
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/api/matter/decommission-all", tags=["matter"])
+async def matter_decommission_all(body: Optional[MatterDecommissionBody] = None):
+    """Decommission OUR fabrics from EVERY commissioned node (UI warning-gated)."""
+    from services.matter_debug import get_diagnostics
+    keep = bool(body and body.keep_current)
+    try:
+        return await get_diagnostics().decommission_all(keep_current=keep)
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @app.get("/api/matter/nodes", tags=["matter"])
@@ -2407,8 +2664,25 @@ async def matter_commission(body: MatterCommissionRequest):
         result = await client.commission_with_code(body.code)
         return {"message": "Device commissioned", "node": result}
     except Exception as e:
+        raw = str(e)
         logger.error(f"Matter commissioning failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # matter-server only surfaces a generic 'Commission with code failed for
+        # node N'; the real CHIP cause (mDNS/discovery timeout, secure-pairing
+        # 'Incorrect state', already-commissioned) lives in its log. Translate to
+        # the actionable hint the operator actually needs.
+        low = raw.lower()
+        if "already" in low or "fabric already" in low or "0x7e" in low:
+            hint = ("This device appears ALREADY commissioned in our fabric — "
+                    "remove it first (Remove on its card), then recommission.")
+        elif ("timed out" in low or "timeout" in low or "discovery" in low
+                or "mdns" in low or "code failed" in low or "incorrect state" in low):
+            hint = ("Couldn't reach the device to pair (discovery/mDNS timeout). "
+                    "Usually the Hubitat pairing window EXPIRED — click 'Get Setup Code' "
+                    "again and paste + Commission within ~2 minutes, with the device powered "
+                    "on and on the LAN.")
+        else:
+            hint = "Check the matter-server logs for the CHIP-level cause."
+        raise HTTPException(status_code=502, detail=f"{raw} — {hint}")
 
 
 @app.get("/api/matter/map", tags=["matter"])
@@ -3402,6 +3676,61 @@ async def reboot_all_hubs():
             ok = False
         results.append({"hub_ip": ip, "hub_name": name, "reboot_initiated": bool(ok)})
     return {"count": len(results), "results": results}
+
+
+# Restart trigger file — tmpfs shared with the host. The host-side
+# smarthome-restart-watcher.service polls it and runs start.sh on "reboot".
+# Canonical STANDARD RESTART.1-4 (mirrors NVR + TILES).
+# The app writes its OWN request file (own-file design, 2026-07-09): the app
+# owns it (appuser), so it can always overwrite — unlike the old shared 'trigger'
+# file owned by the host watcher, which the container couldn't write (EACCES).
+# Content is "<action> <nonce>"; the watcher acts on content-CHANGE (the nonce
+# makes repeated same-action requests distinct). The host watcher only READS it.
+RESTART_TRIGGER_FILE = '/dev/shm/smarthome-restart/request'
+
+
+class RestartBody(BaseModel):
+    reason: Optional[str] = None
+
+
+@app.post("/api/restart", tags=["system"])
+async def api_restart(body: Optional[RestartBody] = None):
+    """
+    Trigger a full host-side restart (start.sh) via the trigger-file pattern.
+
+    The container can't run start.sh itself (it does `docker compose up`, which
+    needs the host + AWS creds). Instead we write "reboot" to a tmpfs file shared
+    with the host; the smarthome-restart-watcher systemd service picks it up and
+    runs start.sh (full rebuild + AWS-cred reload + code reload). If the trigger
+    dir isn't mounted the watcher isn't installed -> 503 (run ./start.sh once).
+    """
+    reason = (body.reason if body and body.reason else "UI requested restart")
+    logger.info(f"[Restart] full restart requested via UI: {reason}")
+    trigger_dir = os.path.dirname(RESTART_TRIGGER_FILE)
+    if not os.path.isdir(trigger_dir):
+        raise HTTPException(
+            status_code=503,
+            detail="Restart watcher not available. Run ./start.sh once on the host to install it.",
+        )
+
+    def _write_trigger():
+        # Brief delay so the HTTP 200 reaches the browser before start.sh tears
+        # the container down.
+        import time as _time
+        _time.sleep(1)
+        try:
+            with open(RESTART_TRIGGER_FILE, 'w') as f:
+                f.write(f'reboot {_time.time()}')
+            logger.info("[Restart] wrote 'reboot' trigger — host watcher will run start.sh")
+        except Exception as e:
+            logger.error(f"[Restart] failed to write trigger file: {e}")
+
+    import threading as _threading
+    _threading.Thread(target=_write_trigger, daemon=True, name='restart-trigger').start()
+    return {
+        "success": True,
+        "message": "Full restart initiated (start.sh on host). App unavailable ~30-60s.",
+    }
 
 
 @app.get("/api/hubs", tags=["hubs"])

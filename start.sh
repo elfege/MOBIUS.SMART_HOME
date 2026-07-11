@@ -342,6 +342,11 @@ smarthome_start__ensure_network() {
 #                                                                  EXECUTION                                                                     #
 ########################################################################-########################################################################
 smarthome_start__start_stack() {
+	# Install/verify the host-side UI restart + matter-service watcher and its
+	# tmpfs trigger dir BEFORE compose up (so the dir exists for the bind mount).
+	# Non-fatal — never blocks bringing the stack up.
+	smarthome_start__install_restart_watcher
+
 	# The webhook-dispatcher is a shared container across MOBIUS.SMART_HOME and
 	# MOBIUS.TILES — Docker only runs one. Whichever project starts first owns
 	# it; subsequent starts skip the service to avoid name collision.
@@ -404,6 +409,57 @@ smarthome_start__print_access_info() {
 	echo "  Stop containers:  ./stop.sh"
 	echo "  Rebuild:          ./deploy.sh"
 	echo ""
+}
+
+smarthome_start__install_restart_watcher() {
+    # UI Restart button (canonical STANDARD RESTART.1-4, mirrors NVR + TILES):
+    # ensure the tmpfs trigger dir exists (mounted into the app container by
+    # docker-compose) and install the host-side watcher systemd unit. NON-FATAL:
+    # a watcher hiccup must never block bringing the stack up.
+    local unit="smarthome-restart-watcher.service"
+    local script="${SCRIPT_DIR}scripts/smarthome-restart-watcher.sh"
+    mkdir -p /dev/shm/smarthome-restart 2>/dev/null || true
+    # World-writable + sticky (like /tmp): the host watcher (User=elfege) AND
+    # the container app (non-root appuser) both write the trigger file. Without
+    # this, docker's bind mount creates the dir root-owned and the watcher hits
+    # "Permission denied" (2026-07-09).
+    chmod 1777 /dev/shm/smarthome-restart 2>/dev/null || true
+    if [[ ! -f "$script" ]]; then
+        echo -e "${YELLOW}⚠ ${script} not found — UI restart button disabled${NC}"
+        return 0
+    fi
+    chmod +x "$script" 2>/dev/null || true
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        echo -e "${GREEN}✓ ${unit} already running${NC}"
+        return 0
+    fi
+    if ! sudo tee "/etc/systemd/system/${unit}" >/dev/null <<UNIT
+[Unit]
+Description=MOBIUS.SMART_HOME UI restart watcher (runs start.sh on trigger)
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=${USER}
+ExecStart=${script}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    then
+        echo -e "${YELLOW}⚠ could not write ${unit} — UI restart button disabled${NC}"
+        return 0
+    fi
+    sudo systemctl daemon-reload 2>/dev/null || true
+    sudo systemctl enable "$unit" 2>/dev/null || true
+    sudo systemctl start "$unit" 2>/dev/null || true
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        echo -e "${GREEN}✓ ${unit} installed + running (UI restart button enabled)${NC}"
+    else
+        echo -e "${YELLOW}⚠ ${unit} not active — check: journalctl -u ${unit}${NC}"
+    fi
 }
 
 smarthome_start__run() {

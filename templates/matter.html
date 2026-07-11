@@ -20,7 +20,15 @@
     <div class="matter-section">
         <div class="matter-section-header">
             <h3>Server Status</h3>
-            <button class="btn btn-small btn-secondary" id="btn-refresh-status">Refresh</button>
+            <div class="header-actions">
+                <button class="btn btn-small btn-secondary" id="btn-matter-start"
+                        title="Start the matter-server container">Start</button>
+                <button class="btn btn-small btn-secondary" id="btn-matter-restart"
+                        title="Restart the matter-server container">Restart</button>
+                <button class="btn btn-small btn-secondary" id="btn-matter-stop"
+                        title="Stop the matter-server container (Matter control + commissioning halt until started again)">Stop</button>
+                <button class="btn btn-small btn-secondary" id="btn-refresh-status">Refresh</button>
+            </div>
         </div>
         <div class="matter-status-panel" id="status-panel">
             <div class="loading-placeholder">Checking matter-server...</div>
@@ -64,14 +72,21 @@
             <div class="header-actions">
                 <button class="btn btn-small btn-primary" id="btn-scan-hubs">Scan All Hubs</button>
                 <button class="btn btn-small btn-secondary" id="btn-commission-all">Commission All</button>
+                <button class="btn btn-small btn-danger" id="btn-remove-all-discovered"
+                        title="Remove ALL: decommission + soft-delete every device (re-scan restores them)">Remove all</button>
+                <button class="btn btn-small btn-danger" id="btn-force-remove-all-discovered"
+                        title="Force-remove ALL: DB-only soft-delete, skips decommission">Force-remove all</button>
+                <button class="btn btn-small btn-danger" id="btn-decommission-all-nodes"
+                        title="Decommission OUR fabrics from ALL commissioned nodes (remote RemoveFabric — frees the slots the old auto-commissioner filled; NOT a device reset)">Decommission all</button>
                 <button class="btn btn-small btn-secondary" id="btn-refresh-discovered">Refresh</button>
                 <button class="btn btn-small btn-secondary" id="btn-refresh-canonical"
                         title="Refresh the canonical device cache from the hub — opens a dialog to pick a device # (0 = all)">↻ Cache</button>
             </div>
         </div>
         <p class="help-text">
-            Discover Matter devices paired to your Hubitat hubs. Auto-matched to Maker API
-            devices by name. Fix mismatches using the dropdown, then commission into our fabric.
+            Discover Matter devices paired to your Hubitat hubs. Auto-matched to Hubitat
+            devices by exact name. Fix mismatches using the dropdown, then commission into
+            our Matter controller (so we drive them directly over Matter, Hubitat as fallback).
         </p>
         <div id="scan-status" class="commission-result" style="display:none;"></div>
         <div id="discovered-container">

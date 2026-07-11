@@ -9,6 +9,7 @@
  */
 
 import { openDeviceRefreshModal } from '../components/device-refresh-modal.js';
+import { triggerAppRestart } from '../utils/restart-app.js';
 
 const $ = window.jQuery || window.$;
 
@@ -172,6 +173,17 @@ function renderHub(hub, health) {
             setStatus($form, 'Deleting…');
             await fetchJSON(`/api/hubs/${id}`, { method: 'DELETE' });
             $form.remove();
+            // Enforce a restart after deletion (canonical RESTART.1-4): the
+            // deleted hub's device routing + caches only fully clear on a
+            // stack restart. Offer it inline (confirmed:true skips the util's
+            // generic prompt since we ask a tailored one here).
+            if (confirm(
+                'Hub deleted.\n\nA restart is recommended to fully clear its ' +
+                'device routing and caches. Restart the application now? ' +
+                '(~30-60s downtime, reconnects itself)'
+            )) {
+                triggerAppRestart('hub deleted — clearing routing/caches', { confirmed: true });
+            }
         } catch (err) {
             setStatus($form, err.message, true);
         }

@@ -200,6 +200,7 @@ class SamsungTVConfig:
     mac_address:   str
     token:         str  = ""
     use_ssl:       bool = True
+    ws_port:       Optional[int] = None   # UI-selectable remote-control port
     poll_interval: int  = _POLL_INTERVAL
     max_retries:   int  = 0          # 0 = unlimited
     name:          str  = "samsung_tv"
@@ -583,13 +584,22 @@ class SamsungTVClient:
         else:
             # Samsung TVs with Instant On keep the network active even in
             # standby — HTTP 200 still returns but PowerState != "on".
-            power_field = (resp.get("device") or {}).get("PowerState", "")
-            if power_field == "on":
+            device = resp.get("device") or {}
+            if "PowerState" not in device:
+                # Pre-2016 models (e.g. 2014 H-series, msfVersion 2.0.x) don't
+                # expose a PowerState field at all. For them a 200 from the HTTP
+                # info endpoint means the set is ON — a fully-off/standby TV of
+                # that era drops its :8001 server entirely (which is exactly why
+                # power_on() has to Wake-on-LAN it). Without this fallback every
+                # pre-2016 Samsung reads permanently "off". (2026-07-05)
+                observation = TVPowerState.ON
+                obs_reason  = "http200_no_PowerState_field(pre-2016)"
+            elif device.get("PowerState") == "on":
                 observation = TVPowerState.ON
                 obs_reason  = "PowerState=on"
             else:
                 observation = TVPowerState.OFF
-                obs_reason  = f"PowerState={power_field or 'MISSING'}"
+                obs_reason  = f"PowerState={device.get('PowerState') or 'MISSING'}"
 
         self._last_observation = observation
 
@@ -611,10 +621,26 @@ class SamsungTVClient:
         if self._power_state == TVPowerState.OFF:
             return TVPowerState.OFF
 
-        # UNKNOWN → OFF on the first observation is fine (startup case).
+        # UNKNOWN → OFF requires the SAME streak threshold as ON → OFF
+        # (safe-start, audit F2). The old immediate transition meant every
+        # container restart re-armed the false-OFF bug the hysteresis was
+        # built to kill: _power_state resets to UNKNOWN on boot, so one
+        # flaky poll right after a restart pushed a false OFF to Hubitat
+        # (and a false WatchingTV mode change). Cost of the fix: a truly
+        # off TV takes threshold×poll-interval (~15s) to report OFF after
+        # a restart. State holds at UNKNOWN (not ON) while accumulating.
         if self._power_state == TVPowerState.UNKNOWN:
+            if self._off_streak < _OFF_STREAK_THRESHOLD:
+                self._log.info(
+                    "Suppressing UNKNOWN→OFF transition (streak %d/%d, "
+                    "reason=%s) — safe-start hysteresis after restart",
+                    self._off_streak, _OFF_STREAK_THRESHOLD, obs_reason,
+                )
+                return TVPowerState.UNKNOWN
             self._log.info(
-                "First OFF observation from UNKNOWN startup state (%s)", obs_reason
+                "UNKNOWN→OFF transition committed after %d consecutive OFF "
+                "observations (latest reason=%s)",
+                self._off_streak, obs_reason,
             )
             await self._update_power_state(TVPowerState.OFF)
             return TVPowerState.OFF
@@ -1032,6 +1058,10 @@ class SamsungTVClient:
         else:
             scheme = "ws"
             port   = _WS_PORT
+        # Per-instance override (UI-selectable). Lets a TV whose remote-control
+        # channel is on a non-standard port be driven without a code change.
+        if self.config.ws_port:
+            port = self.config.ws_port
 
         token_param = f"&token={self.config.token}" if self.config.token else ""
         return (

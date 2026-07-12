@@ -82,6 +82,19 @@ body {
     align-items: center;
 }
 
+/* Hamburger toggle — mobile only (see @media 768px block) */
+.nav-toggle {
+    display: none;
+    background: none;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    font-size: 1.3rem;
+    line-height: 1;
+    padding: 0.35rem 0.65rem;
+    cursor: pointer;
+}
+
 .nav-link {
     color: var(--color-text-muted);
     text-decoration: none;
@@ -94,9 +107,9 @@ body {
 }
 
 .nav-link.btn-add {
-    background: var(--color-primary);
-    color: white;
-    padding: 0.5rem 1rem;
+    color: var(--color-primary);
+    padding: 0.3rem 0.6rem;
+    border: 1px solid var(--color-border);
     border-radius: var(--radius);
 }
 
@@ -333,6 +346,67 @@ body {
 .card-actions button {
     flex: 1 1 auto;
     min-width: 60px;
+}
+
+/* Compact icon action buttons (operator directive 2026-06-17 — drop
+   the bootstrap-blue Run/Update/Pause/Edit/Debug/Test/Delete strip in
+   favor of icon + tooltip). The visual goal: small neutral squares
+   that disappear into the card unless hovered, with the action name
+   surfaced via native title= tooltip on hover.
+
+   Each glyph is a deliberate single Unicode character (not an emoji):
+     &#9654; play         Run / Resume
+     &#8635; clockwise    Update / Refresh
+     &#10074;&#10074; vertical-bars pair  Pause
+     &#9998; pencil       Edit
+     &#9881; gear         Debug
+     &#10003; check       Test
+     &#10005; cross       Delete
+     &#9112; next-page    Copy
+*/
+.action-icon-btn {
+    flex: 0 0 auto;
+    appearance: none;
+    background: transparent;
+    color: var(--color-text-muted);
+    border: 1px solid transparent;
+    border-radius: var(--radius, 6px);
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    font-size: 0.95rem;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 120ms, color 120ms, border-color 120ms;
+}
+
+.action-icon-btn:hover {
+    background: var(--color-card, rgba(255, 255, 255, 0.04));
+    color: var(--color-text);
+    border-color: var(--color-border);
+}
+
+.action-icon-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 1px;
+}
+
+/* Delete keeps a destructive-action hover tint (still no permanent blue —
+   neutral at rest, only the hover signals 'this is dangerous'). */
+.action-icon-btn.action-icon-danger:hover {
+    background: var(--color-danger-soft, rgba(220, 38, 38, 0.12));
+    color: var(--color-danger, #ef4444);
+    border-color: var(--color-danger, #ef4444);
+}
+
+/* Override the card-actions button {flex:1 1 auto; min-width:60px} rule
+   for icon buttons so they stay compact instead of stretching. */
+.card-actions .action-icon-btn {
+    flex: 0 0 auto;
+    min-width: 32px;
 }
 
 /* Debug Panel */
@@ -971,6 +1045,22 @@ a.debug-device:hover {
     padding: 0.75rem 1rem;
     border-bottom: 1px solid var(--color-border);
     background: var(--color-card);
+    /* Collapsible header — operator directive 2026-06-17 'wrapped by default'.
+       The header is the click target via onclick='wizard.toggleSettingsGroup(...)'. */
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.settings-group-header:hover {
+    background: var(--color-card-hover, var(--color-card));
+}
+
+.settings-group-header-text {
+    min-width: 0;
 }
 
 .settings-group-header h4 {
@@ -983,8 +1073,31 @@ a.debug-device:hover {
     font-size: 0.8rem;
 }
 
+/* Chevron rotates 180° (pointing up) when the group is open. When the
+   group has .is-collapsed, the chevron points down (the default rotation
+   in HTML — &#9660; is a down-pointing triangle). The body is hidden via
+   the .is-collapsed rule on .settings-group-body below. */
+.settings-group-chevron {
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+    transition: transform 150ms;
+    flex-shrink: 0;
+}
+
+.settings-group:not(.is-collapsed) .settings-group-chevron {
+    transform: rotate(180deg);
+}
+
+.settings-group.is-collapsed .settings-group-header {
+    border-bottom: 1px solid transparent;
+}
+
 .settings-group-body {
     padding: 0.75rem 1rem;
+}
+
+.settings-group.is-collapsed .settings-group-body {
+    display: none;
 }
 
 .settings-group-body .form-group {
@@ -1010,6 +1123,35 @@ a.debug-device:hover {
 .settings-group-body select {
     padding: 0.5rem 0.75rem;
     font-size: 0.875rem;
+}
+
+/* Always-Off / Always-On inline device picker (2026-06-17).
+   Lives inside .settings-group-body for the keep_off / keep_on groups.
+   Visibility is toggled inline (display:none) by _bindKeepFeatureCard
+   based on the keepOffEnabled / keepOnEnabled toggle state. */
+.keep-feature-devices {
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    border: 1px solid var(--color-border, #d1d5db);
+    border-radius: var(--radius);
+    background: var(--color-bg, #f9fafb);
+}
+
+.keep-feature-devices-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.keep-feature-devices-label {
+    font-size: 0.875rem;
+    font-weight: 600;
+}
+
+.keep-feature-devices .device-list {
+    max-height: 240px;
+    margin-top: 0.5rem;
 }
 
 /* Wizard Summary */
@@ -1125,19 +1267,69 @@ a.debug-device:hover {
    Responsive
    ============================================================================= */
 
+/* ============================================================================
+   Mobile breakpoints
+   The 2026-06-17 mobile audit (operator: 'Mobile UI is a mess') reworked these
+   rules with three goals: navbar fits at 360px without horizontal scroll,
+   settings tabs become horizontal-scrollable instead of consuming a full
+   column, and every fixed-width card / form input wraps cleanly.
+   ============================================================================ */
+
 @media (max-width: 768px) {
     .app-header {
-        padding: 1rem;
+        padding: 0.75rem 1rem;
+    }
+
+    /* Hamburger layout: logo left, ☰ right, menu drops down full-width. */
+    .app-header {
+        position: relative;
     }
 
     .header-content {
-        flex-direction: column;
-        gap: 1rem;
+        flex-direction: row;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.75rem;
+    }
+
+    .nav-toggle {
+        display: block;
     }
 
     .main-nav {
-        width: 100%;
-        justify-content: space-between;
+        display: none;
+    }
+
+    .main-nav.open {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background: var(--color-surface, #161b26);
+        border-bottom: 1px solid var(--color-border);
+        box-shadow: 0 8px 16px rgba(0, 0, 0, 0.35);
+        padding: 0.9rem 1.25rem 1.1rem;
+        gap: 1rem;
+        z-index: 1000;
+    }
+
+    .nav-link {
+        font-size: 0.875rem;
+    }
+
+    .nav-link.btn-add {
+        padding: 0.4rem 0.75rem;
+    }
+
+    .nav-sep {
+        display: none;          /* dividers add visual noise on mobile */
+    }
+
+    .nav-link.nav-app {
+        font-size: 0.7rem;       /* TILES / NVR badges stay subordinate */
     }
 
     .app-main {
@@ -1159,5 +1351,40 @@ a.debug-device:hover {
     #settings-form-container,
     #device-categories-container {
         grid-template-columns: 1fr;
+    }
+
+    /* Card-actions row — icon buttons stay 32px but wrap to a second
+       line if there are too many. Drop the default flex stretch that
+       used to assume every button takes equal width. */
+    .card-actions {
+        gap: 0.25rem;
+    }
+
+    /* Settings groups inside the wizard — header text can collide with
+       the chevron at 360px. Stack the description below the title to
+       keep both readable. */
+    .settings-group-header {
+        flex-wrap: wrap;
+    }
+
+    .settings-group-header-text {
+        flex: 1 1 auto;
+    }
+}
+
+/* Narrower breakpoint — typical phone widths. Stack the cross-app TILES
+   / NVR links on their own row, shrink the gear icon's padding. */
+@media (max-width: 480px) {
+    .main-nav {
+        gap: 0.5rem;
+        row-gap: 0.4rem;
+    }
+
+    .nav-link.nav-app {
+        flex: 0 0 auto;
+    }
+
+    .logo-text {
+        font-size: 1rem;
     }
 }

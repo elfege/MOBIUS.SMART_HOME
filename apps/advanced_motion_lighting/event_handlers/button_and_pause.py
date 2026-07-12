@@ -73,8 +73,16 @@ class ButtonAndPauseMixin:
 
         self.logger.info(f"Button {event.event_type}: {_C}{event.device_name}{_R}")
 
+        # pause_instance() takes MINUTES — convert from the configured unit.
+        # The enum is ["Seconds","Minutes"] (universal pause contract);
+        # 'Hours' is a legacy value kept for pre-contract instances. The
+        # old code only handled 'Hours', so a "Seconds" pause was passed
+        # AS minutes — a 30s pause became 30 min (audit F9).
         pause_duration = self.get_setting('pauseDuration', 60)
-        if self.get_setting('pauseDurationUnit', 'Minutes') == 'Hours':
+        unit = self.get_setting('pauseDurationUnit', 'Minutes')
+        if unit == 'Seconds':
+            pause_duration = pause_duration / 60.0
+        elif unit == 'Hours':
             pause_duration *= 60
 
         if self.is_paused:

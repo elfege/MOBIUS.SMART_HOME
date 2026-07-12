@@ -161,6 +161,32 @@ class HubitatAdminClient:
 
     # ---------------- public API ----------------
 
+    def reboot(self) -> bool:
+        """
+        Reboot this Hubitat hub via the local admin endpoint (Settings ->
+        Reboot Hub posts to ``/hub/reboot``). The hub goes offline ~2-3 minutes.
+
+        Primary use: try to revive a hung Matter bridge or local eventsocket —
+        both are known to die on Hubitat and only recover on a reboot (operator
+        report 2026-07-08: Matter bridge dead on .69 and .70).
+
+        Returns True if the reboot was accepted. NOTE: the hub frequently drops
+        the connection *as it reboots*, so a dropped/timed-out request is
+        treated as SUCCESS (the reboot began) rather than a failure.
+        """
+        logger.warning("hubitat_admin [%s] REBOOT requested via /hub/reboot", self.hub_name)
+        try:
+            r = self._request("POST", "/hub/reboot", timeout=8)
+            ok = 200 <= r.status_code < 400
+            logger.warning("hubitat_admin [%s] reboot -> HTTP %s", self.hub_name, r.status_code)
+            return ok
+        except Exception as e:  # noqa: BLE001 - connection drop == hub is rebooting == success
+            logger.warning(
+                "hubitat_admin [%s] reboot request dropped (hub likely rebooting): %s",
+                self.hub_name, e,
+            )
+            return True
+
     def get_all_devices(self) -> List[Dict[str, Any]]:
         """GET /device/list/data → list of device dicts.
 
@@ -324,6 +350,87 @@ class HubitatAdminClient:
                 f"hubitat_admin [{self.hub_name}] get_location_name failed: {e}"
             )
         return None
+
+    # ---------------- location modes ----------------
+
+    def _current_mode_name(self) -> Optional[str]:
+        """The hub's active location-mode NAME (e.g. 'Night'). GET
+        /location/list/data — the same endpoint mode_poller uses. The
+        eventsocket never delivers mode changes, so this must be polled."""
+        r = self._request("GET", "/location/list/data")
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, list) and data:
+            return data[0].get("currentMode")
+        if isinstance(data, dict):
+            return data.get("currentMode")
+        return None
+
+    def get_modes(self) -> List[Dict[str, Any]]:
+        """[{id, name, active}] — Maker-equivalent shape, so this is a drop-in
+        for the Maker client in the mode routes. /modes/list/json gives
+        [{id,label}]; `active` is the one whose name == the hub's currentMode."""
+        r = self._request("GET", "/modes/list/json")
+        r.raise_for_status()
+        raw = r.json() or []
+        current = self._current_mode_name()
+        out: List[Dict[str, Any]] = []
+        for m in raw:
+            name = m.get("label") or m.get("name")
+            out.append({"id": m.get("id"), "name": name,
+                        "active": name == current})
+        return out
+
+    def get_current_mode(self) -> Tuple[Optional[Any], Optional[str]]:
+        """(mode_id, mode_name) of the active location mode — matches the Maker
+        client's tuple shape so it drops into the /api/modes/current route."""
+        for m in self.get_modes():
+            if m.get("active"):
+                return m.get("id"), m.get("name")
+        return None, None
+
+    def set_mode(self, mode_id: Any) -> bool:
+        """Set the location mode via POST /location/mode/update with JSON body
+        {"modeId": <id>} — the exact call ui2's Modes page makes (reverse-
+        engineered from js/vue-hub2-hub-modes.min.js -> activateMode()).
+
+        DO NOT use /modes/setModeManager/<id>: that selects which *mode-manager
+        app* (builtIn/legacy/easy) governs modes, NOT the location mode, and
+        returns HTTP 200 with {"success":false,"message":"Invalid mode manager"}
+        — a silent no-op that a status-only check reports as success. Success is
+        confirmed from the JSON body ({"status":"success"}), not the HTTP status
+        alone, so a contract change fails loud instead of lying.
+
+        Added 2026-07-04 — mode path aligned to the admin API; the Maker client
+        stays as the maker_api_enabled switchback. NB: mode ids are per-hub."""
+        try:
+            mid: Any = int(mode_id)
+        except (ValueError, TypeError):
+            mid = mode_id
+        r = self._request(
+            "POST", "/location/mode/update",
+            json={"modeId": mid},
+            headers={"Content-Type": "application/json"},
+            allow_redirects=False,
+        )
+        if not (200 <= r.status_code < 400):
+            logger.warning(
+                f"hubitat_admin [{self.hub_name}] set_mode({mode_id}) "
+                f"HTTP {r.status_code}")
+            return False
+        try:
+            body = r.json()
+        except Exception:
+            # 2xx with no/!JSON body — accept; mode_poller reflects the hub's
+            # real mode within its interval as the backstop.
+            return True
+        ok = isinstance(body, dict) and (
+            body.get("status") == "success" or body.get("success") is True)
+        if not ok:
+            logger.warning(
+                f"hubitat_admin [{self.hub_name}] set_mode({mode_id}) "
+                f"rejected by hub: {body}")
+        return ok
 
     def set_device_label(self, device_id: int, new_label: str) -> bool:
         """

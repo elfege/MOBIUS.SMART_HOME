@@ -449,15 +449,75 @@ class ScreenTimePlannerApp(BaseApp):
             self.logger.error(f"{self.label}: _turn_off_secondary failed: {e}", exc_info=True)
 
     def _notify_blocked(self) -> None:
-        """
-        Hook for the future Sonos warning when the TV is blocked outside its
-        window. The Sonos control layer does not exist yet — TODO. For now this
-        only logs, so the integration point is in place.
-        """
-        self.logger.debug(
-            f"{self.label}: [blocked] would announce a warning on Sonos "
-            f"(Sonos control layer TODO)"
-        )
+        """Announce the final cutoff on Sonos (the TV can't show a warning).
+
+        Uses the configured cutoffMessage. No-op when no speaker is configured.
+        Pause-guarded per the universal pause contract (outward action)."""
+        msg = (self.get_setting('cutoffMessage', 'Screen time is over')
+               or 'Screen time is over')
+        self._announce(msg)
+
+    def _announce_warning(self, minutes_left: int) -> None:
+        """Advance-warning cron target. Builds the message from the
+        warningMessage template, substituting %minutes% / %unit%.
+
+        Fires only while actually inside a window (the cron fires at a fixed
+        clock time; skip if the window was reconfigured away or we're paused).
+        Pause-guarded [universal pause contract]."""
+        if self.is_paused:
+            return
+        if not self._in_window_now():
+            return  # not currently in a window → nothing to warn about
+        if not self._tv_is_on():
+            # Nobody's watching — no point announcing a screen-time warning
+            # (operator directive 2026-06-23: no audio when the TV is off).
+            self.logger.debug(f"{self.label}: TV off — skipping {minutes_left}-min warning")
+            return
+        template = (self.get_setting('warningMessage', 'Screen time ends in %minutes% %unit%')
+                    or 'Screen time ends in %minutes% %unit%')
+        unit = "minute" if minutes_left == 1 else "minutes"
+        text = template.replace('%minutes%', str(minutes_left)).replace('%unit%', unit)
+        self._announce(text)
+
+    def _announce(self, text: str) -> None:
+        """Fire-and-forget Sonos announcement on the configured speaker(s).
+
+        ``announceRoom`` holds one OR MORE rooms (comma-separated, from the
+        multi-select). Centralizes the pause guard + room/voice/volume settings.
+        Never raises — an announcement must not break enforcement."""
+        if self.is_paused:
+            return
+        rooms = [r.strip() for r in (self.get_setting('announceRoom', '') or '').split(',')
+                 if r.strip()]
+        if not rooms:
+            self.logger.debug(f"{self.label}: no Sonos speaker configured — skipping '{text}'")
+            return
+        try:
+            from services.sonos import get_announce_service
+            volume = self.get_setting('announceVolume', 35)
+            voice = self.get_setting('voice', 'edge:en-US-AvaNeural')
+            svc = get_announce_service()
+            for room in rooms:
+                svc.announce_in_background(room, text, volume=volume, voice=voice)
+            self.logger.info(f"{self.label}: Sonos warning on {rooms} ({voice}): {text!r}")
+        except Exception as e:
+            self.logger.warning(f"{self.label}: Sonos announce failed: {e}")
+
+    def _parse_leads(self) -> list:
+        """Parse the warningLeadMinutes setting → sorted unique positive ints."""
+        raw = self.get_setting('warningLeadMinutes', '10,5,1') or ''
+        leads = set()
+        for piece in str(raw).split(','):
+            piece = piece.strip()
+            if not piece:
+                continue
+            try:
+                n = int(piece)
+            except ValueError:
+                continue
+            if n > 0:
+                leads.add(n)
+        return sorted(leads)
 
     # =========================================================================
     # Schedule registration
@@ -517,6 +577,46 @@ class ScreenTimePlannerApp(BaseApp):
             f"{self.label}: scheduled {len(boundaries)} window boundary job(s) ({tz})"
         )
 
+        # ---- Advance Sonos warning crons (window close minus each lead) ------
+        # One cron per (window-end, lead) that lands inside the day, firing
+        # _announce_warning(lead). Same id prefix as boundary jobs so
+        # _clear_schedule_jobs() sweeps them too. No-op if no leads / no room.
+        leads = self._parse_leads()
+        if leads and (self.get_setting('announceRoom', '') or '').strip():
+            warn_count = 0
+            for dow, wins in eff.items():
+                for w in wins:
+                    end = w.get('end')
+                    end_min = 1440 if end == '24:00' else None
+                    if end_min is None:
+                        parsed = self._parse_hhmm(end)
+                        if parsed is None:
+                            continue
+                        end_min = parsed[0] * 60 + parsed[1]
+                    for lead in leads:
+                        warn_min = end_min - lead
+                        if warn_min <= 0 or warn_min >= 1440:
+                            continue  # would cross midnight — skip (rare)
+                        hour, minute = divmod(warn_min, 60)
+                        job_id = f"stp_{self.instance_id}_warn_{dow}_{hour:02d}{minute:02d}_{lead}"
+                        try:
+                            sched.add_job(
+                                func=self._announce_warning, args=[lead],
+                                trigger='cron', day_of_week=self.DOW_CRON[dow],
+                                hour=hour, minute=minute, id=job_id,
+                                replace_existing=True, timezone=tz,
+                                misfire_grace_time=120,  # a warning is useless if very late
+                            )
+                            warn_count += 1
+                        except Exception as e:
+                            self.logger.error(
+                                f"{self.label}: failed to schedule warning {dow} "
+                                f"{hour:02d}:{minute:02d} (-{lead}m): {e}", exc_info=True)
+            if warn_count:
+                self.logger.info(
+                    f"{self.label}: scheduled {warn_count} Sonos warning cron(s) "
+                    f"(leads: {leads} min)")
+
     def _clear_schedule_jobs(self) -> None:
         """Remove every cron this instance registered (matched by id prefix)."""
         try:
@@ -555,6 +655,17 @@ class ScreenTimePlannerApp(BaseApp):
         attrs = state.get('attributes', {}) or {}
         v = attrs.get('switch')
         return v if v in ('on', 'off') else None
+
+    def _tv_is_on(self) -> bool:
+        """True if any primary (TV) switch currently reads 'on'.
+
+        Gates the advance-warning announcements: when the TV is off nobody's
+        watching, so a screen-time warning is pointless noise (operator
+        directive 2026-06-23). Conservative on unknown state — an unknown
+        switch ('None') is NOT treated as on, so warnings stay silent unless
+        the TV is confirmed on."""
+        return any(self._read_switch(pid) == 'on'
+                   for pid in self.get_devices('primary_switch'))
 
     def _get_timezone(self):
         """Resolve the instance timezone setting to a pytz tz (with fallback)."""
@@ -644,6 +755,72 @@ class ScreenTimePlannerApp(BaseApp):
                     "type": "string", "default": "America/New_York",
                     "title": "Timezone",
                     "description": "IANA timezone the window times are interpreted in.",
+                },
+
+                # ---- Sonos audio warnings (local; no Hubitat, no cloud) -------
+                # The TV can't show a warning, so we announce on a Sonos speaker
+                # via the services/sonos subsystem. See
+                # docs/plans/local_sonos_tts_announcement_service_*.md
+                "announceRoom": {
+                    "type": "string", "default": "",
+                    "title": "Sonos warning speaker(s)",
+                    "description": (
+                        "Select one or more Sonos speakers to announce on. Leave "
+                        "blank to disable audio warnings."
+                    ),
+                },
+                "announceVolume": {
+                    "type": "integer", "minimum": 0, "maximum": 100, "default": 35,
+                    "title": "Warning volume",
+                    "description": "Volume for the warning announcement (0-100). "
+                                   "The speaker's prior volume is restored afterward.",
+                },
+                "voice": {
+                    "type": "string", "default": "edge:en-US-AvaNeural",
+                    "title": "Announcement voice",
+                    "description": (
+                        "Neural TTS voice (via Anamnesis). Edge voices need no GPU. "
+                        "Full live list at /api/sonos/voices."
+                    ),
+                    "enum": [
+                        "edge:en-US-AvaNeural", "edge:en-US-AriaNeural",
+                        "edge:en-US-EmmaNeural", "edge:en-US-JennyNeural",
+                        "edge:en-US-MichelleNeural", "edge:en-US-GuyNeural",
+                        "edge:en-US-AndrewNeural", "edge:en-US-AnaNeural",
+                        "edge:en-GB-SoniaNeural", "edge:en-GB-LibbyNeural",
+                        "edge:fr-FR-DeniseNeural", "edge:fr-FR-HenriNeural",
+                    ],
+                    "enumNames": [
+                        "Ava (US, warm)", "Aria (US, confident)", "Emma (US, soft)",
+                        "Jenny (US, friendly)", "Michelle (US, low)", "Guy (US, male)",
+                        "Andrew (US, male)", "Ana (US, child)", "Sonia (GB, mature)",
+                        "Libby (GB, youthful)", "Denise (FR)", "Henri (FR, male)",
+                    ],
+                },
+                "warningLeadMinutes": {
+                    "type": "string", "default": "10,5,1",
+                    "title": "Advance-warning lead times (minutes)",
+                    "description": (
+                        "Comma-separated minutes before a window CLOSES to announce "
+                        "a warning (e.g. '10,5,1'). Blank = only the final cutoff "
+                        "announcement, no advance warnings."
+                    ),
+                },
+                "warningMessage": {
+                    "type": "string",
+                    "default": "Screen time ends in %minutes% %unit%",
+                    "title": "Advance-warning message",
+                    "description": (
+                        "Spoken for each advance warning. Use %minutes% for the "
+                        "minutes remaining and %unit% for minute/minutes "
+                        "(e.g. 'Screen time ends in %minutes% %unit%')."
+                    ),
+                },
+                "cutoffMessage": {
+                    "type": "string",
+                    "default": "Screen time is over",
+                    "title": "Cutoff message",
+                    "description": "Spoken when the window closes / TV is cut.",
                 },
             },
         }

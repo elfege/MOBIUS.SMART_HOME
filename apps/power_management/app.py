@@ -246,6 +246,38 @@ class PowerManagementApp(BaseApp):
         if self.get_setting('pollEnabled', False):
             self._start_poll()
 
+        # Restore trip state from the durable memo (audit F1). Only when
+        # the DB row still says paused — if the operator manually resumed
+        # while the container was down, the stale memo must NOT resurrect
+        # a trip (it gets cleared by the next pause/resume/mode reset).
+        trip = self.get_memo('trip')
+        if trip and self._is_paused:
+            self._runtime.last_trip_reason = trip.get('reason')
+            self._runtime.last_trip_watts = trip.get('watts')
+            try:
+                tripped_at = datetime.fromisoformat(trip['at'])
+                self._runtime.tripped_at = tripped_at
+                # Re-anchor the cooldown clock: monotonic resets on
+                # restart, so map the trip's wall-clock age onto the
+                # current monotonic timeline.
+                age_s = max(
+                    0.0,
+                    (datetime.now(timezone.utc) - tripped_at).total_seconds(),
+                )
+                self._runtime.last_trip_monotonic = (
+                    _monotonic_time.monotonic() - age_s
+                )
+            except (KeyError, ValueError, TypeError) as e:
+                self.logger.warning(f"trip memo restore: bad timestamp ({e})")
+            self.logger.warning(
+                f"{_R_RED}restored TRIP state from DB{_R_RESET}: "
+                f"reason={trip.get('reason')!r} watts={trip.get('watts')} "
+                f"— auto-recovery armed"
+                if trip.get('reason') == 'high' else
+                f"restored TRIP state from DB: reason={trip.get('reason')!r} "
+                f"(low/dry-run — manual Resume required, as designed)"
+            )
+
     # =========================================================================
     # Event dispatch
     # =========================================================================
@@ -473,11 +505,24 @@ class PowerManagementApp(BaseApp):
         # Pause(0) = indefinite. Auto-recovery is driven by the
         # event buffer in _maybe_recover, NOT by the framework's
         # auto-resume timer (which would only do a blind retry).
-        self._pause_reason = f"{slug}:{worst_avg:.0f}W"
+        # reason= makes the pause write-through persist it to
+        # app_instances.pause_reason (durable mixin, audit F1/F8).
         try:
-            self.pause(0)
+            self.pause(0, reason=f"{slug}:{worst_avg:.0f}W")
         except Exception as e:
             self.logger.error(f"pause() during trip failed: {e}", exc_info=True)
+
+        # Persist the trip record AFTER pause() — pause resets memoization,
+        # so writing before it would be wiped. initialize() restores this
+        # on boot: without it, a container restart while tripped left
+        # last_trip_reason=None and auto-recovery permanently disabled —
+        # cutoffs stayed OFF forever (audit F1).
+        self.set_memo('trip', {
+            'reason': reason,
+            'at': self._runtime.tripped_at.isoformat(),
+            'watts': worst_avg,
+        })
+        self._save_memoization()
 
     def _maybe_recover(self, now_mono: float) -> None:
         """

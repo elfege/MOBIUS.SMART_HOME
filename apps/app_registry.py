@@ -79,6 +79,24 @@ def initialize_registry(instance_manager=None) -> None:
     from apps.power_management.app import PowerManagementApp
     register_app_type(PowerManagementApp)
 
+    # Rules — case-based button/event automations (hand-coded per case, NOT
+    # a rule engine). First case: pool button → toggle pool-water switches
+    # together (tap) / pump (double-tap) / all-off (hold).
+    from apps.rules.app import RulesApp
+    register_app_type(RulesApp)
+
+    # SONOS alarm app — scheduled TTS/mp3 announcement on a Sonos speaker
+    # (local UPnP). Companion to the SONOS driver (/sonos controller page).
+    from apps.sonos.app import SonosApp
+    register_app_type(SonosApp)
+
+    # Humidifier — MAINTAIN humidity: plug ON when air is dry (below
+    # threshold) + room occupied, OFF once target reached / room empty /
+    # contact open. Bang-bang port of the Groovy HUMIDIFIER app. Distinct
+    # from fan_automation, which REDUCES humidity (exhaust).
+    from apps.humidifier.app import HumidifierApp
+    register_app_type(HumidifierApp)
+
     # Register with instance manager if provided
     if instance_manager:
         for type_name, app_class in _app_types.items():

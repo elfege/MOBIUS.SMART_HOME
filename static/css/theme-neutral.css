@@ -466,6 +466,40 @@ body.colorblind .mode-timeout-input.floor-exception-active {
     border-width: 2px;  /* extra emphasis */
 }
 
+/* Device / hub admin deep-links (the "↗ open on hub" links in the dashboard
+   debug rows, KPI modal, e2e panel, and Matter node-mapping cards).
+   Problem (operator 2026-07-05): the Matter mapping links carry NO color
+   rule → browser-default #0000EE, and primary-colored links resolve to the
+   Okabe-Ito base blue #0072B2 in CVD mode — both render as dark-blue-on-
+   near-black (--color-bg #0f0f1a) and are unreadable.
+
+   Fix: unify every device/hub deep-link to --color-terminal-blue (#89b4fa),
+   the light periwinkle-blue already used by .debug-device links (which the
+   operator has NOT flagged as unreadable) — so this is consistent with an
+   already-vetted token rather than a new magic hex. Complies with the
+   canonical colorblind palette constraint (intercom V2 MSG-477 / PIN.1-5,
+   user_profile §9): safe palette is red / BLUE / white / black, and
+   "high-luminance contrast beats hue" — #89b4fa is a high-luminance blue on
+   the dark bg. Scoped to body.CVD-safe accessibility instruction. */
+body.colorblind a.debug-device,
+body.colorblind .debug-device,
+body.colorblind .kpi-device-link,
+body.colorblind .e2e-hub-link,
+body.colorblind .matter-hub-link,
+body.colorblind .node-mapped a,
+body.colorblind .node-current a {
+    color: var(--color-terminal-blue);   /* #89b4fa — high-luminance blue, CVD-safe */
+}
+body.colorblind a.debug-device:hover,
+body.colorblind .kpi-device-link:hover,
+body.colorblind .e2e-hub-link:hover,
+body.colorblind .matter-hub-link:hover,
+body.colorblind .node-mapped a:hover,
+body.colorblind .node-current a:hover {
+    color: #B7CCFF;   /* lighter tint of the same blue on hover */
+    text-decoration: underline;
+}
+
 /* Loading placeholder text — should fade in, not glow */
 .loading-placeholder {
     color: var(--color-text-muted);

@@ -362,14 +362,29 @@ export class DashboardController {
             const ariaExp = isExpanded ? 'true' : 'false';
             const caret = isExpanded ? '▾' : '▸';
             const gridStyle = isExpanded ? '' : ' style="display:none;"';
+            // Bulk pause/resume for every instance of this app type. Buttons
+            // stopPropagation so a click doesn't also toggle the group open.
+            // Reuses the same per-instance /pause + /resume endpoints as the
+            // per-card button (no bulk backend) — see pauseAllInApp().
+            const plural = n !== 1 ? 's' : '';
             return `
                 <div class="app-group" data-app="${typeId}">
-                    <button class="app-group-header" aria-expanded="${ariaExp}"
-                            onclick="dashboard.toggleGroup(this, '${gridId}')">
-                        <span class="app-group-caret">${caret}</span>
-                        <span class="app-group-name">${utils.escapeHtml(name)}</span>
-                        <span class="app-group-count">${n} instance${n !== 1 ? 's' : ''}</span>
-                    </button>
+                    <div class="app-group-header-row">
+                        <button class="app-group-header" aria-expanded="${ariaExp}"
+                                onclick="dashboard.toggleGroup(this, '${gridId}')">
+                            <span class="app-group-caret">${caret}</span>
+                            <span class="app-group-name">${utils.escapeHtml(name)}</span>
+                            <span class="app-group-count">${n} instance${plural}</span>
+                        </button>
+                        <span class="app-group-actions">
+                            <button type="button" class="app-group-action-btn"
+                                    title="Pause all ${n} ${utils.escapeHtml(name)} instance${plural}"
+                                    onclick="event.stopPropagation(); dashboard.pauseAllInApp('${typeId}', true)">&#10074;&#10074; Pause all</button>
+                            <button type="button" class="app-group-action-btn"
+                                    title="Resume all ${n} ${utils.escapeHtml(name)} instance${plural}"
+                                    onclick="event.stopPropagation(); dashboard.pauseAllInApp('${typeId}', false)">&#9654; Resume all</button>
+                        </span>
+                    </div>
                     <div class="instances-grid app-group-instances" id="${gridId}"${gridStyle}>${cards}</div>
                 </div>`;
         }).join('');
@@ -454,27 +469,21 @@ export class DashboardController {
                     </div>
                 </div>
                 <div class="card-actions">
-                    <button class="btn btn-secondary btn-small" onclick="dashboard.runInstance(${inst.id})">
-                        Run
-                    </button>
-                    <button class="btn btn-secondary btn-small" onclick="dashboard.updateInstance(${inst.id})">
-                        Update
-                    </button>
-                    <button class="btn btn-secondary btn-small" onclick="dashboard.togglePause(${inst.id}, ${isPaused})">
-                        ${isPaused ? 'Resume' : 'Pause'}
-                    </button>
-                    <button class="btn btn-secondary btn-small" onclick="location.href='/instance/${inst.id}'">
-                        Edit
-                    </button>
-                    <button class="btn btn-secondary btn-small" onclick="dashboard.toggleDebug(${inst.id})">
-                        Debug
-                    </button>
-                    <button class="btn btn-secondary btn-small" onclick="dashboard.openTest(${inst.id}, '${utils.escapeHtml(inst.label).replace(/'/g, "\\'")}')">
-                        Test
-                    </button>
-                    <button class="btn btn-danger btn-small" onclick="dashboard.deleteInstance(${inst.id})">
-                        Delete
-                    </button>
+                    <button class="action-icon-btn" title="Run now"
+                            aria-label="Run instance" onclick="dashboard.runInstance(${inst.id})">&#9654;</button>
+                    <button class="action-icon-btn" title="Update from DB"
+                            aria-label="Update instance" onclick="dashboard.updateInstance(${inst.id})">&#8635;</button>
+                    <button class="action-icon-btn" title="${isPaused ? 'Resume' : 'Pause'}"
+                            aria-label="${isPaused ? 'Resume' : 'Pause'} instance"
+                            onclick="dashboard.togglePause(${inst.id}, ${isPaused})">${isPaused ? '&#9654;' : '&#10074;&#10074;'}</button>
+                    <button class="action-icon-btn" title="Edit"
+                            aria-label="Edit instance" onclick="location.href='/instance/${inst.id}'">&#9998;</button>
+                    <button class="action-icon-btn" title="Debug panel"
+                            aria-label="Toggle debug panel" onclick="dashboard.toggleDebug(${inst.id})">&#9881;</button>
+                    <button class="action-icon-btn" title="Open test runner"
+                            aria-label="Open test runner" onclick="dashboard.openTest(${inst.id}, '${utils.escapeHtml(inst.label).replace(/'/g, "\\'")}')">&#10003;</button>
+                    <button class="action-icon-btn action-icon-danger" title="Delete"
+                            aria-label="Delete instance" onclick="dashboard.deleteInstance(${inst.id})">&#10005;</button>
                 </div>
                 <div class="debug-panel" id="debug-${inst.id}" style="display:none;">
                     <!-- Live runtime status: countdown to next AML turn-off,
@@ -486,8 +495,12 @@ export class DashboardController {
                     <div class="debug-toolbar">
                         <span class="debug-title">Event Log</span>
                         <div class="debug-toolbar-actions">
-                            <button class="btn btn-secondary btn-small btn-copy" onclick="dashboard.copyDebug(${inst.id}, this)">Copy</button>
-                            <button class="btn btn-secondary btn-small" onclick="dashboard.refreshDebug(${inst.id})">Refresh</button>
+                            <button class="action-icon-btn btn-copy" title="Copy log to clipboard"
+                                    aria-label="Copy log"
+                                    onclick="dashboard.copyDebug(${inst.id}, this)">&#9112;</button>
+                            <button class="action-icon-btn" title="Refresh log"
+                                    aria-label="Refresh log"
+                                    onclick="dashboard.refreshDebug(${inst.id})">&#8635;</button>
                         </div>
                     </div>
                     <div class="debug-output" id="debug-output-${inst.id}"></div>
@@ -594,17 +607,54 @@ export class DashboardController {
         if (!el) return;
         window.dashboard = this;  // ensure inline onclick handlers resolve
 
-        // Device label comes from SAMSUNG_TV_NAME (a slug, e.g. "living_room_tv")
-        // via /samsung-tv/api/status, title-cased for display. Falls back to a
-        // generic label if the controller isn't reachable.
-        let tvLabel = 'Samsung TV';
+        // Data-driven: one card per samsung_tv_instances row (add/remove/edit
+        // live at /samsung-tv/manage). No longer hardcoded to a single TV.
+        let tvs = [];
         try {
-            const s = await fetch('/samsung-tv/api/status').then(r => r.ok ? r.json() : null);
-            if (s && s.name) {
-                tvLabel = String(s.name).replace(/_/g, ' ')
-                    .replace(/\b\w/g, c => c.toUpperCase());
-            }
-        } catch (_) { /* keep fallback label */ }
+            const d = await fetch('/samsung-tv/api/list').then(r => r.ok ? r.json() : null);
+            if (d && Array.isArray(d.instances)) tvs = d.instances;
+        } catch (_) { /* leave empty */ }
+
+        const tvCards = tvs.length ? tvs.map(t => {
+            const badge = t._is_running
+                ? '<span class="status-indicator active">RUNNING</span>'
+                : '<span class="status-indicator">STOPPED</span>';
+            const addr = utils.escapeHtml(t.tv_ip || '') + (t.port ? ':' + t.port : '');
+            return `
+                    <div class="instance-card driver-instance-card" style="cursor:pointer;"
+                         onclick="window.location='/samsung-tv/${t.id}'"
+                         title="Open this TV's remote controller">
+                        <div class="card-header">
+                            <h3>${utils.escapeHtml(t.label || 'TV')}</h3>
+                            <span class="app-type-badge">Samsung TV</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="card-body-top">
+                                ${badge}
+                                <div class="card-stats"><span class="card-stat">${addr}</span></div>
+                            </div>
+                        </div>
+                    </div>`;
+        }).join('') : `
+                    <div class="instance-card driver-instance-card" style="cursor:pointer;"
+                         onclick="window.location='/samsung-tv/manage'" title="Add a TV">
+                        <div class="card-header"><h3>No TVs yet</h3></div>
+                        <div class="card-body"><div class="card-body-top">
+                            <div class="card-stats"><span class="card-stat">+ Add a TV →</span></div>
+                        </div></div>
+                    </div>`;
+
+        // Separate card for add/remove/configure so the TV cards keep their
+        // original behavior: click a TV -> the full remote controller page.
+        const manageCard = `
+                    <div class="instance-card driver-instance-card" style="cursor:pointer;"
+                         onclick="window.location='/samsung-tv/manage'"
+                         title="Add / remove / configure TVs">
+                        <div class="card-header"><h3>Manage TVs</h3></div>
+                        <div class="card-body"><div class="card-body-top">
+                            <div class="card-stats"><span class="card-stat">add · remove · IP / MAC / port →</span></div>
+                        </div></div>
+                    </div>`;
 
         el.innerHTML = `
             <div class="app-group" data-driver="samsung_tv">
@@ -612,16 +662,39 @@ export class DashboardController {
                         onclick="dashboard.toggleGroup(this, 'driver-group-samsung_tv')">
                     <span class="app-group-caret">▸</span>
                     <span class="app-group-name">Samsung TV</span>
-                    <span class="app-group-count">1 device</span>
+                    <span class="app-group-count">${tvs.length} device${tvs.length === 1 ? '' : 's'}</span>
                 </button>
                 <div class="instances-grid app-group-instances" id="driver-group-samsung_tv"
                      style="display:none;">
+                    ${tvCards}${tvs.length ? manageCard : ''}
+                </div>
+            </div>`;
+
+        // Sonos driver (the second driver). Local UPnP speakers; drilling in
+        // opens the /sonos controller (TTS, set/restore/lock volume, play, stop).
+        let sonosCount = 0;
+        try {
+            const sp = await fetch('/api/sonos/speakers').then(r => r.ok ? r.json() : null);
+            if (sp && sp.speakers) {
+                sonosCount = new Set(Object.values(sp.speakers)).size;  // distinct rooms
+            }
+        } catch (_) { /* keep 0 */ }
+        el.insertAdjacentHTML('beforeend', `
+            <div class="app-group" data-driver="sonos">
+                <button class="app-group-header" aria-expanded="false"
+                        onclick="dashboard.toggleGroup(this, 'driver-group-sonos')">
+                    <span class="app-group-caret">▸</span>
+                    <span class="app-group-name">Sonos</span>
+                    <span class="app-group-count">${sonosCount} room${sonosCount === 1 ? '' : 's'}</span>
+                </button>
+                <div class="instances-grid app-group-instances" id="driver-group-sonos"
+                     style="display:none;">
                     <div class="instance-card driver-instance-card" style="cursor:pointer;"
-                         onclick="window.location='/samsung-tv'"
-                         title="Open the Samsung TV controller">
+                         onclick="window.location='/sonos'"
+                         title="Open the Sonos controller">
                         <div class="card-header">
-                            <h3>${utils.escapeHtml(tvLabel)}</h3>
-                            <span class="app-type-badge">Samsung TV</span>
+                            <h3>Sonos Speakers</h3>
+                            <span class="app-type-badge">Sonos</span>
                         </div>
                         <div class="card-body">
                             <div class="card-body-top">
@@ -633,7 +706,7 @@ export class DashboardController {
                         </div>
                     </div>
                 </div>
-            </div>`;
+            </div>`);
     }
 
     /* =========================================================================
@@ -650,49 +723,107 @@ export class DashboardController {
             if (isPaused) {
                 await api.post(`/instances/${instanceId}/resume`);
             } else {
-                // Explicit reason — flags this pause as user-initiated.
-                // AML's on_mode_change only auto-resumes when the reason is
-                // 'mode_exclusion', so 'ui_button' (and any other manually
-                // assigned reason) is safe from accidental auto-resume on
-                // mode flips.
-                //
-                // Pause duration is per-instance: read pauseDuration +
-                // pauseDurationUnit from the instance's settings, convert
-                // to minutes. 0 = indefinite (no auto-resume; user must
-                // hit Resume manually). Fallback to 60 minutes only if
-                // neither setting is declared by the app type. Surfaced
-                // 2026-06-16 — the previous hardcoded 60 was silently
-                // auto-resuming pauses the user intended to be indefinite.
-                // Universal pause contract (2026-06-16): every app declares
-                // pauseDuration + pauseDurationUnit (Seconds|Minutes) +
-                // resumeOnModeChange. We send duration_seconds when the unit
-                // is Seconds so sub-minute pauses don't degenerate to
-                // indefinite via integer-divide rounding.
                 const inst = this.instances.find(i => i.id === instanceId);
-                const settings = (inst && inst.settings) || {};
-                const body = { reason: 'ui_button' };
-                if ('pauseDuration' in settings) {
-                    const raw = parseInt(settings.pauseDuration, 10);
-                    if (!isNaN(raw) && raw >= 0) {
-                        const unit = (settings.pauseDurationUnit || 'Minutes');
-                        if (unit === 'Seconds') {
-                            body.duration_seconds = raw;
-                        } else {
-                            body.duration_minutes = raw;
-                        }
-                    } else {
-                        body.duration_minutes = 60;
-                    }
-                } else {
-                    // App type pre-dates the universal contract — legacy
-                    // 60-minute pause stays as the safe fallback.
-                    body.duration_minutes = 60;
-                }
-                await api.post(`/instances/${instanceId}/pause`, body);
+                await api.post(`/instances/${instanceId}/pause`, this._pauseBodyFor(inst));
             }
             await this.loadInstances();
         } catch (error) {
             utils.notify(`Failed to ${isPaused ? 'resume' : 'pause'} instance: ${error.message}`, 'error');
+        }
+    }
+
+    /**
+     * Build the per-instance pause request body per the universal pause
+     * contract. Extracted from togglePause so bulk pause (pauseAllInApp)
+     * reuses byte-identical behaviour.
+     *
+     * Explicit reason 'ui_button' flags this as user-initiated — AML's
+     * on_mode_change only auto-resumes when the reason is 'mode_exclusion',
+     * so a manual pause is safe from accidental auto-resume on mode flips.
+     *
+     * Duration is per-instance: read pauseDuration + pauseDurationUnit from
+     * the instance's settings. 0 = indefinite (no auto-resume). We send
+     * duration_seconds when the unit is Seconds so sub-minute pauses don't
+     * degenerate to indefinite via integer-divide rounding. App types that
+     * pre-date the universal contract (2026-06-16) fall back to 60 minutes.
+     *
+     * @param {object} inst - The instance object (may be undefined).
+     * @returns {object} Pause request body.
+     */
+    _pauseBodyFor(inst) {
+        const settings = (inst && inst.settings) || {};
+        const body = { reason: 'ui_button' };
+        if ('pauseDuration' in settings) {
+            const raw = parseInt(settings.pauseDuration, 10);
+            if (!isNaN(raw) && raw >= 0) {
+                const unit = (settings.pauseDurationUnit || 'Minutes');
+                if (unit === 'Seconds') {
+                    body.duration_seconds = raw;
+                } else {
+                    body.duration_minutes = raw;
+                }
+            } else {
+                body.duration_minutes = 60;
+            }
+        } else {
+            body.duration_minutes = 60;
+        }
+        return body;
+    }
+
+    /**
+     * Bulk pause or resume EVERY instance of one app type.
+     *
+     * UI-only: reuses the existing per-instance POST /instances/{id}/pause
+     * and /resume endpoints (no bulk backend), so each transition is
+     * identical to clicking that instance's own Pause/Resume button.
+     *
+     * Only instances that actually need the transition are touched, so a
+     * second "Pause all" click does not re-pause already-paused instances
+     * (which would reset their pause timers). Calls run concurrently; a
+     * single-instance failure is counted, not fatal to the rest.
+     *
+     * @param {number|string} typeId - The app_type_id of the group.
+     * @param {boolean} pause - true = pause all, false = resume all.
+     */
+    async pauseAllInApp(typeId, pause) {
+        const targets = this.instances.filter(
+            i => String(i.app_type_id) === String(typeId)
+        );
+        if (!targets.length) return;
+
+        // Skip instances already in the desired state (idempotent).
+        const acting = targets.filter(i => !!i.is_paused !== pause);
+        if (!acting.length) {
+            utils.notify(
+                `All ${targets.length} already ${pause ? 'paused' : 'running'}`,
+                'info'
+            );
+            return;
+        }
+
+        let ok = 0, fail = 0;
+        await Promise.all(acting.map(async inst => {
+            try {
+                if (pause) {
+                    await api.post(`/instances/${inst.id}/pause`, this._pauseBodyFor(inst));
+                } else {
+                    await api.post(`/instances/${inst.id}/resume`);
+                }
+                ok++;
+            } catch (e) {
+                fail++;
+            }
+        }));
+
+        await this.loadInstances();
+
+        const verb = pause ? 'Paused' : 'Resumed';
+        if (fail) {
+            utils.notify(`${verb} ${ok}/${acting.length} — ${fail} failed`, 'error');
+        } else {
+            // 'info' (blue), not 'success' (green) — colorblind palette.
+            utils.notify(`${verb} ${ok} instance${ok !== 1 ? 's' : ''}`, 'info');
         }
     }
 
@@ -843,6 +974,11 @@ export class DashboardController {
                 snap.lastMotionAt = data.last_motion_time
                     ? new Date(data.last_motion_time)
                     : null;
+                // Off-timer anchor (inactive transition) the countdown runs
+                // from — for the tooltip. Distinct from lastMotionAt (active).
+                snap.offAnchorAt = data.off_anchor_at
+                    ? new Date(data.off_anchor_at)
+                    : null;
                 snap.timeoutSeconds = data.timeout_seconds;
                 // 'seconds' | 'minutes' — drives countdown formatting.
                 snap.timeUnit = data.time_unit || 'seconds';
@@ -897,23 +1033,24 @@ export class DashboardController {
             return `${t}s`;
         };
 
-        // Countdown rendering. Three states:
-        //   remaining > 0  → "off in N"
-        //   remaining ≤ 0  → "timeout elapsed (Nago)"
-        //   remaining null → "timeout: N (no recent motion)"
-        //                    — surfaces the configured window even when
-        //                      we have no last_motion_time to anchor to.
+        // Countdown rendering. The off-timer only runs once the room goes
+        // QUIET (inactive), so while motion is active there is NO countdown —
+        // the light is staying on. Four states:
+        //   motion active   → "staying on (motion active)"  (no ticking)
+        //   remaining > 0   → "off in N"   (counting down from the inactive
+        //                     transition — an honest, non-phantom countdown)
+        //   remaining ≤ 0   → "off"        (timeout elapsed → light is off)
+        //   remaining null  → "timeout: N (idle)"  (no transition to anchor)
+        const tHtml = snap.timeoutSeconds ? fmt(snap.timeoutSeconds) : '?';
         let countdownHtml;
-        if (snap.remaining === null) {
-            const tHtml = snap.timeoutSeconds
-                ? fmt(snap.timeoutSeconds)
-                : '?';
-            countdownHtml = `<span class="debug-status-muted">timeout: ${tHtml} (no recent motion)</span>`;
+        if (snap.isMotion === true) {
+            countdownHtml = `<span class="debug-status-countdown" title="off timer starts when the room goes quiet; timeout: ${tHtml}">staying on (motion active)</span>`;
+        } else if (snap.remaining === null) {
+            countdownHtml = `<span class="debug-status-muted">timeout: ${tHtml} (idle)</span>`;
         } else if (snap.remaining > 0) {
-            countdownHtml = `<span class="debug-status-countdown" title="last motion: ${snap.lastMotionAt ? snap.lastMotionAt.toLocaleTimeString() : '?'}; timeout: ${fmt(snap.timeoutSeconds || 0)}">off in ${fmt(snap.remaining)}</span>`;
+            countdownHtml = `<span class="debug-status-countdown" title="room quiet since ${snap.offAnchorAt ? snap.offAnchorAt.toLocaleTimeString() : '?'}; timeout: ${tHtml}">off in ${fmt(snap.remaining)}</span>`;
         } else {
-            const overdue = Math.abs(Math.floor(snap.remaining));
-            countdownHtml = `<span class="debug-status-overdue">timeout elapsed (${fmt(overdue)} ago)</span>`;
+            countdownHtml = `<span class="debug-status-muted">off</span>`;
         }
 
         const modeHtml = snap.mode

@@ -12,6 +12,7 @@ represents a user-created automation (e.g., "Advanced Lights - Office").
 """
 
 import os
+import time
 import logging
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -76,6 +77,13 @@ class InstanceManager:
         # Runtime instances (keyed by instance_id)
         # These are the actual Python app objects that process events
         self._running_instances: Dict[int, Any] = {}
+
+        # instance_id → monotonic ts of its last stop_instance(). Used by
+        # the dead-instance watchdog (revive_dead_instances) to leave a
+        # transient edit-stop alone during its grace window while still
+        # reviving a worker that's been stopped-and-not-restarted past it
+        # (abandoned edit / crashed start). Cleared on successful start.
+        self._recently_stopped: Dict[int, float] = {}
 
         # App type registry (populated by app modules on import)
         self._app_types: Dict[str, Type] = {}
@@ -326,6 +334,23 @@ class InstanceManager:
 
         if not update_data:
             return True  # Nothing to update
+
+        # Always clear memoization on update — manual overrides (dim_level
+        # source='manual', color_state source='manual', switch_state) MUST
+        # NOT survive a settings or device-selection change, otherwise a
+        # stale manual override silently shadows the new settings forever.
+        # Concrete bug this prevents: user sets modeDimLevels.WatchingTV=10,
+        # but a prior manual override at level=80 was still in memo, and the
+        # cascade returned 80 every time. Clearing here means the fresh
+        # instance starts with empty memo; AML's _init_memoization_keys()
+        # re-seeds keep_off / keep_on entries on __init__. Label-only updates
+        # are unaffected because nothing about the memo depends on the label.
+        if 'settings' in update_data or 'device_selections' in update_data:
+            update_data['memoization_state'] = {}
+            self.logger.info(
+                f"Instance {instance_id} update includes settings/devices — "
+                f"clearing memoization_state to drop any stale overrides"
+            )
 
         # Kill the running instance FIRST — guarantees no stale in-memory state
         self.stop_instance(instance_id)
@@ -680,6 +705,9 @@ class InstanceManager:
 
             # Track
             self._running_instances[instance_id] = app_instance
+            # Successful (re)start clears any stale stop marker so the
+            # watchdog's grace logic starts fresh next time it's stopped.
+            self._recently_stopped.pop(instance_id, None)
             self.logger.info(
                 f"Started instance {instance_id} ({app_instance.label}) "
                 f"— devices: {list(instance_data.get('device_selections', {}).keys())}"
@@ -725,8 +753,160 @@ class InstanceManager:
             )
 
         del self._running_instances[instance_id]
+        # Stamp for the dead-instance watchdog's grace window. A normal
+        # edit (stop → save/cancel → start) clears this on the restart;
+        # an ABANDONED edit leaves it set, and the watchdog revives the
+        # instance once the grace window elapses.
+        self._recently_stopped[instance_id] = time.monotonic()
         self.logger.info(f"Stopped instance {instance_id} ({label})")
         return True
+
+    def revive_dead_instances(self, grace_seconds: int = 900) -> Dict[str, Any]:
+        """
+        Watchdog: revive instances that SHOULD be running but whose worker
+        is dead — present in the DB, not paused, yet absent from
+        ``_running_instances``.
+
+        Transient edit-stops are protected by the ``_recently_stopped``
+        grace window: the wizard stops a worker on edit-entry and restarts
+        it on save/cancel, so a recently-stopped instance is left alone for
+        ``grace_seconds``. Past that window a still-stopped, not-paused
+        instance is treated as an ABANDONED edit (or a start that crashed)
+        and revived. PAUSED instances are never revived — pause is the
+        supported way to keep an instance intentionally off; ``stop`` is
+        meant to be transient.
+
+        Root cause this closes: 2026-06-18, instance 5 (Motion Kitchen) was
+        left stopped after an abandoned edit and ran dead ~7 h, leaving the
+        kitchen unmanaged with no self-heal. Returns a small report dict.
+        """
+        revived: List[int] = []
+        skipped_paused = 0
+        skipped_grace = 0
+        now = time.monotonic()
+
+        try:
+            instances = self.get_all_instances()
+        except Exception as e:
+            self.logger.warning(f"revive_dead_instances: list failed: {e}")
+            return {"status": "error", "error": str(e)}
+
+        for inst in instances:
+            iid = inst.get('id')
+            if iid is None or iid in self._running_instances:
+                continue
+            if inst.get('is_paused'):
+                skipped_paused += 1
+                continue
+            stopped_at = self._recently_stopped.get(iid)
+            if stopped_at is not None and (now - stopped_at) < grace_seconds:
+                skipped_grace += 1
+                continue
+
+            self.logger.warning(
+                f"watchdog: instance {iid} ({inst.get('label', '?')}) is in "
+                f"DB, not paused, not running — reviving"
+            )
+            try:
+                if self._start_from_db(iid):
+                    revived.append(iid)
+            except Exception as e:
+                self.logger.error(
+                    f"watchdog: revive of instance {iid} raised: {e}",
+                    exc_info=True
+                )
+
+        if revived:
+            self.logger.info(
+                f"watchdog: revived {len(revived)} dead instance(s): {revived}"
+            )
+        return {
+            "status": "ok",
+            "revived": revived,
+            "skipped_paused": skipped_paused,
+            "skipped_grace": skipped_grace,
+        }
+
+    def resume_expired_pauses(self) -> Dict[str, Any]:
+        """
+        Resume every instance whose TIMED pause has elapsed.
+
+        This is the restart-proof guarantee for timed pauses. ``pause()``
+        schedules a one-shot auto-resume in an APScheduler ``MemoryJobStore``
+        (services.scheduler_service) which is DESTROYED by any app
+        restart/reload, and nothing re-arms it — ``_restore_pending_jobs``
+        only repopulates a tracking dict, it never calls ``add_job`` (and the
+        callback is an unpersistable lambda). So before this, a restart
+        between a pause and its expiry left the instance paused forever.
+
+        Root cause this closes: 2026-07-11, STP "TV Allowed Time" (instance
+        13) was paused 5 h via the UI; a stack restart 10 min before its
+        auto-resume was due wiped the in-memory timer, and it sat paused ~14 h
+        overnight — the kids' TV was never re-gated. Same failure mode for any
+        timed pause in any app (AML, rules, …).
+
+        The fix reads the DURABLE ``pause_expires_at`` column instead of the
+        volatile scheduler, so an overdue pause self-heals within one tick of
+        any restart. Registered to run once at startup (catch pauses that
+        expired during downtime) and on a recurring 60 s cadence (app.py).
+        Indefinite pauses (``pause_expires_at IS NULL``) are never touched —
+        the ``lte`` filter excludes NULLs, so a manual/indefinite pause stays
+        paused until explicitly resumed. Idempotent: only ``is_paused=true``
+        rows are selected, so a resumed instance is not re-processed.
+
+        Returns a small report dict: ``{"status", "resumed": [ids],
+        "checked": n}``.
+        """
+        resumed: List[int] = []
+        try:
+            # App and DB share the host clock, so an app-computed UTC cutoff is
+            # skew-free. PostgREST filter values are literals (it does not
+            # evaluate SQL now()), hence we pass the timestamp explicitly.
+            cutoff = datetime.now(timezone.utc).isoformat()
+            resp = self._http.get(
+                f"{self.postgrest_url}/app_instances",
+                params={
+                    "is_paused": "eq.true",
+                    "pause_expires_at": f"lte.{cutoff}",
+                    "select": "id,label,pause_expires_at",
+                },
+                headers={"Accept": "application/json"},
+                timeout=5,
+            )
+            if resp.status_code != 200:
+                self.logger.warning(
+                    f"resume_expired_pauses: query HTTP {resp.status_code}"
+                )
+                return {"status": "error", "http": resp.status_code, "resumed": []}
+            rows = resp.json()
+        except Exception as e:
+            self.logger.warning(f"resume_expired_pauses: query failed: {e}")
+            return {"status": "error", "error": str(e), "resumed": []}
+
+        for row in rows:
+            iid = row.get("id")
+            if iid is None:
+                continue
+            try:
+                if self.resume_instance(iid):
+                    resumed.append(iid)
+                    self.logger.info(
+                        f"resume_expired_pauses: auto-resumed instance {iid} "
+                        f"({row.get('label', '?')}) — pause expired at "
+                        f"{row.get('pause_expires_at')}"
+                    )
+            except Exception as e:
+                self.logger.error(
+                    f"resume_expired_pauses: resume of {iid} raised: {e}",
+                    exc_info=True,
+                )
+
+        if resumed:
+            self.logger.info(
+                f"resume_expired_pauses: resumed {len(resumed)} "
+                f"expired pause(s): {resumed}"
+            )
+        return {"status": "ok", "resumed": resumed, "checked": len(rows)}
 
     def _start_from_db(self, instance_id: int) -> bool:
         """
@@ -851,6 +1031,14 @@ class InstanceManager:
             # subscribing would create an echo loop on every cutoff
             # actuation.
             'power_sensors': 'power',
+            # Rules app — a single trigger button drives multiple actions
+            # by event type, so this category fans out to ALL THREE button
+            # event types (the only multi-event entry in this map). The
+            # value is a LIST; the loop below handles list-or-str. The
+            # pool_water_switches / pump_switch categories are pure OUTPUTS
+            # and are deliberately UNMAPPED (subscribing an output re-feeds
+            # our own commands back as events — the fan-storm failure mode).
+            'trigger_button': ['pushed', 'held', 'doubleTapped'],
         }
 
         # device_selections stores CANONICAL devices.id PKs (Phase 5).
@@ -861,9 +1049,18 @@ class InstanceManager:
         subscriptions = []
 
         for category, device_ids in device_selections.items():
-            event_type = category_events.get(category)
-            if not event_type:
+            event_spec = category_events.get(category)
+            if not event_spec:
                 continue
+
+            # A category may subscribe to ONE event type (str) or SEVERAL
+            # (list/tuple — e.g. Rules' trigger_button → pushed/held/
+            # doubleTapped). Normalize to a list so the inner loop is uniform.
+            event_types = (
+                list(event_spec)
+                if isinstance(event_spec, (list, tuple))
+                else [event_spec]
+            )
 
             for device_id in device_ids:
                 # Selection entries are canonical PKs (post-Phase-5 schema).
@@ -875,15 +1072,16 @@ class InstanceManager:
                         f"in instance {instance_id} ({category})"
                     )
                     continue
-                key = (canonical_id, event_type)
-                if key in sub_keys:
-                    continue
-                sub_keys.add(key)
-                subscriptions.append({
-                    'device_id':   canonical_id,
-                    'instance_id': instance_id,
-                    'event_type':  event_type,
-                })
+                for event_type in event_types:
+                    key = (canonical_id, event_type)
+                    if key in sub_keys:
+                        continue
+                    sub_keys.add(key)
+                    subscriptions.append({
+                        'device_id':   canonical_id,
+                        'instance_id': instance_id,
+                        'event_type':  event_type,
+                    })
 
         if subscriptions:
             try:

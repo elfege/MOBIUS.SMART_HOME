@@ -423,6 +423,20 @@ class MatterClient:
         logger.info(f"Removing Matter node {node_id}")
         return await self._send_command("remove_node", {"node_id": node_id})
 
+    async def interview_node(self, node_id: int) -> Dict:
+        """
+        Force a fresh interview of a commissioned node — re-runs discovery,
+        re-establishes the operational (CASE) session, and re-subscribes. This
+        is the healing primitive for a node the server reports as "not (yet)
+        available": its session has gone stale and nothing else re-establishes
+        it (2026-07-08 self-healing watchdog). Idempotent; safe on a healthy node.
+
+        Args:
+            node_id: Node to re-interview.
+        """
+        logger.info(f"Re-interviewing Matter node {node_id} (session heal)")
+        return await self._send_command("interview_node", {"node_id": node_id})
+
     # =========================================================================
     # Device Commands
     # =========================================================================
@@ -571,6 +585,20 @@ class MatterClient:
         """Get matter-server status information."""
         return await self._send_command("server_info")
 
+    async def get_fabric_label(self) -> Optional[str]:
+        """The fabric label matterjs stamps into a device's fabric table when it
+        commissions (the human-readable admin name the device stores). Default
+        is 'HomeAssistant'; we set it to MOBIUS.HOME. Does NOT affect Apple
+        Home's 'Matter Test' text — that is keyed on our VendorID (0xFFF1)."""
+        r = await self._send_command("get_fabric_label")
+        return r.get("fabric_label") if isinstance(r, dict) else None
+
+    async def set_default_fabric_label(self, label: str) -> None:
+        """Set the fabric label used for FUTURE commissions (matterjs
+        set_default_fabric_label). Max 32 chars per the Matter spec. Existing
+        nodes are unaffected — relabel those with UpdateFabricLabel per node."""
+        await self._send_command("set_default_fabric_label", {"label": label[:32]})
+
 
 # =============================================================================
 # Device Matter Mapping (PostgREST queries)
@@ -643,3 +671,35 @@ def get_matter_client() -> MatterClient:
     if _matter_client is None:
         _matter_client = MatterClient()
     return _matter_client
+
+
+# =========================================================================
+# Sync bridge — call the (async) Matter client from worker threads
+# =========================================================================
+#
+# device_commander runs commands in a ThreadPoolExecutor (no running event
+# loop in that thread). The Matter client lives on the main asyncio loop.
+# To let the sync command path drive Matter, we capture the main loop at
+# app startup and submit coroutines to it via run_coroutine_threadsafe,
+# blocking the worker thread on the result. This is deadlock-safe because
+# the worker thread is never the loop thread.
+
+_event_loop: "Optional[asyncio.AbstractEventLoop]" = None
+
+
+def set_event_loop(loop) -> None:
+    """Record the main asyncio loop (called once from app startup)."""
+    global _event_loop
+    _event_loop = loop
+
+
+def run_on_loop(coro, timeout: float = 6.0):
+    """
+    Run a coroutine on the captured main loop from a worker thread and
+    return its result. Raises RuntimeError if the loop wasn't captured,
+    and propagates the coroutine's own exceptions / a TimeoutError.
+    """
+    if _event_loop is None:
+        raise RuntimeError("matter_client.set_event_loop() was never called")
+    fut = asyncio.run_coroutine_threadsafe(coro, _event_loop)
+    return fut.result(timeout=timeout)

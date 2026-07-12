@@ -1,0 +1,89 @@
+/**
+ * Navbar location-mode selector
+ * ─────────────────────────────
+ * Component styles for the Hubitat location-mode picker embedded in the
+ * app-header nav (see templates/base.html). Extracted out of inline
+ * styles on 2026-06-24 so the picker follows the same conventions as
+ * .nav-link / .nav-sep / .nav-link.nav-app (variables, radii,
+ * transitions, muted defaults).
+ *
+ * Why here vs main.css: per project rule "Component styles in
+ * static/css/components/" — this is a specific navbar sub-component,
+ * not part of the base .nav-link contract.
+ */
+
+.nav-mode {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    transition: color 0.2s;
+}
+
+.nav-mode:hover {
+    color: var(--color-primary);
+}
+
+/* The "Mode" caption to the left of the select — same muted register as
+ * .nav-app links; distinctly a label, not a link. */
+.nav-mode__label {
+    font-size: 0.75rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    opacity: 0.55;
+}
+
+/* The <select> itself. Sized to align vertically with .nav-link at the
+ * default header row height; picks up the same border/background palette
+ * as inputs elsewhere in the app. */
+.nav-mode__select {
+    background: var(--color-surface);
+    color: inherit;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 0.25rem 0.5rem;
+    font: inherit;
+    font-size: 0.9rem;
+    font-weight: 500;
+    line-height: 1.2;
+    cursor: pointer;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    /* Native chevron kept — matches OS controls and avoids bespoke SVG
+     * that would drift from the theme-neutral overlay. */
+}
+
+.nav-mode__select:hover {
+    border-color: var(--color-primary);
+}
+
+.nav-mode__select:focus-visible {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 25%, transparent);
+}
+
+.nav-mode__select:disabled {
+    opacity: 0.55;
+    cursor: progress;
+}
+
+/* Transient "just changed" pulse — a soft ring for ~1 s after the
+ * navbar reflects a mode change that originated OUTSIDE the picker
+ * (e.g. an ActionSetMode rule fired, Hubitat direct change).
+ * The updater JS in base.html adds/removes .is-updated. */
+.nav-mode__select.is-updated {
+    animation: nav-mode-pulse 1s ease-out 1;
+}
+
+@keyframes nav-mode-pulse {
+    0%   { box-shadow: 0 0 0 0   color-mix(in srgb, var(--color-accent, var(--color-primary)) 60%, transparent); }
+    100% { box-shadow: 0 0 0 6px transparent; }
+}
+
+/* Narrow viewports — hide the "Mode" caption; the select alone is enough
+ * signal. Matches the pattern .nav-link.nav-app uses in main.css @1350. */
+@media (max-width: 720px) {
+    .nav-mode__label { display: none; }
+    .nav-mode__select { padding: 0.2rem 0.35rem; font-size: 0.85rem; }
+}

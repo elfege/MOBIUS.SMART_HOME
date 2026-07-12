@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{% block title %}Sonos{% endblock %}
+
+{% block content %}
+{# ---------------------------------------------------------------------------
+   SONOS DRIVER — standalone device controller (dashboard "Drivers" section).
+   Lists discovered Sonos speakers (one card per room/coordinator) and exposes
+   their commands for testing: TTS announce, setVolume, restoreVolume, play an
+   mp3 URL, stop. All backed by services/sonos (local UPnP, no Hubitat/cloud).
+   Rendered by static/js/controllers/sonos-controller.js.
+--------------------------------------------------------------------------- #}
+<div class="sonos-page" style="max-width:1100px;margin:0 auto;padding:1rem;">
+    <div class="wizard-title-row" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem;">
+        <div>
+            <a href="/" class="back-link">&larr; Dashboard</a>
+            <h2 style="margin:0.5rem 0 0;">Sonos Controller</h2>
+            <p style="opacity:.7;margin:.25rem 0 0;">
+                Local UPnP control (no Hubitat, no cloud). Test each speaker:
+                announce text-to-speech, set/restore volume, play an mp3, stop.
+            </p>
+        </div>
+        <button class="btn btn-secondary" id="btn-refresh-sonos">↻ Refresh</button>
+    </div>
+
+    <div id="sonos-status" style="opacity:.7;margin-bottom:.75rem;">Loading speakers…</div>
+
+    <div id="sonos-speakers" class="instances-grid"
+         style="display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:1rem;">
+    </div>
+</div>
+
+<script type="module" src="/static/js/controllers/sonos-controller.js"></script>
+{% endblock %}

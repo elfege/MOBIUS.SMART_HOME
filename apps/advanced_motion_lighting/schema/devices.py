@@ -62,13 +62,25 @@ def get_device_categories() -> List[Dict[str, Any]]:
                 "(can overlap with motion switches)"
             )
         },
+        # keep_off_switches and keep_on_switches are declared here so the
+        # backend / device subscription layer knows they exist, but the UI
+        # treats them differently: hidden_in_devices_section=True keeps them
+        # OUT of Step 2 (Devices) and the instance-controller renders them
+        # inline inside the "Always-Off" / "Always-On" cards of Step 3
+        # (Configure), conditional on the matching enable-toggle.
+        # Operator directive 2026-06-17 (Q2+Q3 reiteration): keep the
+        # toggle + mode picker + device picker for each feature in the
+        # SAME card. The hidden_in_devices_section flag is the contract
+        # the frontend reads to know not to draw the picker in Step 2.
         {
             "key": "keep_off_switches",
             "label": "Always Off",
             "capability": "switch",
             "multiple": True,
             "required": False,
-            "description": "These switches will always be turned off"
+            "description": "These switches will always be turned off",
+            "hidden_in_devices_section": True,
+            "rendered_with_settings_group": "keep_off"
         },
         {
             "key": "keep_on_switches",
@@ -76,6 +88,8 @@ def get_device_categories() -> List[Dict[str, Any]]:
             "capability": "switch",
             "multiple": True,
             "required": False,
-            "description": "These switches will always be turned on"
+            "description": "These switches will always be turned on",
+            "hidden_in_devices_section": True,
+            "rendered_with_settings_group": "keep_on"
         }
     ]

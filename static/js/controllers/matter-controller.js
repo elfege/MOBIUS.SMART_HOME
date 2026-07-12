@@ -25,12 +25,84 @@ $(document).ready(function () {
     loadAll();
 
     $('#btn-refresh-status').on('click', loadStatus);
+    $('#btn-matter-start').on('click', function () { matterService('start'); });
+    $('#btn-matter-restart').on('click', function () { matterService('restart'); });
+    $('#btn-matter-stop').on('click', function () { matterService('stop'); });
     $('#btn-refresh-nodes').on('click', loadNodes);
     $('#btn-commission').on('click', commissionDevice);
     $('#btn-create-mapping').on('click', createMapping);
     $('#btn-scan-hubs').on('click', scanHubs);
+    // Commission All = USER-initiated bulk (selected hub only). Kept by
+    // operator directive; what's banned is any AUTOMATIC trigger of it.
     $('#btn-commission-all').on('click', function () { commissionAll(); });
+    // MULTI-SELECT MATTER HUBS: populate the checkbox panel; toggling persists
+    // the SET (system_settings.matter_hub_ids). Scanning covers every checked
+    // hub; devices are deduped by MAC so one physical device on 2 hubs = one
+    // card; commissioning is per-device via the device's own hub (auto).
+    loadMatterHub();
+    // Open/close the hub panel.
+    $(document).on('click', '#matter-hub-toggle', function (e) {
+        e.stopPropagation();
+        $('#matter-hub-panel').toggle();
+    });
+    $(document).on('click', function (e) {
+        if (!$(e.target).closest('#matter-hub-picker').length) $('#matter-hub-panel').hide();
+    });
+    // Persist on any checkbox change.
+    $(document).on('change', '.matter-hub-cb', function () {
+        const ids = $('.matter-hub-cb:checked').map(function () { return parseInt(this.value, 10); }).get();
+        if (!ids.length) {
+            showToast('Select at least one hub for Matter', 'error');
+            $(this).prop('checked', true);   // revert — never allow empty
+            return;
+        }
+        $.ajax({
+            url: '/api/matter/hub', method: 'POST', contentType: 'application/json',
+            data: JSON.stringify({ hub_ids: ids })
+        })
+        .done(function (d) {
+            showToast(`Matter hubs: ${d.selected.map(h => h.hub_name).join(', ')}`, 'success');
+            updateHubToggleLabel(d.selected);
+            loadDiscoveredDevices();
+        })
+        .fail(function (xhr) {
+            showToast('Failed to set Matter hubs: ' + (xhr.responseJSON?.detail || 'error'), 'error');
+            loadMatterHub();
+        });
+    });
+    $('#btn-remove-all-discovered').on('click', function () { removeAllDiscovered(false); });
+    $('#btn-force-remove-all-discovered').on('click', function () { removeAllDiscovered(true); });
+    $('#btn-decommission-all-nodes').on('click', function () { decommissionAll(); });
     $('#btn-refresh-discovered').on('click', loadDiscoveredDevices);
+    $('#btn-scan-mdns').on('click', scanMdns);
+    // Commission a NEW device by code even when it isn't in the mDNS list — the
+    // pairing code's discriminator lets the controller find it on the network,
+    // so a device doesn't have to be announcing/visible to commission it.
+    $('#btn-commission-code-direct').on('click', function () {
+        openCommissionModal({
+            title: 'Commission new device (code)',
+            subtitle: 'no hub — the code finds the device on the network',
+            needsCode: true,
+            run: (code) => ({ url: '/api/matter/commission', body: { code } }),
+        });
+    });
+    // Mapping section bulk actions: mappings are pure link records, so Remove
+    // all touches no device/node state and Rebuild regenerates rows for every
+    // non-removed discovered device that has a node in our fabric.
+    $('#btn-remove-all-mappings').on('click', function () {
+        if (!confirm('Remove ALL Hubitat ↔ Matter mappings?\n\nOnly the link records are deleted — no device or Matter node is touched. You can rebuild them any time.')) return;
+        $.ajax({ url: '/api/matter/map', method: 'DELETE' })
+            .done(function (d) { showToast(`Removed ${d.removed} mapping(s)`, 'success'); loadMappings(); })
+            .fail(function (x) { showToast('Remove-all mappings failed: ' + (x.responseJSON?.detail || 'error'), 'error'); });
+    });
+    $('#btn-rebuild-mappings').on('click', function () {
+        $.ajax({ url: '/api/matter/map/rebuild', method: 'POST' })
+            .done(function (d) {
+                showToast(`Rebuilt ${d.rebuilt} mapping(s); ${d.skipped} skipped (no node/id)`, 'success');
+                loadMappings();
+            })
+            .fail(function (x) { showToast('Rebuild failed: ' + (x.responseJSON?.detail || 'error'), 'error'); });
+    });
 
     // Canonical device-cache refresh (separate from the Matter-side
     // 'Refresh' which reloads the discovered-devices list). Opens the
@@ -56,6 +128,13 @@ $(document).ready(function () {
      * Fetch matter-server connection status and render the status panel.
      */
     function loadStatus() {
+        // Immediate feedback so Refresh isn't perceived as doing nothing while
+        // the request is in flight (fixes the "not as soon as I hit refresh"
+        // lag). Replaced by the real state when the calls resolve.
+        $('#status-panel').html(
+            '<div class="status-item"><span class="status-dot checking"></span>' +
+            '<span class="status-value">Checking…</span></div>'
+        );
         $.getJSON('/api/matter/status')
             .done(function (data) {
                 const $panel = $('#status-panel');
@@ -97,6 +176,10 @@ $(document).ready(function () {
                 $panel.find('.status-value').addClass('copyable').on('click', function () {
                     copyToClipboard($(this).text().trim(), this);
                 });
+
+                // Fold in the self-healing watchdog health (connection kept
+                // alive + per-node reachability + stale removal candidates).
+                loadWatchdogHealth($panel);
             })
             .fail(function () {
                 $('#status-panel').html(
@@ -104,6 +187,51 @@ $(document).ready(function () {
                     '<span class="status-value">Cannot reach API</span></div>'
                 );
             });
+    }
+
+    /**
+     * Append the Matter self-healing watchdog health to the status panel:
+     * whether the watchdog is running, node reachability (available vs stale),
+     * removal-candidate nodes (persistently dead — surfaced for decommission),
+     * and the last error. Best-effort + read-only; silent if unavailable.
+     */
+    function loadWatchdogHealth($panel) {
+        $.getJSON('/api/matter/watchdog').done(function (w) {
+            if (!w || !w.running) { return; }
+            const unreachable = w.nodes_unavailable || [];
+            const removal = w.removal_candidates || [];
+            let html = `
+                <div class="status-item">
+                    <span class="status-label">Watchdog:</span>
+                    <span class="status-value">running</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Nodes:</span>
+                    <span class="status-value">${w.nodes_available}/${w.nodes_total} reachable</span>
+                </div>`;
+            if (removal.length) {
+                html += `
+                <div class="status-item">
+                    <span class="status-dot disconnected"></span>
+                    <span class="status-label">Stale (remove):</span>
+                    <span class="status-value">${removal.join(', ')}</span>
+                </div>`;
+            } else if (unreachable.length) {
+                html += `
+                <div class="status-item">
+                    <span class="status-label">Unreachable:</span>
+                    <span class="status-value">${unreachable.join(', ')}</span>
+                </div>`;
+            }
+            if (w.last_error) {
+                html += `
+                <div class="status-item">
+                    <span class="status-label">Last error:</span>
+                    <span class="status-value">${w.last_error}</span>
+                </div>`;
+            }
+            $panel.append(html);
+        });
     }
 
     /**
@@ -180,9 +308,11 @@ $(document).ready(function () {
         const ageMs = lastSeen !== null ? (Date.now() - lastSeen) : null;
         const STALE_MS = 30 * 60 * 1000, LONG_MS = 6 * 60 * 60 * 1000;
         const offline = isOnline === false;
+        // Online = responsive; only fall back to last_seen when liveness unknown.
+        const unknownLive = isOnline == null;
         return {
-            stale: offline || (ageMs !== null && ageMs > STALE_MS),
-            longGone: offline || (ageMs !== null && ageMs > LONG_MS),
+            stale: offline || (unknownLive && ageMs !== null && ageMs > STALE_MS),
+            longGone: offline || (unknownLive && ageMs !== null && ageMs > LONG_MS),
             offline,
             seenAgo: ageMs !== null ? _timeAgoShort(ageMs) : 'unknown',
         };
@@ -215,9 +345,15 @@ $(document).ready(function () {
             const ageMs = lastSeen !== null ? (Date.now() - lastSeen) : null;
             const STALE_MS = 30 * 60 * 1000;
             const LONG_MS = 6 * 60 * 60 * 1000;
+            // Liveness is authoritative: an ONLINE node is responsive, period —
+            // don't let a stale discovery-scan _last_seen_at (which isn't
+            // refreshed for commissioned nodes) label a live device
+            // "unresponsive 26d ago" (operator report 2026-07-09, node 101).
+            // Fall back to last_seen staleness ONLY when liveness is UNKNOWN.
             const offline = node._is_online === false;
-            const stale = offline || (ageMs !== null && ageMs > STALE_MS);
-            const longGone = offline || (ageMs !== null && ageMs > LONG_MS);
+            const unknownLive = node._is_online == null;
+            const stale = offline || (unknownLive && ageMs !== null && ageMs > STALE_MS);
+            const longGone = offline || (unknownLive && ageMs !== null && ageMs > LONG_MS);
             const seenAgo = lastSeen !== null ? _timeAgoShort(ageMs) : 'unknown';
 
             // Escalating highlight on the tile for unresponsive devices.
@@ -229,14 +365,26 @@ $(document).ready(function () {
                          style="margin-left:auto;font-size:.72rem;padding:.1rem .45rem;border-radius:4px;background:${longGone ? 'rgba(192,86,74,.25)' : 'rgba(199,154,90,.22)'};color:${longGone ? '#e6857a' : '#d9b277'};">⚠ unresponsive · ${seenAgo}</span>`
                 : '';
 
-            // 5.3 — quick link to the device on its Hubitat hub (when mapped).
+            // 5.3 — quick link to the CURRENT canonical device on its hub.
+            // Resolved server-side via the exact (hub_ip, hubitat_id) anchor
+            // (2026-06-19) — NOT the frozen maker-api id that produced the
+            // dead "#660" link. node._mapping_stale=true means the node no
+            // longer resolves to any present device (re-paired away / removed).
             const hubIp = node._hub_ip;
-            const hubDevId = node._hubitat_device_id || (mapped && mapped.hubitat_device_id);
-            const mappedHtml = (hubIp && hubDevId)
-                ? `<div class="node-mapped">Mapped to Hubitat
-                       <a href="http://${hubIp}/device/edit/${hubDevId}" target="_blank" rel="noopener"
-                          title="Open on the Hubitat hub">#${hubDevId} ↗</a></div>`
-                : (mapped ? `<div class="node-mapped">Mapped to Hubitat #${mapped.hubitat_device_id}</div>` : '');
+            const canonHubId = node._canonical_hubitat_id;   // current admin id
+            const canonLabel = node._canonical_label;
+            let mappedHtml;
+            if (node._mapping_stale) {
+                mappedHtml = `<div class="node-mapped node-mapped--stale"
+                       title="This Matter node no longer resolves to a present Hubitat device (re-paired or removed). Re-map it.">
+                       ⚠ mapping stale — no current device</div>`;
+            } else if (hubIp && canonHubId) {
+                mappedHtml = `<div class="node-mapped">Mapped to
+                       <a href="http://${hubIp}/device/edit/${canonHubId}" target="_blank" rel="noopener"
+                          title="Open on the Hubitat hub">${escapeHtml(canonLabel || ('#' + canonHubId))} (#${canonHubId}) ↗</a></div>`;
+            } else {
+                mappedHtml = '';
+            }
 
             html += `
                 <div class="node-card${stale ? ' node-card--stale' : ''}" data-node-id="${nodeId}" ${cardStyle}>
@@ -253,6 +401,9 @@ $(document).ready(function () {
                                 data-node-id="${nodeId}">Test ON</button>
                         <button class="btn btn-small btn-secondary btn-test-off"
                                 data-node-id="${nodeId}">Test OFF</button>
+                        <button class="btn btn-small btn-danger btn-node-decommission"
+                                data-node-id="${nodeId}" data-node-name="${escapeHtml(name)}"
+                                title="Remove OUR fabric from this device (frees the slot; the device stays on Hubitat/other fabrics). DB is reconciled: the discovered row returns to 'uncommissioned' and its mapping is deleted.">Decommission</button>
                     </div>
                     ${mappedHtml}
                 </div>
@@ -267,6 +418,31 @@ $(document).ready(function () {
         });
         $container.find('.btn-test-off').on('click', function () {
             testMatterCommand($(this).data('node-id'), 'off');
+        });
+        // Per-tile decommission (operator directive 2026-07-12): full leave
+        // (keep_current=false) + backend DB reconcile, then refresh all panes.
+        $container.find('.btn-node-decommission').on('click', function () {
+            const nodeId = $(this).data('node-id');
+            const name = $(this).data('node-name') || `node ${nodeId}`;
+            if (!confirm(`Decommission "${name}" (node ${nodeId})?\n\n`
+                + 'Removes OUR fabric from the device — it stays on Hubitat and any other '
+                + 'fabric. The device becomes commissionable again (Commission / Commission All).')) {
+                return;
+            }
+            const $btn = $(this).prop('disabled', true).text('Decommissioning…');
+            $.ajax({
+                url: `/api/matter/nodes/${nodeId}/decommission`, method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ keep_current: false })
+            })
+            .done(function () {
+                showToast(`Decommissioned ${name}`, 'success');
+                loadNodes(); loadMappings(); loadDiscoveredDevices();
+            })
+            .fail(function (xhr) {
+                $btn.prop('disabled', false).text('Decommission');
+                showToast('Decommission failed: ' + (xhr.responseJSON?.detail || xhr.statusText), 'error');
+            });
         });
 
         // Node staleness (_is_online/_last_seen_at) just became available;
@@ -306,11 +482,14 @@ $(document).ready(function () {
         `;
 
         for (const m of mappings) {
-            // Try to find Hubitat device name
-            const hDevice = hubitatDevices.find(
-                d => String(d.id) === String(m.hubitat_device_id)
-            );
-            const hName = hDevice ? hDevice.label || hDevice.name : '';
+            // Resolved CURRENT device, computed server-side from
+            // matter_node_id → canonical (services.matter_mapping). m.stale
+            // means the mapping no longer points at a present device (the
+            // #660 / re-paired-away case). The old client-side check compared
+            // canonical d.id to the frozen hubitat_device_id — different id
+            // spaces — and was structurally wrong; removed.
+            const curLabel = m.canonical_label;
+            const curHubId = m.canonical_hubitat_id;
 
             // Correlate to the enriched node (matterNodes carry _is_online /
             // _last_seen_at) for responsiveness. Highlights the Remove button
@@ -333,8 +512,10 @@ $(document).ready(function () {
                 : '';
 
             html += `
-                <tr${st.longGone ? ' style="background:rgba(192,86,74,.06);"' : ''}>
-                    <td>#${m.hubitat_device_id} ${escapeHtml(hName)}${staleMark}</td>
+                <tr${(st.longGone || m.stale) ? ' style="background:rgba(192,86,74,.06);"' : ''}>
+                    <td>${m.stale
+                        ? `<span style="color:#e6857a;" title="No current device resolves for this mapping (re-paired or removed)">⚠ stale</span> <span style="opacity:.55;">(was #${m.hubitat_device_id})</span>`
+                        : `${escapeHtml(curLabel || '(unknown)')} <span style="opacity:.55;">(#${curHubId})</span>`}${staleMark}</td>
                     <td>${m.matter_node_id}</td>
                     <td>${m.matter_endpoint_id}</td>
                     <td>${escapeHtml(m.device_name || '')}</td>
@@ -392,6 +573,35 @@ $(document).ready(function () {
     // =========================================================================
 
     /**
+     * Stop / start / restart the matter-server container from the UI.
+     *
+     * Fires POST /api/matter/service/{action}, which drops a trigger the host
+     * watcher acts on (the app can't run docker itself). Reports via modal; a
+     * 503 means the host watcher isn't installed yet (run ./start.sh once).
+     */
+    function matterService(action) {
+        const Verb = action.charAt(0).toUpperCase() + action.slice(1);
+        if (action === 'stop' &&
+            !confirm('Stop matter-server?\n\nAll Matter device control and commissioning halt until you start it again.')) {
+            return;
+        }
+        showModal(`${Verb}ing matter-server`,
+            `Sending "${action}" to the matter-server container via the host watcher…`, 'loading');
+        $.ajax({ url: `/api/matter/service/${action}`, method: 'POST' })
+            .done(function (data) {
+                showModal(`matter-server ${action} initiated`,
+                    (data.message || `matter-server ${action} initiated.`)
+                    + '\n\nRefreshing status shortly…', 'success');
+                // Give the host watcher time to run docker, then refresh.
+                setTimeout(function () { loadStatus(); loadNodes(); }, 8000);
+            })
+            .fail(function (xhr) {
+                showModal(`matter-server ${action} failed`,
+                    xhr.responseJSON?.detail || `${Verb} failed`, 'error');
+            });
+    }
+
+    /**
      * Commission a new Matter device using the entered pairing code.
      */
     function commissionDevice() {
@@ -412,8 +622,26 @@ $(document).ready(function () {
             timeout: 120000  // 2 minute timeout for commissioning
         })
         .done(function (data) {
+            // Clean, human-readable summary instead of dumping the raw node
+            // JSON (the whole attribute tree) into the modal. Endpoint count is
+            // derived from the 'endpoint/cluster/attribute' attribute keys.
+            const n = data.node || {};
+            let epCount = '?';
+            if (n.attributes && typeof n.attributes === 'object') {
+                epCount = new Set(
+                    Object.keys(n.attributes).map(k => String(k).split('/')[0])
+                ).size;
+            }
+            let when = '—';
+            if (n.date_commissioned) {
+                const d = new Date(n.date_commissioned);
+                if (!isNaN(d)) when = d.toLocaleString();
+            }
+            const notReady = (n.available === false)
+                ? ' · not yet available (still interviewing)' : '';
             showCommissionResult(
-                `Device commissioned successfully! Node: ${JSON.stringify(data.node)}`,
+                `Device commissioned — Node ${n.node_id ?? '?'} · `
+                + `${when} · ${epCount} endpoint(s)${notReady}`,
                 'success'
             );
             $('#pairing-code').val('');
@@ -421,7 +649,10 @@ $(document).ready(function () {
         })
         .fail(function (xhr) {
             const detail = xhr.responseJSON?.detail || 'Commission failed';
-            showCommissionResult(detail, 'error');
+            showCommissionResult(
+                detail + ' — if it fails at the certificate step ("No memory" / SendNOC in the matter-server log), '
+                + "the device's fabric table is full (~5 max): factory-reset it and use its FACTORY pairing code.",
+                'error');
         })
         .always(function () {
             $('#btn-commission').prop('disabled', false);
@@ -508,30 +739,465 @@ $(document).ready(function () {
     }
 
     /**
-     * Send a test command to a Matter node via the device command API.
-     * Uses the mapping if available, otherwise sends directly.
+     * Test ON/OFF for a COMMISSIONED node (nodes grid). The node_id is the
+     * Matter node itself, so we command it directly over the fabric — no
+     * Hubitat resolution, no mapping gate.
      */
     function testMatterCommand(nodeId, command) {
-        // Find if this node has a Hubitat mapping
-        const mapping = mappings.find(m => m.matter_node_id === nodeId);
+        const node = matterNodes.find(n => (n.node_id || n.nodeId) === nodeId);
+        const label = (node && (node._canonical_label || node._device_name || extractNodeName(node)))
+            || `node ${nodeId}`;
+        sendMatterTest(nodeId, command, label);
+    }
 
-        if (mapping) {
-            // Send via Hubitat device command (which triggers dual-command)
+    /**
+     * Test ON/OFF for a DISCOVERED device card. We test the MATTER device
+     * directly, so the only requirement is that it's commissioned into OUR
+     * fabric (has our_node_id) — NOT that it has a Hubitat mapping. If it isn't
+     * a node yet, we say to Commission it first.
+     */
+    function testDiscoveredDevice(uniqueId, command) {
+        const d = discoveredDevices.find(x => x.unique_id === uniqueId);
+        if (!d) return;
+        const label = d.device_name || 'device';
+        if (d.our_node_id == null) {
+            showModal(
+                `Can't test "${label}" — not in our Matter fabric yet`,
+                `Test commands the MATTER device directly (via matter-server), so it has to be `
+                + `commissioned into our fabric first. Hit "Commission" on this card; once it's one `
+                + `of our nodes, Test ON/OFF drives it over Matter — no Hubitat mapping required.`,
+                'info'
+            );
+            return;
+        }
+        sendMatterTest(d.our_node_id, command, label);
+    }
+
+    /**
+     * Fire an ON/OFF straight at a Matter NODE via matter-server, log the
+     * attempt to the LEARNING TABLE, and ask the operator for VISUAL
+     * CONFIRMATION. Shared by the nodes grid and the discovered cards.
+     *
+     * This is a Matter-native test (POST /api/matter/nodes/{id}/command →
+     * OnOff cluster) — it does NOT go through Hubitat. The loading spinner is
+     * held for a minimum of 2s (operator directive) so a fast round-trip still
+     * reads as "it did something".
+     *
+     * Learning loop (operator directive 2026-07-11): when the command settles
+     * (success OR failure) the attempt is POSTed to /api/matter/feedback with
+     * what the API *claimed*; the result modal then requires the operator's
+     * verdict ("It worked" / "It didn't") which is PATCHed onto the same row.
+     * Skipping the modal leaves the row 'unverified' — still a data point.
+     */
+    function sendMatterTest(nodeId, command, label) {
+        const CMD = String(command).toUpperCase();
+        showModal(`Testing ${CMD} (Matter)`,
+            `Commanding the MATTER device "${label}" (node ${nodeId}) directly via matter-server — `
+            + `not through Hubitat…`, 'loading');
+        // Minimum 2s spinner regardless of how fast the request returns.
+        const minSpinner = new Promise(function (resolve) { setTimeout(resolve, 2000); });
+        $.ajax({
+            url: `/api/matter/nodes/${nodeId}/command`,
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ command: command })
+        })
+        .done(function () {
+            minSpinner.then(function () {
+                logMatterAttempt(nodeId, command, label, true, null).then(function (fid) {
+                    showVerdictModal(fid, nodeId, command, label, true, null);
+                });
+            });
+        })
+        .fail(function (xhr) {
+            minSpinner.then(function () {
+                const d = xhr.responseJSON?.detail;
+                const detail = (typeof d === 'string') ? d : (d ? JSON.stringify(d) : 'Unknown error');
+                logMatterAttempt(nodeId, command, label, false, detail).then(function (fid) {
+                    showVerdictModal(fid, nodeId, command, label, false, detail);
+                });
+            });
+        });
+    }
+
+    /**
+     * Set a Matter device's level (LevelControl cluster 8) DIRECTLY via
+     * matter-server, then open the same verdict modal as on/off. Mirrors
+     * sendMatterTest; used by the debug console's "Set level" control.
+     */
+    function sendMatterLevel(nodeId, level, label) {
+        const cmdLabel = 'setLevel ' + level;
+        showModal(`Setting level ${level}% (Matter)`,
+            `Commanding the MATTER device "${label}" (node ${nodeId}) to ${level}% directly via `
+            + `matter-server — not through Hubitat…`, 'loading');
+        const minSpinner = new Promise(function (resolve) { setTimeout(resolve, 2000); });
+        $.ajax({
+            url: `/api/matter/nodes/${nodeId}/command`,
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ command: 'level', level: level })
+        })
+        .done(function () {
+            minSpinner.then(function () {
+                logMatterAttempt(nodeId, cmdLabel, label, true, null).then(function (fid) {
+                    showVerdictModal(fid, nodeId, cmdLabel, label, true, null);
+                });
+            });
+        })
+        .fail(function (xhr) {
+            minSpinner.then(function () {
+                const d = xhr.responseJSON?.detail;
+                const detail = (typeof d === 'string') ? d : (d ? JSON.stringify(d) : 'Unknown error');
+                logMatterAttempt(nodeId, cmdLabel, label, false, detail).then(function (fid) {
+                    showVerdictModal(fid, nodeId, cmdLabel, label, false, detail);
+                });
+            });
+        });
+    }
+
+    /**
+     * Learning log, step 1 — record the attempt the moment the command
+     * settles, BEFORE the operator answers (so even a dismissed modal leaves
+     * an 'unverified' row). Resolves to the feedback row id, or null if the
+     * logging call itself failed (the verdict modal still shows; verdict
+     * buttons then just close without a row to attach to).
+     */
+    function logMatterAttempt(nodeId, command, label, apiSuccess, apiDetail) {
+        return $.ajax({
+            url: '/api/matter/feedback',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                node_id: nodeId,
+                command: command,
+                device_label: label,
+                api_success: apiSuccess,
+                api_detail: apiDetail
+            })
+        }).then(function (r) { return r.id; }).catch(function () { return null; });
+    }
+
+    /**
+     * Learning log, step 2 — VISUAL CONFIRMATION modal (operator: "modal
+     * requires visual confirmation"). Replaces the fire-and-forget "watch the
+     * physical device" text: the operator's answer is PATCHed onto the
+     * learning-log row, with an optional free-text note.
+     *
+     * Colorblind-safe (PIN.1-5): verdicts carry glyph+label, accents are
+     * high-luminance blue (worked) / red (didn't) only — no green.
+     * Backdrop click / Skip = row stays 'unverified' (still a data point).
+     */
+    function showVerdictModal(feedbackId, nodeId, command, label, apiSuccess, apiDetail) {
+        $('#matter-modal-overlay').remove();
+        const CMD = String(command).toUpperCase();
+        const title = apiSuccess
+            ? `Matter ${CMD} sent — did the device actually do it?`
+            : `Matter ${CMD} FAILED at the API — did the device react anyway?`;
+        const bodyText = apiSuccess
+            ? `Sent "${command}" to "${label}" (node ${nodeId}) over the fabric — not via Hubitat.\n\n`
+              + `Look at the physical device. Your answer is saved to the learning log.`
+            : `${apiDetail || 'Unknown error'}\n\n`
+              + `Look at the device anyway — your answer is saved to the learning log.`;
+        const html = `
+            <div id="matter-modal-overlay" class="matter-modal-overlay">
+                <div class="matter-modal" data-type="${apiSuccess ? 'info' : 'error'}">
+                    <div class="matter-modal-header">
+                        <h4>${escapeHtml(title)}</h4>
+                    </div>
+                    <div class="matter-modal-body">
+                        <p>${escapeHtml(bodyText).replace(/\n/g, '<br>')}</p>
+                        <input type="text" id="matter-verdict-notes"
+                               placeholder="optional note (e.g. 'flickered but stayed on')"
+                               style="width:100%; margin-top:.6rem; border-radius:4px;
+                                      padding:.35rem .5rem; font:inherit; font-size:.85rem;">
+                    </div>
+                    <div class="matter-modal-footer" style="display:flex; gap:.5rem; justify-content:flex-end;">
+                        <button class="btn btn-small btn-secondary matter-verdict-btn" data-verdict="worked"
+                                style="border-color:var(--color-terminal-blue,#89b4fa); color:var(--color-terminal-blue,#89b4fa);">
+                            &#10004; It worked</button>
+                        <button class="btn btn-small btn-secondary matter-verdict-btn" data-verdict="failed"
+                                style="border-color:var(--color-toast-error,#e57373); color:var(--color-toast-error,#e57373);">
+                            &#10006; It didn't</button>
+                        <button class="btn btn-small btn-secondary matter-modal-close"
+                                title="Close without answering — this attempt stays logged as 'unverified'">Skip</button>
+                    </div>
+                </div>
+            </div>`;
+        $('body').append(html);
+        $('#matter-modal-overlay').on('click', function (e) {
+            if ($(e.target).is('#matter-modal-overlay') || $(e.target).is('.matter-modal-close')) {
+                $('#matter-modal-overlay').remove();   // row stays 'unverified'
+            }
+        });
+        $('#matter-modal-overlay .matter-verdict-btn').on('click', function () {
+            const verdict = $(this).data('verdict');
+            const notes = ($('#matter-verdict-notes').val() || '').trim() || null;
+            const close = function () { $('#matter-modal-overlay').remove(); };
+            if (feedbackId == null) { close(); return; }   // attempt-logging failed — nothing to attach to
             $.ajax({
-                url: `/api/devices/${mapping.hubitat_device_id}/command`,
-                method: 'POST',
+                url: `/api/matter/feedback/${feedbackId}/verdict`,
+                method: 'PATCH',
                 contentType: 'application/json',
-                data: JSON.stringify({ command: command })
+                data: JSON.stringify({ verdict: verdict, notes: notes })
             })
             .done(function () {
-                console.log(`Test ${command} sent to Hubitat #${mapping.hubitat_device_id} + Matter node ${nodeId}`);
+                showToast(`Logged: ${verdict === 'worked' ? '✔ worked' : "✖ didn't work"}`, 'info');
+                close();
             })
-            .fail(function (xhr) {
-                showToast(`Test failed: ${xhr.responseJSON?.detail || 'Unknown error'}`, 'error');
+            .fail(function (x) {
+                showToast('Verdict save failed: ' + (x.responseJSON?.detail || 'error'), 'error');
+                close();
             });
-        } else {
-            showToast(`Node ${nodeId} is not mapped to a Hubitat device. Create a mapping first.`, 'info');
+        });
+    }
+
+    // =========================================================================
+    // Matter Debug Console (services/matter_debug.py surface)
+    // =========================================================================
+
+    let _debugLogTimer = null;
+    let _debugLogSeq = 0;
+
+    /**
+     * Large per-device debug console: matter-server diagnostics, the node's
+     * OperationalCredentials fabric table (per-fabric Remove; orphans/current
+     * flagged), node reachability + OnOff state, decommission actions, and a
+     * live verbose log tail (GET /api/matter/debug/log). Same data agents see.
+     */
+    function openMatterDebug(nodeId, label, uniqueId) {
+        // A card with no node (never commissioned, or decommissioned) still
+        // opens the console — server diagnostics + live log work regardless;
+        // the node-scoped sections and command buttons need a node id, and the
+        // commission buttons need the discovered device's uniqueId.
+        const hasNode = nodeId !== null && nodeId !== undefined && String(nodeId) !== '';
+        const hasUid = uniqueId !== null && uniqueId !== undefined && String(uniqueId) !== '';
+        _debugLogSeq = 0;
+        $('#matter-debug-overlay').remove();
+        $('body').append(`
+            <div id="matter-debug-overlay" class="matter-debug-overlay">
+              <div class="matter-debug">
+                <div class="matter-debug-head">
+                  <h3>Matter debug — ${escapeHtml(label || (hasNode ? 'node ' + nodeId : 'device'))}
+                      <span class="dbg-mono">${hasNode ? `(node ${nodeId})` : '(not commissioned)'}</span></h3>
+                  <button class="btn btn-small btn-secondary matter-debug-close">Close</button>
+                </div>
+                <div class="matter-debug-body">
+                  <div class="matter-debug-col">
+                    <div class="matter-debug-section" id="dbg-server">matter-server: loading…</div>
+                    <div class="matter-debug-section" id="dbg-fabrics">Fabrics: loading…</div>
+                    <div class="matter-debug-section" id="dbg-node">Node: loading…</div>
+                    <div class="matter-debug-actions" id="dbg-actions"></div>
+                  </div>
+                  <div class="matter-debug-col matter-debug-logcol">
+                    <div class="matter-debug-logbar">Live matter-client log
+                      <span class="dbg-mono" id="dbg-logstate"></span></div>
+                    <pre class="matter-debug-log" id="dbg-log"></pre>
+                  </div>
+                </div>
+              </div>
+            </div>`);
+        $('#matter-debug-overlay').on('click', function (e) {
+            if ($(e.target).is('#matter-debug-overlay') || $(e.target).is('.matter-debug-close')) closeMatterDebug();
+        });
+        $(document).on('keydown.matterDebug', function (e) { if (e.key === 'Escape') closeMatterDebug(); });
+
+        // Action buttons — rendered UNCONDITIONALLY here (for any node-bearing
+        // device). They previously lived inside loadDebugFabrics().done(), so a
+        // failing fabric read (e.g. the node isn't in the current controller →
+        // 500, now a clean error) left the console with NO actions at all —
+        // "fucking useless" per the operator, twice. on/off/level command the
+        // MATTER device directly (not via Hubitat); decommission removes our
+        // fabrics. Same actions as the cards. With NO node (never commissioned
+        // / decommissioned) there is nothing to command — the console still
+        // shows server diagnostics + the live log.
+        if (!hasNode) {
+            $('#dbg-fabrics').text('Fabrics: not commissioned — no node in our fabric.');
+            $('#dbg-node').text('Node: not commissioned — commission the device to get node-level state.');
+            // The actions a NOT-commissioned device needs: get it INTO our
+            // fabric. Same flows as the card — Commission (opens a pairing
+            // window on the Matter hub) and Commission with a manual code.
+            if (hasUid) {
+                $('#dbg-actions').html(
+                    `<div class="dbg-act-row">`
+                    + `<button class="btn btn-small btn-primary dbg-commission" data-uid="${uniqueId}">Commission</button>`
+                    + ` <button class="btn btn-small btn-secondary dbg-commission-code" data-uid="${uniqueId}">Commission (code)</button>`
+                    + `</div>`);
+                $('#dbg-actions .dbg-commission').on('click', function () {
+                    autoCommission($(this).data('uid'), label, $(this));
+                });
+                $('#dbg-actions .dbg-commission-code').on('click', function () {
+                    recommissionDevice($(this).data('uid'), label);
+                });
+            } else {
+                $('#dbg-actions').html(
+                    '<span class="dbg-warn">No device id in this context — commission from the device card.</span>');
+            }
+            loadDebugServer();
+            pollDebugLog();
+            _debugLogTimer = setInterval(pollDebugLog, 2000);
+            return;
         }
+        $('#dbg-actions').html(
+            `<div class="dbg-act-row">`
+            + `<button class="btn btn-small btn-secondary dbg-cmd" data-node="${nodeId}" data-cmd="on">Test ON</button>`
+            + ` <button class="btn btn-small btn-secondary dbg-cmd" data-node="${nodeId}" data-cmd="off">Test OFF</button>`
+            + ` <input type="number" id="dbg-level-val" class="dbg-level-input" min="0" max="100" value="50" title="level 0-100">`
+            + ` <button class="btn btn-small btn-secondary dbg-level" data-node="${nodeId}">Set level</button>`
+            + `</div>`
+            + `<div class="dbg-act-row">`
+            + (hasUid
+                ? `<button class="btn btn-small btn-secondary dbg-recomm-code" data-uid="${uniqueId}"`
+                  + ` title="Decommission first if needed, then re-pair with a manual pairing/setup code">Recommission (code)</button> `
+                : '')
+            + `<button class="btn btn-small btn-danger dbg-decomm" data-node="${nodeId}" data-keep="true"`
+            + ` title="Remove only our ORPHANED fabrics — frees slots, keeps the device controllable">Clear our orphans</button>`
+            + ` <button class="btn btn-small btn-danger dbg-decomm" data-node="${nodeId}" data-keep="false"`
+            + ` title="Remove ALL our fabrics — fully leave this device">Decommission (leave)</button>`
+            + `</div>`);
+        $('#dbg-actions .dbg-recomm-code').on('click', function () {
+            recommissionDevice($(this).data('uid'), label);
+        });
+        $('#dbg-actions .dbg-cmd').on('click', function () {
+            sendMatterTest($(this).data('node'), $(this).data('cmd'), label);
+        });
+        $('#dbg-actions .dbg-level').on('click', function () {
+            const v = parseInt($('#dbg-level-val').val(), 10);
+            if (isNaN(v) || v < 0 || v > 100) { showToast('Enter a level 0-100', 'error'); return; }
+            sendMatterLevel($(this).data('node'), v, label);
+        });
+        $('#dbg-actions .dbg-decomm').on('click', function () {
+            decommissionNode($(this).data('node'), String($(this).data('keep')) === 'true');
+        });
+
+        loadDebugServer();
+        loadDebugFabrics(nodeId, label);
+        loadDebugNode(nodeId);
+        pollDebugLog();
+        _debugLogTimer = setInterval(pollDebugLog, 2000);
+    }
+
+    function closeMatterDebug() {
+        if (_debugLogTimer) { clearInterval(_debugLogTimer); _debugLogTimer = null; }
+        $(document).off('keydown.matterDebug');
+        $('#matter-debug-overlay').remove();
+    }
+
+    function loadDebugServer() {
+        $.getJSON('/api/matter/server/diagnostics').done(function (d) {
+            const b = d.breaker || {};
+            $('#dbg-server').html(
+                `<strong>matter-server</strong> — connected: <b>${d.connected}</b> · `
+                + `breaker: <b>${b.state || '?'}</b> (fails ${b.failure_count ?? '?'})<br>`
+                + `nodes: <b>${d.nodes_available ?? '?'}/${d.nodes_total ?? '?'}</b> reachable`
+                + (d.nodes_unavailable && d.nodes_unavailable.length
+                    ? ` · <span class="dbg-bad">unreachable: ${d.nodes_unavailable.join(', ')}</span>` : ''));
+        }).fail(function (x) { $('#dbg-server').text('server diag failed: ' + (x.responseJSON?.detail || x.statusText)); });
+    }
+
+    function loadDebugFabrics(nodeId, label) {
+        $.getJSON(`/api/matter/nodes/${nodeId}/fabrics`).done(function (f) {
+            const rows = (f.fabrics || []).map(function (fab) {
+                const owner = fab.is_current ? '<b class="dbg-cur">CURRENT (ours)</b>'
+                    : (fab.is_ours ? '<b class="dbg-bad">ORPHAN (ours)</b>' : 'other');
+                const rm = (fab.is_ours && !fab.is_current)
+                    ? `<button class="btn btn-small btn-danger dbg-remove-fabric" data-node="${nodeId}" data-idx="${fab.index}">Remove</button>` : '';
+                return `<tr><td>${fab.index}</td><td>${fab.vendor_id}</td>`
+                    + `<td>${escapeHtml(fab.label || '')}</td><td>${owner}</td><td>${rm}</td></tr>`;
+            }).join('');
+            $('#dbg-fabrics').html(
+                `<strong>Fabric table — ${f.commissioned_fabrics}/${f.max_fabrics}`
+                + `${f.full ? ' <span class="dbg-bad">FULL</span>' : ''}</strong> · our orphans: <b>${f.our_orphan_count}</b>`
+                + `<table class="dbg-fab-table"><tr><th>idx</th><th>vendor</th><th>label</th><th>owner</th><th></th></tr>${rows}</table>`);
+            // Action buttons (on/off/level/decommission) are rendered
+            // UNCONDITIONALLY in openMatterDebug — NOT here — so they survive a
+            // failed fabric read. Only the per-fabric Remove buttons (in the
+            // table above) are wired here.
+            $('.dbg-remove-fabric').off('click').on('click', function () { removeFabric($(this).data('node'), $(this).data('idx')); });
+        }).fail(function (x) { $('#dbg-fabrics').text('fabric read failed: ' + (x.responseJSON?.detail || x.statusText)); });
+    }
+
+    function loadDebugNode(nodeId) {
+        $.getJSON(`/api/matter/nodes/${nodeId}/diagnostics`).done(function (d) {
+            $('#dbg-node').html(
+                `<strong>Node</strong> — available: <b>${d.available}</b> · OnOff: <b>${d.on_off}</b> · `
+                + `level: ${d.current_level ?? '—'} · endpoints: ${d.endpoints} · attrs: ${d.attribute_count}`);
+        }).fail(function (x) { $('#dbg-node').text('node diag failed: ' + (x.responseJSON?.detail || x.statusText)); });
+    }
+
+    function pollDebugLog() {
+        $.getJSON(`/api/matter/debug/log?since_seq=${_debugLogSeq}&limit=100`).done(function (d) {
+            const $log = $('#dbg-log');
+            if (!$log.length) return;
+            if (d.records && d.records.length) {
+                const el = $log[0];
+                const atBottom = el && (el.scrollHeight - el.scrollTop - el.clientHeight < 40);
+                d.records.forEach(function (r) {
+                    const cls = r.level === 'ERROR' ? 'dbg-bad' : (r.level === 'WARNING' ? 'dbg-warn' : '');
+                    $log.append(`<span class="${cls}">${r.ts.slice(11, 19)} ${r.level[0]} ${escapeHtml(r.msg)}</span>\n`);
+                });
+                _debugLogSeq = d.last_seq;
+                if (atBottom && el) el.scrollTop = el.scrollHeight;
+            }
+            $('#dbg-logstate').text(`seq ${_debugLogSeq}`);
+        });
+    }
+
+    function removeFabric(nodeId, idx) {
+        if (!confirm(`RemoveFabric index ${idx} from node ${nodeId}?\n\nRemote command (no device reset). Removing an ORPHANED fabric frees one slot.`)) return;
+        $.ajax({ url: `/api/matter/nodes/${nodeId}/fabrics/${idx}/remove`, method: 'POST', contentType: 'application/json', data: '{}' })
+            .done(function () { showToast(`Removed fabric ${idx}`, 'success'); loadDebugFabrics(nodeId); loadDebugServer(); })
+            .fail(function (x) { showToast('RemoveFabric failed: ' + (x.responseJSON?.detail || 'error'), 'error'); });
+    }
+
+    function decommissionNode(nodeId, keepCurrent) {
+        const msg = keepCurrent
+            ? `Clear our ORPHANED fabrics from node ${nodeId}?\n\nFrees slots; keeps the device controllable via our current fabric. Remote — no reset.`
+            : `FULLY decommission node ${nodeId}?\n\nRemoves ALL our fabrics — we leave the device (it stays on Hubitat/others). Re-commission to control it again.`;
+        if (!confirm(msg)) return;
+        showModal(`Decommissioning node ${nodeId}`, keepCurrent ? 'Removing orphaned fabrics…' : 'Removing all our fabrics…', 'loading');
+        $.ajax({ url: `/api/matter/nodes/${nodeId}/decommission`, method: 'POST', contentType: 'application/json', data: JSON.stringify({ keep_current: keepCurrent }) })
+            .done(function (d) {
+                const errs = (d.errors && d.errors.length) ? '\nErrors: ' + JSON.stringify(d.errors) : '';
+                showModal(`Node ${nodeId} decommission`, `Removed indices: [${(d.removed_indices || []).join(', ') || 'none'}]${errs}`, errs ? 'error' : 'success');
+                if ($('#matter-debug-overlay').length) loadDebugFabrics(nodeId);
+                loadNodes();
+            })
+            .fail(function (x) { showModal('Decommission failed', x.responseJSON?.detail || 'error', 'error'); });
+    }
+
+    function decommissionAll() {
+        // TWO-STEP FLOW, abort-safe at every step (2026-07-12 — the previous
+        // version overloaded confirm()'s Cancel button to mean "FULLY LEAVE
+        // every device", so there was NO safe way to dismiss the dialog).
+        // Step 1 offers the safe default; Cancel there goes to step 2, where
+        // the destructive option needs its OWN explicit OK; Cancel = abort.
+        let keep;
+        if (confirm('DECOMMISSION ALL — safe option first:\n\n'
+                  + 'OK = clear ORPHANED fabrics only (recommended — devices stay '
+                  + 'controllable via our current fabric).\n'
+                  + 'Cancel = show the full-leave option instead.')) {
+            keep = true;
+        } else if (confirm('FULLY LEAVE every device?\n\n'
+                  + 'Removes ALL our fabrics from every commissioned node (NOT a device '
+                  + 'reset — devices stay on Hubitat/other fabrics). Rows return to '
+                  + '"uncommissioned" and their mappings are deleted; re-commission any time.\n\n'
+                  + 'OK = fully leave every device.\nCancel = do nothing.')) {
+            keep = false;
+        } else {
+            return;   // real abort path
+        }
+        showModal('Decommission all', keep ? 'Clearing orphaned fabrics on every node…'
+                                           : 'Fully leaving every node…', 'loading');
+        $.ajax({ url: '/api/matter/decommission-all', method: 'POST', contentType: 'application/json', data: JSON.stringify({ keep_current: keep }) })
+            .done(function (d) {
+                const rec = d.reconciled
+                    ? ` DB reconciled: ${d.reconciled.devices_reconciled} device row(s) uncommissioned, ${d.reconciled.mappings_deleted} mapping(s) deleted.`
+                    : '';
+                showModal('Decommission all complete',
+                          `${d.count} nodes processed (keep_current=${d.keep_current}).${rec}`, 'success');
+                loadNodes(); loadMappings(); loadDiscoveredDevices();
+            })
+            .fail(function (x) { showModal('Decommission all failed', x.responseJSON?.detail || 'error', 'error'); });
     }
 
     // =========================================================================
@@ -555,8 +1221,344 @@ $(document).ready(function () {
     }
 
     /**
-     * Trigger a scan of all Hubitat hubs for Matter devices.
+     * Remove (or force-remove) a single discovered device. Soft-delete keeps
+     * our row (+ id) and marks it removed, so a re-scan brings it back. force
+     * skips the fabric decommission (DB-only) for dead/ghost devices.
+     */
+    function removeDiscovered(uniqueId, name, force) {
+        const Verb = force ? 'Force-remove' : 'Remove';
+        if (!confirm(
+            `${Verb} "${name}"?\n\n`
+            + (force
+                ? 'DB-only soft-delete (skips decommission — for dead/ghost devices). '
+                : 'Decommissions from our fabric, then soft-deletes. ')
+            + 'The row is kept — a re-scan brings it back.')) {
+            return;
+        }
+        showModal(`${Verb}ing "${name}"`,
+            (force ? 'Soft-deleting (force)' : 'Decommissioning + soft-deleting') + ` "${name}"…`, 'loading');
+        $.ajax({
+            url: `/api/matter/discovered/${encodeURIComponent(uniqueId)}/remove`,
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ force: !!force })
+        })
+        .done(function (data) {
+            const extra = data.decommissioned ? ' Decommissioned from our fabric.'
+                : (data.decommission_error ? ` (decommission: ${data.decommission_error})` : '');
+            const body = data.purged
+                ? `PURGED — the Hubitat device no longer exists (admin API 404), so the row was deleted entirely and won't resurrect on a re-scan.${extra}`
+                : `Soft-deleted — the row + our id are kept, so a re-scan brings it back.${extra}`;
+            showModal(data.purged ? `Purged "${name}"` : `Removed "${name}"`, body, 'success');
+            loadDiscoveredDevices();
+            loadNodes();
+        })
+        .fail(function (xhr) {
+            showModal(`${Verb} failed`, xhr.responseJSON?.detail || 'Unknown error', 'error');
+        });
+    }
+
+    /**
+     * Remove (or force-remove) ALL discovered devices at once. Soft-delete —
+     * every row kept + marked removed; a re-scan restores them all.
+     */
+    function removeAllDiscovered(force) {
+        const Verb = force ? 'Force-remove ALL' : 'Remove ALL';
+        if (!confirm(
+            `${Verb} discovered devices?\n\n`
+            + 'Soft-deletes every device (rows kept — a re-scan brings them all back). '
+            + (force ? 'Force = DB-only, skips decommission.' : 'Decommissions each from our fabric.'))) {
+            return;
+        }
+        showModal(Verb, 'Removing all discovered devices…', 'loading');
+        $.ajax({
+            url: '/api/matter/discovered/remove-all',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ force: !!force })
+        })
+        .done(function (data) {
+            showModal('Removed all',
+                `Soft-deleted ${data.removed}/${data.total} devices (kept for rediscovery).`, 'success');
+            loadDiscoveredDevices();
+            loadNodes();
+        })
+        .fail(function (xhr) {
+            showModal(`${Verb} failed`, xhr.responseJSON?.detail || 'Unknown error', 'error');
+        });
+    }
+
+    /**
+     * Recommission a device using a MANUAL pairing/setup code. If it's already
+     * one of our nodes, decommission it first (a broken-but-in-fabric node has
+     * to be recreated), then commission_with_code. The code comes from the
+     * device's QR or Hubitat's "Get Setup Code" (paste it fast — the Hubitat
+     * pairing window is short-lived).
+     */
+    function recommissionDevice(uniqueId, name) {
+        const d = (discoveredDevices || []).find(x => x.unique_id === uniqueId) || {};
+        const hasNode = d.our_node_id != null;
+        // Recommission via the LIVE-LOG modal; if it's already a node of ours,
+        // decommission it first (preStep) so the fabric slot is freed before
+        // the re-pair. The code field takes a Hubitat "Get Setup Code" / HomeKit
+        // "Pair with Other Platforms" code (already-paired devices) or the
+        // factory QR/label (factory-new). CHIP-level cause streams in the log.
+        openCommissionModal({
+            title: `Recommission ${name} (code)`,
+            subtitle: hasNode ? `currently node ${d.our_node_id} — decommissioned first` : 'not yet in our fabric',
+            needsCode: true,
+            preStep: hasNode ? function () {
+                return $.ajax({
+                    url: `/api/matter/devices/${d.our_node_id}/remove`, method: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({ reason: 'recommission (manual code)' })
+                });
+            } : null,
+            run: (code) => ({ url: '/api/matter/commission', body: { code } }),
+        });
+    }
+
+    /**
+     * Scan the LAN DIRECTLY over mDNS (_matterc._udp) for Matter devices in
+     * commissioning mode — no hub involved. Results are LIVE (not persisted):
+     * a device only announces while its pairing window is open. Devices also
+     * known via a hub are deduped (MAC → IP) and flagged, not duplicated;
+     * commissioning a flagged one ADDS our fabric via multi-admin.
+     */
+    function scanMdns() {
+        const $btn = $('#btn-scan-mdns');
+        const $c = $('#mdns-container');
+        $btn.prop('disabled', true).text('Scanning…');
+        $c.html('<div class="matter-empty">Browsing mDNS for commissionable Matter devices…</div>');
+        $.ajax({ url: '/api/matter/discover-mdns', method: 'POST', timeout: 60000 })
+        .done(function (d) {
+            const devs = d.devices || [];
+            if (!devs.length) {
+                $c.html('<div class="matter-empty">No devices in pairing mode right now. '
+                    + 'Put a device in commissioning mode (factory-new, or open a pairing window) and re-scan.</div>');
+                return;
+            }
+            let html = '';
+            devs.forEach(function (m, i) {
+                const dup = m.hub_match
+                    ? `<span class="mdns-dup-chip" title="Same physical device as hub-discovered '${escapeHtml(m.hub_match.device_name || '')}' on ${escapeHtml(m.hub_match.hub_name || '?')} (matched by MAC/IP). Commissioning here ADDS our fabric — it does not duplicate the device.">= ${escapeHtml(m.hub_match.device_name || 'hub device')} @${escapeHtml(m.hub_match.hub_name || '?')}</span>`
+                    : '<span class="mdns-new-chip" title="Not known to any hub — a pure Matter-direct device. No Hubitat fallback applies.">mDNS-only</span>';
+                const title = m.device_name || `vendor ${m.vendor_id} / product ${m.product_id}`;
+                html += `<div class="mdns-card">
+                    <div class="mdns-card-head"><strong>${escapeHtml(title)}</strong> ${dup}</div>
+                    <div class="mdns-card-body">
+                        IP: ${escapeHtml(m.ipv4 || '—')} · MAC: ${escapeHtml(m.mac || '—')} ·
+                        discriminator: ${m.long_discriminator ?? '—'} · mode: ${m.commissioning_mode}
+                    </div>
+                    <div class="mdns-card-actions">
+                        <button class="btn btn-small btn-primary mdns-commission" data-i="${i}"
+                                title="Commission this device directly into our Matter fabric — paste its QR string or numeric pairing code">Commission (code)</button>
+                    </div>
+                </div>`;
+            });
+            $c.html(html);
+            $c.find('.mdns-commission').on('click', function () {
+                const m = devs[$(this).data('i')];
+                openCommissionModal({
+                    title: `Commission ${m.device_name || 'device'} — direct, no hub`,
+                    subtitle: `${m.ipv4 || ''} ${m.mac ? '· ' + m.mac : ''}`,
+                    needsCode: true,
+                    run: (code) => ({ url: '/api/matter/commission', body: { code } }),
+                });
+            });
+        })
+        .fail(function (xhr) {
+            $c.html(`<div class="matter-empty">mDNS scan failed: ${escapeHtml(xhr.responseJSON?.detail || 'error')}</div>`);
+        })
+        .always(function () { $btn.prop('disabled', false).text('Scan mDNS'); });
+    }
+
+    /**
+     * Load the Matter hub selection (single-hub policy): fills the header
+     * dropdown with every hub and selects THE Matter hub (persisted choice, or
+     * the main/primary hub by default).
+     */
+    // =========================================================================
+    // Commission modal with LIVE matter-client log (all sources: mDNS, hub
+    // card, recommission). Commissioning is the highest-stakes Matter op and
+    // was previously a blind spinner + opaque result; now the operator watches
+    // the CHIP-level log stream as it happens (same tail as the debug console).
+    // =========================================================================
+    let _commLogTimer = null, _commLogSeq = 0, _commSrvOffset = -1, _commSrvAvail = false;
+
+    function _commAppend($log, html) {
+        const el = $log[0];
+        const atBottom = el && (el.scrollHeight - el.scrollTop - el.clientHeight < 40);
+        $log.append(html);
+        if (atBottom && el) el.scrollTop = el.scrollHeight;
+    }
+
+    function pollCommLog() {
+        const $log = $('#comm-log');
+        if (!$log.length) return;
+        // 1) client op-log (our WS commands/results)
+        $.getJSON(`/api/matter/debug/log?since_seq=${_commLogSeq}&limit=120`).done(function (d) {
+            if (d.records && d.records.length) {
+                let html = '';
+                d.records.forEach(function (r) {
+                    const cls = r.level === 'ERROR' ? 'dbg-bad' : (r.level === 'WARNING' ? 'dbg-warn' : '');
+                    html += `<span class="${cls}">${r.ts.slice(11, 19)} <b>[cli]</b> ${escapeHtml(r.msg)}</span>\n`;
+                });
+                _commAppend($log, html);
+                _commLogSeq = d.last_seq;
+            }
+            $('#comm-logstate').text(`cli seq ${_commLogSeq}${_commSrvAvail ? ' · srv live' : ''}`);
+        });
+        // 2) matter-server CHIP log (the AddNOC / attestation / error-code detail)
+        $.getJSON(`/api/matter/server-log?since=${_commSrvOffset}`).done(function (s) {
+            _commSrvAvail = !!s.available;
+            if (s.available && s.lines && s.lines.length && _commSrvOffset >= 0) {
+                let html = '';
+                s.lines.forEach(function (ln) {
+                    const low = ln.toLowerCase();
+                    const cls = (low.includes('error') || low.includes('(133)') || low.includes('failed')
+                                 || low.includes('invalidcommand')) ? 'dbg-bad'
+                              : (low.includes('warn') ? 'dbg-warn' : 'dbg-srv');
+                    html += `<span class="${cls}"><b>[srv]</b> ${escapeHtml(ln)}</span>\n`;
+                });
+                _commAppend($log, html);
+            }
+            if (s.available) _commSrvOffset = s.offset;  // first poll just seeds the tail offset
+        });
+    }
+
+    function closeCommissionModal() {
+        if (_commLogTimer) { clearInterval(_commLogTimer); _commLogTimer = null; }
+        $(document).off('keydown.matterComm');
+        $('#matter-commission-overlay').remove();
+    }
+
+    /**
+     * Open the live-log commission modal.
+     * @param {object} opts
+     *   title       header text
+     *   subtitle    grey mono subtitle (e.g. the IP)
+     *   needsCode   true = show a pairing-code input; false = one Start button
+     *   code        prefill for the code input
+     *   preStep     optional async () => Promise run before the commission POST
+     *               (e.g. decommission-first for recommission)
+     *   run         (code) => ({url, body}) — the commission request
+     *   successText optional (resp) => string
+     */
+    function openCommissionModal(opts) {
+        closeCommissionModal();
+        _commLogSeq = 0; _commSrvOffset = -1; _commSrvAvail = false;
+        const codeRow = opts.needsCode
+            ? `<div class="comm-code-row">
+                 <input type="text" id="comm-code-input" class="comm-code-input"
+                        placeholder="Paste pairing code — MT:… QR string or numeric" value="${escapeHtml(opts.code || '')}">
+                 <button class="btn btn-small btn-primary" id="comm-start">Commission</button>
+               </div>`
+            : `<div class="comm-code-row"><button class="btn btn-small btn-primary" id="comm-start">Start commissioning</button></div>`;
+        $('body').append(`
+          <div id="matter-commission-overlay" class="matter-debug-overlay">
+            <div class="matter-debug matter-commission">
+              <div class="matter-debug-head">
+                <h3>${escapeHtml(opts.title)} <span class="dbg-mono">${escapeHtml(opts.subtitle || '')}</span></h3>
+                <button class="btn btn-small btn-secondary matter-debug-close">Close</button>
+              </div>
+              <div class="comm-body">
+                ${codeRow}
+                <div id="comm-status" class="comm-status">Live matter-client log streaming — start when ready.</div>
+                <div class="matter-debug-logbar">Live matter-client log <span class="dbg-mono" id="comm-logstate"></span></div>
+                <pre class="matter-debug-log comm-log" id="comm-log"></pre>
+              </div>
+            </div>
+          </div>`);
+        $('#matter-commission-overlay').on('click', function (e) {
+            if ($(e.target).is('#matter-commission-overlay') || $(e.target).is('.matter-debug-close')) closeCommissionModal();
+        });
+        $(document).on('keydown.matterComm', function (e) { if (e.key === 'Escape') closeCommissionModal(); });
+        $('#comm-start').on('click', function () {
+            const code = opts.needsCode ? $('#comm-code-input').val().trim() : null;
+            if (opts.needsCode && !code) { showToast('Paste a pairing code first', 'error'); return; }
+            runCommission(opts, code);
+        });
+        // Stream the log immediately, so pre-commission activity is visible too.
+        pollCommLog();
+        _commLogTimer = setInterval(pollCommLog, 1000);
+    }
+
+    function runCommission(opts, code) {
+        $('#comm-start').prop('disabled', true).text('Working…');
+        const setStatus = (cls, txt) => $('#comm-status').removeClass('loading success error').addClass(cls).text(txt);
+        const doPost = function () {
+            const rb = opts.run(code);
+            setStatus('loading', 'Commissioning — watch the log below (can take 30–90s)…');
+            $.ajax({ url: rb.url, method: 'POST', contentType: 'application/json',
+                     data: JSON.stringify(rb.body || {}), timeout: 180000 })
+            .done(function (r) {
+                const node = (r.node && (r.node.node_id ?? r.node)) ?? r.our_node_id;
+                const cleaned = (r.orphans_cleared && r.orphans_cleared.length)
+                    ? ` · self-cleaned ${r.orphans_cleared.length} orphan fabric(s)` : '';
+                setStatus('success', opts.successText ? opts.successText(r)
+                    : `Commissioned — node ${node ?? '?'}${cleaned}.`);
+                pollCommLog();
+                loadNodes(); loadDiscoveredDevices(); loadMappings();
+            })
+            .fail(function (xhr) {
+                let msg = xhr.responseJSON?.detail;
+                if (!msg) {
+                    msg = (xhr.status === 502 || xhr.status === 504 || xhr.status === 0)
+                        ? `HTTP ${xhr.status || 'timeout'} with no detail — commissioning can outlast a proxy timeout; `
+                          + `it may still have completed (see the log below / Refresh for a new node).`
+                        : `HTTP ${xhr.status}: ${xhr.statusText || 'commission failed'}`;
+                }
+                setStatus('error', 'Failed: ' + msg);
+                pollCommLog();
+            })
+            .always(function () {
+                $('#comm-start').prop('disabled', false).text(opts.needsCode ? 'Commission' : 'Start commissioning');
+            });
+        };
+        if (opts.preStep) {
+            setStatus('loading', 'Preparing (decommissioning existing node first)…');
+            Promise.resolve(opts.preStep()).then(doPost).catch(doPost);  // proceed even if pre-step errors
+        } else {
+            doPost();
+        }
+    }
+
+    function updateHubToggleLabel(selected) {
+        const $t = $('#matter-hub-toggle');
+        if (!$t.length) return;
+        const names = (selected || []).map(h => h.hub_name);
+        $t.text(names.length ? `Matter hubs: ${names.join(', ')} ▾` : 'Select Matter hubs ▾');
+    }
+
+    function loadMatterHub() {
+        $.getJSON('/api/matter/hub').done(function (d) {
+            const $panel = $('#matter-hub-panel');
+            if (!$panel.length) return;
+            const selIds = new Set(d.selected_ids || []);
+            $panel.empty();
+            (d.hubs || []).forEach(function (h) {
+                // Thread badge: C-8 family hubs have a BUILT-IN Thread border
+                // router — decides whether Thread Matter devices can commission
+                // through this hub (the "?" beside the picker explains it).
+                const thread = h.has_thread_br ? ' · Thread' : '';
+                const hw = h.hardware_version ? ` [${h.hardware_version}]` : '';
+                const label = `${h.hub_name} (${h.hub_ip})${hw}${thread}${h.is_primary ? ' — main' : ''}`;
+                $panel.append(
+                    `<label class="matter-hub-opt"><input type="checkbox" class="matter-hub-cb" value="${h.id}"`
+                    + `${selIds.has(h.id) ? ' checked' : ''}> ${escapeHtml(label)}</label>`);
+            });
+            updateHubToggleLabel(d.selected || []);
+        }).fail(function () {
+            $('#matter-hub-panel').html('<div class="matter-hub-opt">hubs unavailable</div>');
+        });
+    }
+
+    /**
+     * Trigger a scan of THE selected Matter hub for Matter devices
+     * (single-hub policy — never scans the other hubs).
      * Shows progress, then refreshes the discovered devices table.
+     * NEVER auto-commissions anything.
      */
     function scanHubs() {
         const $status = $('#scan-status');
@@ -564,7 +1566,7 @@ $(document).ready(function () {
 
         $status.removeClass('success error loading')
             .addClass('loading')
-            .text('Scanning all Hubitat hubs for Matter devices...')
+            .text('Scanning the selected Matter hub for Matter devices...')
             .show();
         $btn.prop('disabled', true);
 
@@ -576,7 +1578,7 @@ $(document).ready(function () {
         .done(function (data) {
             const count = data.discovered || 0;
             const errCount = data.errors ? data.errors.length : 0;
-            let msg = `Discovered ${count} device(s) across hubs.`;
+            let msg = `Discovered ${count} device(s) on the Matter hub.`;
             if (errCount > 0) {
                 msg += ` ${errCount} hub(s) had errors.`;
             }
@@ -584,12 +1586,11 @@ $(document).ready(function () {
             loadDiscoveredDevices();
             // Also refresh nodes in case some were already commissioned
             loadNodes();
-
-            // Auto-commission all online, uncommissioned devices
-            if (count > 0) {
-                $status.text(msg + ' Starting auto-commission...');
-                commissionAll($status, msg);
-            }
+            // NOTE: scanning NEVER auto-commissions. The scan→commissionAll
+            // auto-chain that used to live here (since 2026-02-21) was removed
+            // 2026-07-11 — it mass-commissioned every device after each scan
+            // click, saturating device fabric slots ("CHIP 0x0B No memory").
+            // Bulk commissioning is ONLY the explicit "Commission All" button.
         })
         .fail(function (xhr) {
             const detail = xhr.responseJSON?.detail || 'Scan failed';
@@ -610,7 +1611,7 @@ $(document).ready(function () {
 
         if (discoveredDevices.length === 0) {
             $container.html(
-                '<div class="matter-empty">No discovered devices yet. Click "Scan All Hubs" to start.</div>'
+                '<div class="matter-empty">No discovered devices yet. Click "Scan Hub" to scan the selected Matter hub.</div>'
             );
             return;
         }
@@ -632,24 +1633,55 @@ $(document).ready(function () {
                             : conf === 'manual' ? 'badge-info'
                             : 'badge-none';
 
-            // Maker API match
+            // Matched Hubitat device — link straight to its page on the hub
+            // (this IS the Hubitat section, so every card links out to Hubitat;
+            // operator directive 2026-07-09).
             const matchDisplay = d.maker_api_device_name
-                ? `${escapeHtml(d.maker_api_device_name)} (#${d.maker_api_device_id})`
+                ? `<a class="matter-hub-link" href="http://${escapeHtml(d.hub_ip)}/device/edit/${d.maker_api_device_id}" target="_blank" rel="noopener" title="Open this device on the Hubitat hub">${escapeHtml(d.maker_api_device_name)} (#${d.maker_api_device_id}) ↗</a>`
                 : '<span class="text-muted">No match</span>';
 
-            // Actions
-            let actionHtml;
-            if (isCommissioned) {
-                actionHtml = `<span class="badge badge-success">Node ${d.our_node_id}</span>`;
-            } else if (!online) {
-                actionHtml = `<button class="btn btn-small btn-secondary btn-rescan-device"
+            // Actions. Operator directive 2026-07-09: EVERY card shows a
+            // Commission button (previously it was hidden for offline devices —
+            // they only got Rescan — and for already-commissioned ones, which
+            // only showed a node badge). We keep those as *extra* affordances
+            // but always expose Commission (labelled "Re-commission" when the
+            // device is already in our fabric). Test ON/OFF is on every card too,
+            // each reporting its result in a modal.
+            let actionHtml = '';
+            actionHtml += `<button class="btn btn-small btn-secondary btn-test-discovered"
+                            data-uid="${uid}" data-command="on"
+                            title="Send ON to this device and report the result">Test ON</button>`;
+            actionHtml += `<button class="btn btn-small btn-secondary btn-test-discovered"
+                            data-uid="${uid}" data-command="off"
+                            title="Send OFF to this device and report the result">Test OFF</button>`;
+            if (!online) {
+                actionHtml += `<button class="btn btn-small btn-secondary btn-rescan-device"
                                 data-unique-id="${uid}" data-hub-ip="${escapeHtml(d.hub_ip)}"
-                                data-node-id="${d.hubitat_node_id}" title="Rescan this device">Rescan</button>`;
-            } else {
-                actionHtml = `<button class="btn btn-small btn-primary btn-auto-commission"
-                            data-unique-id="${uid}"
-                            data-device-name="${name}">Commission</button>`;
+                                data-node-id="${d.hubitat_node_id}"
+                                title="Rescan this device's hub to refresh online status">Rescan</button>`;
             }
+            actionHtml += `<button class="btn btn-small btn-primary btn-auto-commission"
+                            data-unique-id="${uid}" data-device-name="${name}"
+                            title="${isCommissioned
+                                ? 'Re-commission: open a fresh pairing window and re-pair into our fabric'
+                                : (online ? 'Commission into our Matter fabric'
+                                          : 'Try commissioning — device is offline, this may fail')}">${isCommissioned ? 'Re-commission' : 'Commission'}</button>`;
+            actionHtml += `<button class="btn btn-small btn-secondary btn-recommission-code"
+                            data-uid="${uid}" data-name="${name}"
+                            title="Recommission with a manual pairing/setup code — decommissions first if it's already a node, then re-pairs">Recommission (code)</button>`;
+            actionHtml += `<button class="btn btn-small btn-danger btn-remove-discovered"
+                            data-uid="${uid}" data-name="${name}"
+                            title="Remove: decommission from our fabric + soft-delete (row kept, a re-scan brings it back)">Remove</button>`;
+            actionHtml += `<button class="btn btn-small btn-danger btn-force-remove-discovered"
+                            data-uid="${uid}" data-name="${name}"
+                            title="Force remove: DB-only soft-delete, skips decommission — for dead/ghost devices">Force</button>`;
+            // Debug on EVERY card — commissioned or not (operator ask: a
+            // decommissioned device must still open the console for server
+            // diagnostics + the live log; node-scoped sections degrade
+            // gracefully when there's no node).
+            actionHtml += `<button class="btn btn-small btn-secondary btn-debug-node"
+                            data-node="${d.our_node_id != null ? d.our_node_id : ''}" data-name="${name}" data-uid="${uid}"
+                            title="Matter debug console — fabric table, per-fabric remove, commission/decommission, live log">Debug</button>`;
 
             // Detail rows for expandable section
             const mac = d.mac_address ? escapeHtml(d.mac_address) : '<span class="text-muted">unknown</span>';
@@ -660,44 +1692,55 @@ $(document).ready(function () {
             const dni = d.hubitat_dni ? escapeHtml(d.hubitat_dni) : '—';
             const lastSeen = d.last_seen_at ? new Date(d.last_seen_at).toLocaleString() : '—';
 
+            // Accordion card: a one-line clickable header (chevron + name +
+            // status + optional node badge) over a body that is COLLAPSED by
+            // default (`is-collapsed`). No persistence — every render/reload
+            // starts collapsed (operator directive 2026-07-09). All actions +
+            // info live in the body, where the action row is free to WRAP
+            // instead of crushing the name (the earlier ugly per-char wrap).
             html += `
-                <div class="device-card ${statusClass} ${isCommissioned ? 'commissioned' : ''}" data-uid="${uid}">
-                    <div class="device-card-header">
-                        <div class="device-card-title">
-                            <strong>${name}</strong>
-                            <span class="status-badge ${statusClass}">${statusLabel}</span>
-                        </div>
+                <div class="device-card ${statusClass} ${isCommissioned ? 'commissioned' : ''} is-collapsed" data-uid="${uid}">
+                    <button type="button" class="device-card-header" aria-expanded="false"
+                            title="Click to expand / collapse">
+                        <span class="device-card-chevron">&#9656;</span>
+                        <strong class="device-card-name">${name}</strong>
+                        <span class="status-badge ${statusClass}">${statusLabel}</span>
+                        ${isCommissioned ? `<span class="badge badge-success" title="In our Matter fabric as node ${d.our_node_id}">Node ${d.our_node_id}</span>` : ''}
+                    </button>
+                    <div class="device-card-body">
                         <div class="device-card-actions">
                             ${actionHtml}
-                            <button class="btn-link btn-expand-card" title="Show details">&#9660;</button>
                         </div>
-                    </div>
-                    <div class="device-card-summary">
-                        <span class="device-card-mfr">${escapeHtml(d.manufacturer || '')} ${escapeHtml(d.model || '')}</span>
-                        <span class="device-card-hub">${escapeHtml(d.hub_name || d.hub_ip)}</span>
-                        <span class="badge ${confClass}">${conf}</span>
-                    </div>
-                    <div class="device-card-match">
-                        <span class="match-current">${matchDisplay}</span>
-                        <button class="btn-link btn-change-match" data-unique-id="${uid}" title="Change match">edit</button>
-                    </div>
-                    <div class="device-card-details" style="display:none;">
-                        <div class="detail-toolbar">
-                            <button class="btn btn-secondary btn-small btn-copy btn-copy-details" title="Copy details">Copy</button>
+                        <div class="device-card-summary">
+                            <span class="device-card-mfr">${escapeHtml(d.manufacturer || '')} ${escapeHtml(d.model || '')}</span>
+                            <span class="device-card-hub">${escapeHtml(d.hub_name || d.hub_ip)}</span>
+                            ${(d.also_on_hubs && d.also_on_hubs.length)
+                                ? `<span class="also-on-chip" title="Same physical device (matched by MAC) is also paired on: ${escapeHtml(d.also_on_hubs.join(', '))}. Shown once; commissioned once via ${escapeHtml(d.hub_name || d.hub_ip)}.">+${d.also_on_hubs.length} hub${d.also_on_hubs.length > 1 ? 's' : ''}</span>`
+                                : ''}
+                            <span class="badge ${confClass}">${conf}</span>
                         </div>
-                        <table class="detail-table">
-                            <tr><td>MAC Address</td><td>${mac}</td></tr>
-                            <tr><td>IP Address</td><td>${ip}</td></tr>
-                            <tr><td>Unique ID</td><td><code>${uid}</code></td></tr>
-                            <tr><td>DNI</td><td>${dni}</td></tr>
-                            <tr><td>Hub Node</td><td>${d.hubitat_node_id || '—'}</td></tr>
-                            <tr><td>Hubitat Device ID</td><td>${d.hubitat_device_id || '—'}</td></tr>
-                            <tr><td>Firmware</td><td>${fw}</td></tr>
-                            <tr><td>Hardware</td><td>${hw}</td></tr>
-                            <tr><td>Serial</td><td>${serial}</td></tr>
-                            <tr><td>Last Seen</td><td>${lastSeen}</td></tr>
-                            ${isCommissioned ? `<tr><td>Our Node ID</td><td>${d.our_node_id}</td></tr>` : ''}
-                        </table>
+                        <div class="device-card-match">
+                            <span class="match-current">${matchDisplay}</span>
+                            <button class="btn-link btn-change-match" data-unique-id="${uid}" title="Change match">edit</button>
+                        </div>
+                        <div class="device-card-details">
+                            <div class="detail-toolbar">
+                                <button class="btn btn-secondary btn-small btn-copy btn-copy-details" title="Copy details">Copy</button>
+                            </div>
+                            <table class="detail-table">
+                                <tr><td>MAC Address</td><td>${mac}</td></tr>
+                                <tr><td>IP Address</td><td>${ip}</td></tr>
+                                <tr><td>Unique ID</td><td><code>${uid}</code></td></tr>
+                                <tr><td>DNI</td><td>${dni}</td></tr>
+                                <tr><td>Hub Node</td><td>${d.hubitat_node_id || '—'}</td></tr>
+                                <tr><td>Hubitat Device ID</td><td>${d.hubitat_device_id ? `<a class="matter-hub-link" href="http://${escapeHtml(d.hub_ip)}/device/edit/${d.hubitat_device_id}" target="_blank" rel="noopener" title="Open on the Hubitat hub">${d.hubitat_device_id} ↗</a>` : '—'}</td></tr>
+                                <tr><td>Firmware</td><td>${fw}</td></tr>
+                                <tr><td>Hardware</td><td>${hw}</td></tr>
+                                <tr><td>Serial</td><td>${serial}</td></tr>
+                                <tr><td>Last Seen</td><td>${lastSeen}</td></tr>
+                                ${isCommissioned ? `<tr><td>Our Node ID</td><td>${d.our_node_id}</td></tr>` : ''}
+                            </table>
+                        </div>
                     </div>
                 </div>
             `;
@@ -706,12 +1749,12 @@ $(document).ready(function () {
         html += '</div>';
         $container.html(html);
 
-        // Bind expand/collapse
-        $container.find('.btn-expand-card').on('click', function () {
-            const $card = $(this).closest('.device-card');
-            const $details = $card.find('.device-card-details');
-            $details.slideToggle(150);
-            $(this).html($details.is(':visible') ? '&#9650;' : '&#9660;');
+        // Bind accordion header toggle (expand/collapse the whole card body).
+        // No persistence by design — every render/reload starts collapsed.
+        $container.find('.device-card-header').on('click', function () {
+            const collapsed = $(this).closest('.device-card')
+                .toggleClass('is-collapsed').hasClass('is-collapsed');
+            $(this).attr('aria-expanded', String(!collapsed));
         });
 
         // Bind auto-commission buttons
@@ -721,6 +1764,25 @@ $(document).ready(function () {
                 $(this).data('device-name'),
                 $(this)
             );
+        });
+
+        // Bind per-card Test ON/OFF (discovered devices) — modal-reported.
+        $container.find('.btn-test-discovered').on('click', function () {
+            testDiscoveredDevice($(this).data('uid'), $(this).data('command'));
+        });
+
+        // Bind per-card Remove / Force-remove.
+        $container.find('.btn-remove-discovered').on('click', function () {
+            removeDiscovered($(this).data('uid'), $(this).data('name'), false);
+        });
+        $container.find('.btn-force-remove-discovered').on('click', function () {
+            removeDiscovered($(this).data('uid'), $(this).data('name'), true);
+        });
+        $container.find('.btn-debug-node').on('click', function () {
+            openMatterDebug($(this).data('node'), $(this).data('name'), $(this).data('uid'));
+        });
+        $container.find('.btn-recommission-code').on('click', function () {
+            recommissionDevice($(this).data('uid'), $(this).data('name'));
         });
 
         // Bind rescan buttons (individual offline device rescan)
@@ -766,81 +1828,106 @@ $(document).ready(function () {
      * commissions into our fabric, creates mapping.
      */
     function autoCommission(uniqueId, deviceName, $btn) {
-        $btn.prop('disabled', true).text('Commissioning...');
-
-        showModal(
-            `Commissioning "${deviceName}"`,
-            '1. Opening pairing window on Hubitat...\n2. Commissioning into matter-server...\n3. Creating Maker API mapping...',
-            'loading'
-        );
-
-        $.ajax({
-            url: '/api/matter/auto-commission',
-            method: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify({ unique_id: uniqueId }),
-            timeout: 180000  // 3 min timeout for commissioning
-        })
-        .done(function (data) {
-            $btn.replaceWith(
-                `<span class="badge badge-success">Commissioned (Node ${data.our_node_id || '?'})</span>`
-            );
-            showModal(
-                `Commissioned "${deviceName}"`,
-                `Node ID: ${data.our_node_id || '?'}\nMapped to Hubitat #${data.hubitat_device_id || '?'}`,
-                'success'
-            );
-            loadNodes();
-            loadMappings();
-            loadDiscoveredDevices();
-        })
-        .fail(function (xhr) {
-            const detail = xhr.responseJSON?.detail || 'Commission failed';
-            showModal(`Commission failed: ${deviceName}`, detail, 'error');
-            $btn.prop('disabled', false).text('Commission');
+        // Hub-card commission — via the LIVE-LOG modal so the operator sees the
+        // openPairingWindow → PASE/CASE → SendNOC steps as they happen. No code
+        // input: the backend fetches the setup code from the device's own hub.
+        openCommissionModal({
+            title: `Commission ${deviceName}`,
+            subtitle: 'opens a pairing window on the device’s hub, then commissions',
+            needsCode: false,
+            run: () => ({ url: '/api/matter/auto-commission', body: { unique_id: uniqueId } }),
         });
     }
 
     /**
-     * Commission ALL online, uncommissioned devices in bulk.
-     * Called automatically after scan, or manually via button.
+     * Commission ALL online, uncommissioned devices on the selected Matter hub.
+     * USER-INITIATED ONLY — runs from the "Commission All" button click and
+     * nothing else (the automatic after-scan trigger was removed 2026-07-11).
      * @param {jQuery} $status - optional status element to update progress
      * @param {string} baseMsg - optional base message to prepend to status
      */
     function commissionAll($status, baseMsg) {
+        // Explicit-user gate, both ends: this confirm dialog here, and the
+        // backend 409s any call that doesn't carry {confirmed:true} — so bulk
+        // commissioning can never fire without the operator asking.
+        //
+        // SEQUENTIAL + BACKGROUND (2026-07-12): the backend now commissions
+        // strictly ONE device at a time (Hubitat can only run one pairing
+        // window), with a settle pause between devices, as a background run.
+        // POST returns immediately; we POLL .../status and live-update the
+        // banner until the run finishes.
+        if (!confirm(
+            'Commission ALL online, uncommissioned devices on the selected Matter hubs?\n\n'
+            + 'Devices are commissioned ONE AT A TIME (a pairing window per device, '
+            + 'with a short settle pause between them so the hub keeps up). '
+            + 'Expect roughly 20-30s per device. Devices on unselected hubs are not touched.')) {
+            return;
+        }
         const statusEl = $status || $('#scan-status');
-        const prefix = baseMsg || '';
+        const prefix = baseMsg ? baseMsg + ' ' : '';
 
         statusEl.removeClass('success error')
             .addClass('loading')
-            .text(prefix + ' Commissioning all online devices...')
+            .text(prefix + 'Starting sequential commission run...')
             .show();
+
+        // Poll the background run until it reports running:false, painting
+        // progress (done/total + current device) into the banner as it goes.
+        function pollRun() {
+            $.ajax({ url: '/api/matter/auto-commission-all/status', method: 'GET' })
+            .done(function (st) {
+                if (st.running) {
+                    const cur = st.current ? ` — ${st.current}` : '';
+                    statusEl.text(`${prefix}Commissioning ${st.done}/${st.total}`
+                        + ` (ok ${st.ok}, failed ${st.failed})${cur}`);
+                    setTimeout(pollRun, 2500);
+                    return;
+                }
+                // Finished (or no run state after an app restart mid-run).
+                const msg = st.message || 'Commission run finished';
+                const cls = (st.failed > 0 || st.aborted) ? 'error' : 'success';
+                statusEl.removeClass('loading').addClass(cls).text(prefix + msg);
+                if (st.results) {
+                    const errs = st.results.filter(r => r.status === 'error');
+                    if (errs.length) console.warn('Commission failures:', errs);
+                }
+                // Refresh everything
+                loadNodes();
+                loadMappings();
+                loadDiscoveredDevices();
+            })
+            .fail(function () {
+                // Transient poll failure (reload/restart) — keep trying briefly.
+                setTimeout(pollRun, 4000);
+            });
+        }
 
         $.ajax({
             url: '/api/matter/auto-commission-all',
             method: 'POST',
-            timeout: 600000  // 10 min — commissioning each device takes time
+            contentType: 'application/json',
+            data: JSON.stringify({ confirmed: true }),
+            timeout: 30000  // start-only: the run itself is backgrounded
         })
         .done(function (data) {
-            let msg = prefix ? prefix + ' ' : '';
-            msg += data.message;
-            if (data.failed > 0) {
-                msg += ` (${data.failed} failed)`;
-                statusEl.removeClass('loading').addClass('success').text(msg);
-                // Log failures to console for debugging
-                console.warn('Commission failures:', data.results.filter(r => r.status === 'error'));
-            } else {
-                statusEl.removeClass('loading').addClass('success').text(msg);
+            if (!data.started) {   // nothing to do (0 devices)
+                statusEl.removeClass('loading').addClass('success')
+                    .text(prefix + (data.message || 'Nothing to commission'));
+                return;
             }
-            // Refresh everything
-            loadNodes();
-            loadMappings();
-            loadDiscoveredDevices();
+            statusEl.text(`${prefix}${data.message} — waiting for first device...`);
+            setTimeout(pollRun, 1500);
         })
         .fail(function (xhr) {
+            // 409 "already in progress" → just attach to the running job.
+            if (xhr.status === 409 && (xhr.responseJSON?.detail || '').includes('already in progress')) {
+                statusEl.text(prefix + 'A run is already in progress — attaching...');
+                setTimeout(pollRun, 1000);
+                return;
+            }
             const detail = xhr.responseJSON?.detail || 'Bulk commission failed';
             statusEl.removeClass('loading').addClass('error')
-                .text(prefix + ' Commission error: ' + detail);
+                .text(prefix + 'Commission error: ' + detail);
         });
     }
 
@@ -878,7 +1965,7 @@ $(document).ready(function () {
         $cell.find('.btn-save-match').on('click', function () {
             const makerDeviceId = $cell.find('.match-select').val();
             if (!makerDeviceId) {
-                showToast('Select a Maker API device.', 'error');
+                showToast('Select a Hubitat device.', 'error');
                 return;
             }
             saveMatch(uniqueId, makerDeviceId);
@@ -930,7 +2017,15 @@ $(document).ready(function () {
     function extractNodeName(node) {
         const nodeId = node.node_id || node.nodeId;
 
-        // First: backend-enriched name (cross-referenced via UniqueID → hubitat_matter_devices)
+        // First: the RESOLVED current canonical device label (2026-06-20).
+        // This is the authoritative current name and keeps the card title
+        // consistent with the "Mapped to <label>" line. Prevents the
+        // confusing case where Hubitat carries two names for one device
+        // (e.g. admin/canonical 'TV POWER' vs Maker-API 'TV') and the card
+        // showed the Maker name while mapping to the canonical one.
+        if (node._canonical_label) return node._canonical_label;
+
+        // Then: backend-enriched name (Maker/discovery name).
         if (node._device_name) return node._device_name;
 
         // Second: check our mapping table for a friendly name
@@ -1092,4 +2187,119 @@ $(document).ready(function () {
             setTimeout(() => $toast.remove(), 300);
         }, 3000);
     }
+
+    // =========================================================================
+    // MATTER TERMINAL DOCK (2026-07-12) — persistent right-side live terminal
+    // streaming the SAME two feeds as the commission modal, page-wide:
+    //   [cli] /api/matter/debug/log     (our WS commands/results, seq cursor)
+    //   [srv] /api/matter/server-log    (matterjs CHIP log, byte-offset cursor)
+    // Separate cursors from the modal's so both can run at once. Collapsible
+    // (edge tab), drag-resizable via the left grip (320px..95vw), both
+    // persisted in localStorage. Polling stops while collapsed or hidden.
+    // =========================================================================
+    const _DOCK_POLL_MS = 1500, _DOCK_MAX_LINES = 2500;
+    let _dockTimer = null, _dockCliSeq = 0, _dockSrvOffset = -1, _dockPaused = false;
+
+    function _dockAppend(html) {
+        const $log = $('#matter-dock-log');
+        const el = $log[0];
+        if (!el) return;
+        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        $log.append(html);
+        // Trim the oldest lines so an all-night session can't grow unbounded.
+        const kids = el.children;
+        if (kids.length > _DOCK_MAX_LINES) {
+            for (let i = kids.length - _DOCK_MAX_LINES; i > 0; i--) el.removeChild(el.firstChild);
+        }
+        if (atBottom) el.scrollTop = el.scrollHeight;
+    }
+
+    function _dockPoll() {
+        if (_dockPaused) return;
+        const showCli = $('#dock-show-cli').is(':checked');
+        const showSrv = $('#dock-show-srv').is(':checked');
+        // 1) client op-log — cursor always advances (even when hidden) so
+        //    re-enabling [cli] doesn't dump the backlog.
+        $.getJSON(`/api/matter/debug/log?since_seq=${_dockCliSeq}&limit=120`).done(function (d) {
+            if (d.records && d.records.length) {
+                if (showCli) {
+                    let html = '';
+                    d.records.forEach(function (r) {
+                        const cls = r.level === 'ERROR' ? 'dbg-bad' : (r.level === 'WARNING' ? 'dbg-warn' : '');
+                        html += `<span class="${cls}">${r.ts.slice(11, 19)} <b>[cli]</b> ${escapeHtml(r.msg)}</span>\n`;
+                    });
+                    _dockAppend(html);
+                }
+                _dockCliSeq = d.last_seq;
+            }
+            $('#matter-dock-state').text(`cli seq ${_dockCliSeq} · srv @${_dockSrvOffset}${_dockPaused ? ' · PAUSED' : ''}`);
+        });
+        // 2) matterjs CHIP log — first poll only seeds the tail offset.
+        $.getJSON(`/api/matter/server-log?since=${_dockSrvOffset}`).done(function (s) {
+            if (s.available && s.lines && s.lines.length && _dockSrvOffset >= 0 && showSrv) {
+                let html = '';
+                s.lines.forEach(function (ln) {
+                    const low = ln.toLowerCase();
+                    const cls = (low.includes('error') || low.includes('(133)') || low.includes('failed')
+                                 || low.includes('invalidcommand')) ? 'dbg-bad'
+                              : (low.includes('warn') ? 'dbg-warn' : 'dbg-srv');
+                    html += `<span class="${cls}"><b>[srv]</b> ${escapeHtml(ln)}</span>\n`;
+                });
+                _dockAppend(html);
+            }
+            if (s.available) _dockSrvOffset = s.offset;
+        });
+    }
+
+    function _dockSetCollapsed(collapsed) {
+        $('#matter-dock').toggleClass('collapsed', collapsed);
+        localStorage.setItem('matterDock.collapsed', collapsed ? '1' : '0');
+        if (collapsed) {
+            if (_dockTimer) { clearInterval(_dockTimer); _dockTimer = null; }
+        } else if (!_dockTimer) {
+            _dockPoll();
+            _dockTimer = setInterval(_dockPoll, _DOCK_POLL_MS);
+        }
+    }
+
+    function initMatterDock() {
+        const $dock = $('#matter-dock');
+        if (!$dock.length) return;
+
+        // Restore persisted width + collapsed state (default: collapsed).
+        const w = parseInt(localStorage.getItem('matterDock.width') || '480', 10);
+        $dock.css('width', Math.min(Math.max(w, 320), window.innerWidth * 0.95) + 'px');
+        _dockSetCollapsed(localStorage.getItem('matterDock.collapsed') !== '0');
+
+        $('#matter-dock-tab').on('click', function () {
+            _dockSetCollapsed(!$dock.hasClass('collapsed'));
+        });
+        $('#dock-clear').on('click', function () { $('#matter-dock-log').empty(); });
+        $('#dock-pause').on('click', function () {
+            _dockPaused = !_dockPaused;
+            $(this).text(_dockPaused ? 'Resume' : 'Pause');
+        });
+
+        // Drag-to-resize: grip tracks the pointer; width = viewport right
+        // edge minus pointer X, clamped [320px .. 95vw], persisted on release.
+        $('#matter-dock-grip').on('mousedown', function (e) {
+            e.preventDefault();
+            $dock.addClass('dragging');
+            $('body').addClass('matter-dock-resizing');
+            function onMove(ev) {
+                const px = Math.min(Math.max(window.innerWidth - ev.clientX, 320),
+                                    window.innerWidth * 0.95);
+                $dock.css('width', px + 'px');
+            }
+            function onUp() {
+                $(document).off('mousemove', onMove).off('mouseup', onUp);
+                $dock.removeClass('dragging');
+                $('body').removeClass('matter-dock-resizing');
+                localStorage.setItem('matterDock.width', parseInt($dock.css('width'), 10));
+            }
+            $(document).on('mousemove', onMove).on('mouseup', onUp);
+        });
+    }
+
+    initMatterDock();
 });

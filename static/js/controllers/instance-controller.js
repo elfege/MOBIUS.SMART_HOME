@@ -22,6 +22,12 @@ export class InstanceWizardController {
         this.selectedDevices = {};
         this.settings = {};
         this.existingInstance = null;
+        // Settings-group expand state — preserved across re-renders of
+        // Step 3 within ONE wizard session. Wrapped by default per
+        // operator directive 2026-06-17. The Set holds group ids that
+        // are CURRENTLY EXPANDED; the default-collapsed state is
+        // implicit (an absent id = collapsed).
+        this._expandedSettingsGroups = new Set();
     }
 
     /**
@@ -346,6 +352,12 @@ export class InstanceWizardController {
 
         // Render each category from the bulk response. Fallback to per-category
         // call if the bulk call somehow missed (defensive).
+        //
+        // Cache devices for EVERY category (visible or hidden) — the hidden
+        // ones still need to render in Step 3's settings cards. Only the
+        // HTML emission is skipped for hidden_in_devices_section categories.
+        // Operator directive 2026-06-17: keep_off_switches / keep_on_switches
+        // belong in Step 3's Always-Off / Always-On cards, not Step 2.
         let html = '';
         for (const category of categories) {
             let devices = grouped[category.capability] || [];
@@ -353,6 +365,7 @@ export class InstanceWizardController {
                 devices = await this.loadDevices(category.capability);
             }
             this._devicesByCategory[category.key] = devices;
+            if (category.hidden_in_devices_section) continue;
             html += this.renderDeviceCategory(category, devices);
         }
 
@@ -726,11 +739,28 @@ export class InstanceWizardController {
             description: 'Button and pause duration settings',
             keys: ['buttonEventType', 'pauseDuration', 'pauseDurationUnit', 'pauseSwitchAction']
         },
+        // Split into two separate cards per operator directive 2026-06-17
+        // (Q2+Q3 reiteration): each feature owns its enable-toggle, mode
+        // picker, AND device picker in the same card. The device pickers
+        // are injected inline after renderSettingsForm() via
+        // _bindKeepFeatureCard() because they're not properties of
+        // settings_schema — they're device-categories with the
+        // hidden_in_devices_section flag set in devices.py.
         {
-            id: 'keep',
-            title: 'Always Off / Always On',
-            description: 'Mode restrictions for keep-off and keep-on enforcement',
-            keys: ['keepOffModes', 'keepOnModes']
+            id: 'keep_off',
+            title: 'Always Off',
+            description: 'Switches always kept off in selected modes',
+            keys: ['keepOffEnabled', 'keepOffModes'],
+            featureDevicesKey: 'keep_off_switches',
+            featureEnableKey: 'keepOffEnabled'
+        },
+        {
+            id: 'keep_on',
+            title: 'Always On',
+            description: 'Switches always kept on in selected modes',
+            keys: ['keepOnEnabled', 'keepOnModes'],
+            featureDevicesKey: 'keep_on_switches',
+            featureEnableKey: 'keepOnEnabled'
         },
         {
             id: 'restrictions',
@@ -747,6 +777,33 @@ export class InstanceWizardController {
             keys: ['weeklyWindows', 'awaitPrimaryOff', 'offConfirmTimeoutSeconds',
                    'secondaryUnconditional', 'secondaryDelaySeconds',
                    'suppressTvWakeOnPowerSeconds', 'timezone']
+        },
+        {
+            // Sonos alarm schedule (SONOS app type). timezone is claimed by the
+            // screen_time group for STP, so it only lands here for the alarm app.
+            id: 'schedule',
+            title: 'Schedule',
+            description: 'When the alarm fires',
+            keys: ['alarmTime', 'days', 'timezone']
+        },
+        {
+            // Audio announcement (STP warnings + SONOS alarm). The speaker and
+            // voice fields here are upgraded to dynamic multi-select / live-voice
+            // pickers by _enhanceSonosFields() after render.
+            id: 'audio',
+            title: 'Audio Announcement',
+            description: 'Sonos speaker(s), voice, and message',
+            keys: ['announceRoom', 'room', 'voice', 'source', 'ttsText', 'mp3Url',
+                   'announceVolume', 'volume', 'warningLeadMinutes',
+                   'warningMessage', 'cutoffMessage']
+        },
+        {
+            // Pull "Resume on mode change" out of the catch-all into its own
+            // card (operator directive 2026-06-22). Universal pause setting.
+            id: 'resume_mode',
+            title: 'Resume on Mode Change',
+            description: 'Auto-resume this instance on a Hubitat mode change',
+            keys: ['resumeOnModeChange']
         },
         {
             id: 'advanced',
@@ -783,11 +840,26 @@ export class InstanceWizardController {
 
             const fieldsHtml = groupKeys.map(k => this.renderSettingField(k, properties[k])).join('');
 
+            // Wizard settings groups start COLLAPSED by default per operator
+            // directive 2026-06-17 ('All cards wrapable + WRAPPED by default').
+            // Extends the dashboard groups-collapsed-default rule
+            // (memory: feedback-dashboard-groups-collapsed-default). Wizard
+            // sessions are ephemeral — no cross-session persistence needed,
+            // but in-session toggle state IS preserved by storing the
+            // expanded set on the controller (this._expandedSettingsGroups).
+            const isExpanded = this._expandedSettingsGroups
+                                && this._expandedSettingsGroups.has(group.id);
+            const collapsedClass = isExpanded ? '' : ' is-collapsed';
             html += `
-                <div class="settings-group" data-group="${group.id}">
-                    <div class="settings-group-header">
-                        <h4>${group.title}</h4>
-                        <span class="settings-group-desc">${group.description}</span>
+                <div class="settings-group${collapsedClass}" data-group="${group.id}">
+                    <div class="settings-group-header"
+                         onclick="wizard.toggleSettingsGroup('${group.id}')"
+                         title="Click to expand / collapse">
+                        <div class="settings-group-header-text">
+                            <h4>${group.title}</h4>
+                            <span class="settings-group-desc">${group.description}</span>
+                        </div>
+                        <span class="settings-group-chevron" aria-hidden="true">&#9660;</span>
                     </div>
                     <div class="settings-group-body">
                         ${fieldsHtml}
@@ -800,10 +872,18 @@ export class InstanceWizardController {
         const ungrouped = Object.keys(properties).filter(k => !placed.has(k));
         if (ungrouped.length > 0) {
             const fieldsHtml = ungrouped.map(k => this.renderSettingField(k, properties[k])).join('');
+            const isExpanded = this._expandedSettingsGroups
+                                && this._expandedSettingsGroups.has('other');
+            const collapsedClass = isExpanded ? '' : ' is-collapsed';
             html += `
-                <div class="settings-group" data-group="other">
-                    <div class="settings-group-header">
-                        <h4>Other</h4>
+                <div class="settings-group${collapsedClass}" data-group="other">
+                    <div class="settings-group-header"
+                         onclick="wizard.toggleSettingsGroup('other')"
+                         title="Click to expand / collapse">
+                        <div class="settings-group-header-text">
+                            <h4>Other</h4>
+                        </div>
+                        <span class="settings-group-chevron" aria-hidden="true">&#9660;</span>
                     </div>
                     <div class="settings-group-body">
                         ${fieldsHtml}
@@ -842,9 +922,23 @@ export class InstanceWizardController {
         // Populate mode checkboxes for array-type settings
         this._populateModeCheckboxes(container);
 
+        // Sonos fields: live voice list + speaker multi-select (dynamic; the
+        // generic renderer only does static enums). No-op for non-Sonos apps.
+        this._enhanceSonosFields(container);
+
         // Bind timeWithMode toggle to show/hide per-mode timeouts
         this._bindModeTimeoutToggle(container);
         this._bindModeDimLevelToggle(container);
+
+        // Always-Off / Always-On feature cards: inject device picker inline
+        // (same card as toggle + mode picker), visibility tied to the
+        // matching enable-toggle. Operator directive 2026-06-17 (Q2+Q3
+        // reiteration). See SETTINGS_GROUPS entries with featureDevicesKey.
+        for (const group of InstanceWizardController.SETTINGS_GROUPS) {
+            if (group.featureDevicesKey) {
+                this._bindKeepFeatureCard(group, container);
+            }
+        }
 
         // Motion-timeout floor enforcement (2026-05-17). Live-validate
         // noMotionTime + modeTimeouts against system_settings floor; surface
@@ -1433,6 +1527,179 @@ export class InstanceWizardController {
     }
 
     /**
+     * Toggle a settings group's expanded/collapsed state in Step 3.
+     *
+     * Called from the inline onclick on .settings-group-header. Flips the
+     * .is-collapsed class on the group's outer .settings-group div, then
+     * records the new state on this._expandedSettingsGroups so a re-render
+     * of the form within the same wizard session preserves what the user
+     * had open. (Cross-session persistence is intentionally NOT done — a
+     * fresh wizard starts everything wrapped, matching the operator's
+     * "wrapped by default" directive.)
+     *
+     * @param {string} groupId - SETTINGS_GROUPS entry id ('timing',
+     *                            'dimming', 'keep_off', etc.) or 'other'
+     */
+    toggleSettingsGroup(groupId) {
+        const groupEl = document.querySelector(
+            `.settings-group[data-group="${groupId}"]`
+        );
+        if (!groupEl) return;
+        const willCollapse = !groupEl.classList.contains('is-collapsed');
+        groupEl.classList.toggle('is-collapsed', willCollapse);
+        if (willCollapse) {
+            this._expandedSettingsGroups.delete(groupId);
+        } else {
+            this._expandedSettingsGroups.add(groupId);
+        }
+    }
+
+    /**
+     * Bind one "Always-Off" or "Always-On" feature card.
+     *
+     * Each card owns three things, all in the same `<div class="settings-group">`:
+     *   1. the enable-toggle (already rendered by renderSettingsForm via the
+     *      settings_schema property — keepOffEnabled / keepOnEnabled),
+     *   2. the per-mode picker (modeKeyed array — keepOffModes / keepOnModes),
+     *   3. an INLINE device picker for keep_off_switches / keep_on_switches —
+     *      injected here because those categories are flagged
+     *      hidden_in_devices_section=True in the AML device schema so they
+     *      do NOT appear in Step 2's Devices section.
+     *
+     * Operator directive 2026-06-17 (Q2+Q3 reiteration): the toggle is the
+     * authority. When OFF, the picker subsection is HIDDEN — there's no
+     * useful interaction with it because the feature does nothing. When
+     * ON, the picker becomes visible and behaves identically to its Step-2
+     * counterpart (same handleDeviceSelection, same mutual-exclusion between
+     * keep_off and keep_on, same _updateCategoryTags rendering).
+     *
+     * Depends on renderDevicePickers() having populated this._devicesByCategory
+     * earlier. In the normal wizard flow that's guaranteed (Step 2 runs before
+     * Step 3). In edit mode where the operator may jump straight to Step 3,
+     * the cache is still primed by initInstance() — but if it's somehow empty,
+     * the picker renders with a fallback "load Step 2 first" hint.
+     *
+     * @param {object} group - SETTINGS_GROUPS entry with featureDevicesKey
+     *                         and featureEnableKey
+     * @param {HTMLElement} container - settings-form-container element
+     */
+    _bindKeepFeatureCard(group, container) {
+        const groupBody = container.querySelector(
+            `[data-group="${group.id}"] .settings-group-body`
+        );
+        if (!groupBody) return;
+
+        const catKey = group.featureDevicesKey;
+        const devices = (this._devicesByCategory && this._devicesByCategory[catKey])
+                        || [];
+        const subsectionId = `keep-feature-${group.id}`;
+
+        // Append the inline device picker subsection inside the same card.
+        const subsectionHtml = this._renderInlineDevicePicker(
+            catKey, devices, subsectionId
+        );
+        groupBody.insertAdjacentHTML('beforeend', subsectionHtml);
+
+        const subsection = container.querySelector(`#${subsectionId}`);
+
+        // Initial visibility — bound to the enable-toggle's current value.
+        const enabled = !!this.settings[group.featureEnableKey];
+        subsection.style.display = enabled ? '' : 'none';
+
+        // Toggle drives the subsection visibility. Keep the picker in the DOM
+        // so the checked state survives toggling off/on within the wizard;
+        // selectedDevices is the source of truth across hides/shows.
+        const toggle = container.querySelector(
+            `[name="${group.featureEnableKey}"]`
+        );
+        if (toggle) {
+            toggle.addEventListener('change', (e) => {
+                subsection.style.display = e.target.checked ? '' : 'none';
+            });
+        }
+
+        this._wireInlineDevicePickerCheckboxes(subsection, catKey);
+    }
+
+    /**
+     * Build the HTML for an inline device picker inside an Always-Off /
+     * Always-On settings card. Mirrors renderDeviceCategory() in shape but
+     * sheds the header / collapsible behavior (the picker is already inside
+     * a card; nesting a second collapse would be confusing).
+     *
+     * @param {string} catKey - device category key (keep_off_switches /
+     *                          keep_on_switches)
+     * @param {Array}  devices - device objects to render
+     * @param {string} subsectionId - DOM id for the wrapping div
+     * @returns {string} HTML
+     */
+    _renderInlineDevicePicker(catKey, devices, subsectionId) {
+        const selectedCount = (this.selectedDevices[catKey] || []).length;
+
+        if (devices.length === 0) {
+            return `
+                <div class="keep-feature-devices" id="${subsectionId}">
+                    <div class="keep-feature-devices-label">Switches</div>
+                    <p class="loading-placeholder">
+                        No switches loaded yet. Visit Step 2 (Devices) once
+                        in this session to prime the device cache.
+                    </p>
+                </div>
+            `;
+        }
+
+        const deviceItems = devices.map(d => `
+            <label class="device-item"
+                   data-device-id="${d.id}"
+                   data-search-text="${utils.escapeHtml((d.label || d.name).toLowerCase())}">
+                <input type="checkbox" name="${catKey}" value="${d.id}">
+                <span>${utils.escapeHtml(d.label || d.name)}</span>
+            </label>
+        `).join('');
+
+        return `
+            <div class="keep-feature-devices" id="${subsectionId}">
+                <div class="keep-feature-devices-header">
+                    <div class="keep-feature-devices-label">Switches</div>
+                    <span class="device-count" id="count-${catKey}">${selectedCount} selected</span>
+                </div>
+                <div class="device-selected-tags" id="tags-${catKey}"></div>
+                <div class="device-list">
+                    ${deviceItems}
+                </div>
+            </div>
+        `;
+    }
+
+    /**
+     * Pre-check checkboxes from existing selectedDevices and bind change
+     * handlers to the shared handleDeviceSelection() so the mutual-exclusion
+     * (keep_off ↔ keep_on) and tag refresh continue to work identically
+     * whether the operator interacts with the inline picker (here) or a
+     * Step-2 picker.
+     *
+     * @param {HTMLElement} subsection - the keep-feature-devices div
+     * @param {string} catKey - device category key
+     */
+    _wireInlineDevicePickerCheckboxes(subsection, catKey) {
+        if (!subsection) return;
+
+        const selected = this.selectedDevices[catKey] || [];
+        selected.forEach(id => {
+            const cb = subsection.querySelector(
+                `input[name="${catKey}"][value="${id}"]`
+            );
+            if (cb) cb.checked = true;
+        });
+
+        subsection.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+            cb.addEventListener('change', (e) => this.handleDeviceSelection(e));
+        });
+
+        this._updateCategoryTags(catKey);
+    }
+
+    /**
      * Bind the timeWithMode checkbox to show/hide per-mode timeout inputs.
      * @param {HTMLElement} container - Settings form container
      */
@@ -1533,6 +1800,143 @@ export class InstanceWizardController {
      * @param {object} prop - Schema property
      * @returns {string} HTML string
      */
+    /**
+     * Post-render enhancement for Sonos fields (operator UX 2026-06-22).
+     * The generic renderer only does STATIC enums, so these dynamic widgets
+     * can't live in the schema:
+     *   - voice <select>  → live Anamnesis voices (/api/sonos/voices, friendly names)
+     *   - speaker field   → multi-select checkbox dropdown of discovered speakers
+     *     (/api/sonos/speakers), stored comma-separated under the same key (so no
+     *     schema-type / save-path change).
+     * Gated on field presence — a complete no-op for non-Sonos apps.
+     */
+    async _enhanceSonosFields(container) {
+        const voiceSel = container.querySelector('select[name="voice"]');
+        if (voiceSel) {
+            try {
+                const d = await fetch('/api/sonos/voices').then(r => r.json());
+                const opts = d.voices || [];
+                if (opts.length) {
+                    const cur = this.settings.voice || voiceSel.value || d.default || opts[0].id;
+                    this._buildVoicePicker(voiceSel, opts, cur);
+                }
+            } catch (e) { /* keep static enum fallback */ }
+        }
+
+        const roomField = container.querySelector('[name="announceRoom"], [name="room"]');
+        if (roomField) {
+            try {
+                const d = await fetch('/api/sonos/speakers').then(r => r.json());
+                const rooms = [...new Set(Object.values(d.speakers || {}))].sort();
+                if (rooms.length) this._buildSpeakerMultiSelect(roomField, rooms);
+            } catch (e) { /* leave as plain text input */ }
+        }
+    }
+
+    /** Replace the voice <select> with a custom picker: a dropdown where each
+     *  voice row has a ▶ button that auditions it IN THE BROWSER
+     *  (/api/sonos/voice-preview), and clicking the row selects it. Stores the
+     *  voice id in this.settings.voice + a hidden input named "voice". */
+    _buildVoicePicker(selectEl, voices, current) {
+        let selected = current;
+        const nameOf = (id) => (voices.find(v => v.id === id) || {}).name || id;
+
+        const wrap = document.createElement('div');
+        wrap.className = 'mode-dropdown sonos-voice-select';
+        wrap.innerHTML = `
+            <button type="button" class="mode-dropdown-toggle">
+                <span class="mode-dropdown-label">${utils.escapeHtml(nameOf(selected))}</span>
+                <span class="mode-dropdown-arrow">&#9662;</span>
+            </button>
+            <div class="mode-dropdown-menu" style="display:none;">
+                ${voices.map(v => `
+                    <div class="mode-dropdown-item voice-row" data-voice="${utils.escapeHtml(v.id)}"
+                         style="display:flex;gap:.5rem;align-items:center;padding:.25rem .5rem;cursor:pointer;">
+                        <button type="button" class="voice-preview-btn" title="Play sample"
+                                style="border:none;background:none;cursor:pointer;font-size:1rem;">&#9658;</button>
+                        <span style="flex:1;">${utils.escapeHtml(v.name)}</span>
+                        <span class="voice-check" style="width:1rem;">${v.id === selected ? '&#10003;' : ''}</span>
+                    </div>`).join('')}
+            </div>`;
+        const hidden = document.createElement('input');
+        hidden.type = 'hidden'; hidden.name = 'voice'; hidden.value = selected;
+        selectEl.replaceWith(wrap);
+        wrap.appendChild(hidden);
+        this.settings.voice = selected;
+
+        const menu = wrap.querySelector('.mode-dropdown-menu');
+        const lbl = wrap.querySelector('.mode-dropdown-label');
+        wrap.querySelector('.mode-dropdown-toggle').addEventListener('click', () => {
+            menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+        });
+
+        let audio = null;
+        wrap.querySelectorAll('.voice-row').forEach(row => {
+            const id = row.dataset.voice;
+            // ▶ preview (don't let it select the row)
+            row.querySelector('.voice-preview-btn').addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (audio) { audio.pause(); }
+                audio = new Audio(`/api/sonos/voice-preview?voice=${encodeURIComponent(id)}`);
+                audio.play().catch(() => {});
+            });
+            // click row → select this voice
+            row.addEventListener('click', () => {
+                selected = id;
+                hidden.value = id;
+                this.settings.voice = id;
+                lbl.textContent = nameOf(id);
+                wrap.querySelectorAll('.voice-row .voice-check').forEach(c => c.innerHTML = '');
+                row.querySelector('.voice-check').innerHTML = '&#10003;';
+                menu.style.display = 'none';
+            });
+        });
+    }
+
+    /** Replace a speaker text input with a multi-select checkbox dropdown.
+     *  Selection is stored comma-separated in this.settings[key] + a hidden
+     *  input of the same name, so the existing save path picks it up. */
+    _buildSpeakerMultiSelect(field, rooms) {
+        const key = field.getAttribute('name');
+        const selected = new Set(String(this.settings[key] || field.value || '')
+            .split(',').map(s => s.trim()).filter(Boolean));
+        const labelText = () => selected.size ? [...selected].join(', ') : 'Select speaker(s)…';
+
+        const wrap = document.createElement('div');
+        wrap.className = 'mode-dropdown sonos-speaker-select';
+        wrap.innerHTML = `
+            <button type="button" class="mode-dropdown-toggle">
+                <span class="mode-dropdown-label">${utils.escapeHtml(labelText())}</span>
+                <span class="mode-dropdown-arrow">&#9662;</span>
+            </button>
+            <div class="mode-dropdown-menu" style="display:none;">
+                ${rooms.map(r => `
+                    <label class="mode-dropdown-item" style="display:flex;gap:.5rem;align-items:center;padding:.25rem .5rem;">
+                        <input type="checkbox" value="${utils.escapeHtml(r)}" ${selected.has(r) ? 'checked' : ''}>
+                        ${utils.escapeHtml(r)}
+                    </label>`).join('')}
+            </div>`;
+        const hidden = document.createElement('input');
+        hidden.type = 'hidden'; hidden.name = key; hidden.value = [...selected].join(',');
+        field.replaceWith(wrap);
+        wrap.appendChild(hidden);
+
+        const menu = wrap.querySelector('.mode-dropdown-menu');
+        const lbl = wrap.querySelector('.mode-dropdown-label');
+        wrap.querySelector('.mode-dropdown-toggle').addEventListener('click', () => {
+            menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+        });
+        wrap.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+            cb.addEventListener('change', () => {
+                cb.checked ? selected.add(cb.value) : selected.delete(cb.value);
+                const val = [...selected].join(',');
+                hidden.value = val;
+                this.settings[key] = val;
+                lbl.textContent = labelText();
+            });
+        });
+    }
+
     renderSettingField(key, prop) {
         const title = prop.title || key;
         const description = prop.description || '';

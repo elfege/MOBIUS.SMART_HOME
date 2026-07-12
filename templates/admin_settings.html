@@ -55,6 +55,13 @@
             <button type="button" class="settings-tab"
                     role="tab" aria-selected="false"
                     data-section="device_naming">Device naming</button>
+            {# Matter — external page (its own template, its own controller).
+               Rendered as a settings-tab styled anchor so it visually fits
+               with the other tabs; clicking navigates to /matter (browser
+               handles native nav, the tab-click handler skips A elements).
+               Moved here from the main navbar 2026-06-17. #}
+            <a href="/matter" class="settings-tab settings-tab-external"
+               role="link" aria-label="Matter — opens commissioning page">Matter</a>
         </nav>
 
         {# Right pane — one panel per section. system_settings rows
@@ -96,6 +103,8 @@
                     <div style="display:flex; gap:0.5rem; align-items:center;">
                         <button class="btn btn-secondary" id="btn-refresh-device-cache"
                                 title="Refresh the canonical device cache from the hub (after a driver change). 0 = all devices.">↻ Refresh device</button>
+                        <button class="btn btn-secondary" id="btn-reboot-all-hubs"
+                                title="Reboot ALL enabled hubs (~2-3 min offline each). Use when Matter bridges / eventsockets are dead across the board.">⟳ Reboot all hubs</button>
                         <button class="btn btn-primary" id="btn-add-hub">+ Add hub</button>
                     </div>
                 </div>
@@ -400,6 +409,7 @@
         </div>
         <div style="margin-top:.75rem;display:flex;gap:.5rem;justify-content:flex-end;">
             <span class="hub-card-status" style="margin-right:auto;font-size:.85rem;opacity:.7;"></span>
+            <button type="button" class="btn btn-secondary btn-reboot" title="Reboot this hub (Settings → Reboot Hub). ~2-3 min offline. Use to try reviving a dead Matter bridge / eventsocket.">Reboot</button>
             <button type="button" class="btn btn-danger btn-delete">Delete</button>
             <button type="submit" class="btn btn-primary">Save</button>
         </div>
@@ -440,6 +450,25 @@
     .settings-layout {
         grid-template-columns: 1fr;
     }
+    /* Tabs go horizontal so the panel below isn't pushed off-screen.
+       Operator audit 2026-06-17: stacked vertical tabs ate 200px of
+       screen width on mobile, leaving 160px for the panel. */
+    .settings-tabs {
+        flex-direction: row;
+        gap: 0.25rem;
+        position: relative;     /* drop sticky — confusing in a row */
+        top: auto;
+        overflow-x: auto;
+        scrollbar-width: thin;
+        padding-bottom: 0.25rem;
+    }
+    .settings-tab,
+    .settings-tab-external {
+        flex: 0 0 auto;
+        white-space: nowrap;
+        padding: 6px 10px;
+        font-size: 0.8rem;
+    }
 }
 
 /* ---------- tabs (left rail) ---------- */
@@ -477,6 +506,20 @@
 .settings-tab:focus-visible {
     outline: 2px solid var(--color-primary);
     outline-offset: 2px;
+}
+/* External-page tabs (Matter) — anchored to /matter etc., styled with a
+   small arrow glyph so users know clicking navigates away. */
+.settings-tab-external {
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.settings-tab-external::after {
+    content: "\2197";   /* north-east arrow */
+    margin-left: 0.5rem;
+    opacity: 0.6;
+    font-size: 0.85em;
 }
 
 /* ---------- panels (right pane) ---------- */
@@ -864,6 +907,12 @@
         const panels = document.querySelectorAll('.settings-panel');
         tabs.forEach(btn => {
             btn.addEventListener('click', () => {
+                // External tabs are <a> elements pointing to a separate
+                // page (e.g. Matter → /matter). Let the browser navigate;
+                // do NOT mutate panel visibility — the page is about to
+                // unload anyway, and touching state causes a flash of
+                // empty content.
+                if (btn.tagName === 'A') return;
                 const target = btn.dataset.section;
                 tabs.forEach(t => {
                     const active = (t.dataset.section === target);

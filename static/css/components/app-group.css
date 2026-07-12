@@ -1,0 +1,70 @@
+/**
+ * App-group header row + bulk pause/resume actions
+ * ─────────────────────────────────────────────────
+ * The dashboard groups instances into one collapsible group per app type.
+ * This adds a right-aligned "Pause all / Resume all" action pair to each
+ * group header (dashboard-controller.js renderInstances()), without nesting
+ * buttons inside the toggle button (the header stays its own <button>).
+ *
+ * Colorblind constraint (memory accessibility_palette_constraint /
+ * PIN.1-5 / MSG-477): pause vs resume is distinguished by LABEL + glyph
+ * (⏸ "Pause all" / ▶ "Resume all"), never by color. No green/yellow/orange.
+ * Hover uses high-luminance blue (#89b4fa via --color-terminal-blue in CVD
+ * mode) on the near-black background.
+ */
+
+/* NB: .app-group-header itself is styled inline in templates/dashboard.html
+   (background/border/padding + `flex: 1 1 auto; min-width: 0` so it shares
+   the row with the actions). This file only adds the row wrapper + the
+   bulk-action buttons, to avoid a split-brain override of the header. */
+
+.app-group-header-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.app-group-actions {
+    display: inline-flex;
+    gap: 0.35rem;
+    flex: 0 0 auto;
+}
+
+.app-group-action-btn {
+    background: var(--color-surface);
+    color: var(--color-text-muted);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 0.25rem 0.6rem;
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 500;
+    line-height: 1.2;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: border-color 0.2s, color 0.2s;
+}
+.app-group-action-btn:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+}
+.app-group-action-btn:focus-visible {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 25%, transparent);
+}
+
+/* CVD mode: use the vetted high-luminance blue for the hover/focus accent. */
+body.colorblind .app-group-action-btn:hover,
+body.colorblind .app-group-action-btn:focus-visible {
+    border-color: var(--color-terminal-blue);
+    color: var(--color-terminal-blue);
+}
+
+/* Narrow screens — tighten padding; the glyph + short label still read. */
+@media (max-width: 640px) {
+    .app-group-action-btn {
+        padding: 0.2rem 0.4rem;
+        font-size: 0.72rem;
+    }
+}

@@ -9,6 +9,7 @@
  */
 
 import { openDeviceRefreshModal } from '../components/device-refresh-modal.js';
+import { triggerAppRestart } from '../utils/restart-app.js';
 
 const $ = window.jQuery || window.$;
 
@@ -135,6 +136,35 @@ function renderHub(hub, health) {
     fillForm($form, hub);
     applyHealth($form, health);
 
+    // Hardware / Thread chip (capability, not health): C-8-family hubs have a
+    // BUILT-IN Thread border router — the property that decides whether Thread
+    // Matter devices can commission through the hub at all (C-7 and earlier
+    // have no Thread radio; pairing Thread devices on them fails). Colorblind-
+    // safe: label + shape carry the meaning; Thread hubs use the vetted
+    // high-luminance blue, others neutral grey.
+    const hwv = (hub.hardware_version || '').trim();
+    if (hwv) {
+        const isThread = hwv.toUpperCase().startsWith('C-8');
+        const tip = isThread
+            ? 'This hub has a BUILT-IN Thread border router (C-8 family). Thread Matter '
+              + 'devices (battery sensors, buttons, many plugs) can only be commissioned '
+              + 'and routed through a hub with a border router — prefer this hub as the '
+              + 'Matter hub for Thread devices.'
+            : `Hardware ${hwv}: no built-in Thread border router — Thread Matter devices `
+              + 'cannot be commissioned through this hub (WiFi/Ethernet Matter devices are fine).';
+        $(`<span class="hub-thread-chip" tabindex="0"></span>`)
+            .text(isThread ? `${hwv} · Thread ?` : `${hwv} ?`)
+            .attr('title', tip)
+            .css({
+                display: 'inline-block', marginLeft: '.5rem', padding: '.1rem .45rem',
+                borderRadius: '10px', fontSize: '.75rem', cursor: 'help',
+                background: isThread ? '#1e2a4a' : '#333',
+                color: isThread ? '#89b4fa' : '#aaa',
+                border: isThread ? '1px solid #89b4fa' : '1px solid #555',
+            })
+            .insertAfter($form.find('.hub-health-firmware'));
+    }
+
     $form.on('submit', async function (e) {
         e.preventDefault();
         const id = $form.attr('data-hub-id');
@@ -172,8 +202,39 @@ function renderHub(hub, health) {
             setStatus($form, 'Deleting…');
             await fetchJSON(`/api/hubs/${id}`, { method: 'DELETE' });
             $form.remove();
+            // Enforce a restart after deletion (canonical RESTART.1-4): the
+            // deleted hub's device routing + caches only fully clear on a
+            // stack restart. Offer it inline (confirmed:true skips the util's
+            // generic prompt since we ask a tailored one here).
+            if (confirm(
+                'Hub deleted.\n\nA restart is recommended to fully clear its ' +
+                'device routing and caches. Restart the application now? ' +
+                '(~30-60s downtime, reconnects itself)'
+            )) {
+                triggerAppRestart('hub deleted — clearing routing/caches', { confirmed: true });
+            }
         } catch (err) {
             setStatus($form, err.message, true);
+        }
+    });
+
+    $form.find('.btn-reboot').on('click', async function () {
+        const ip = $form.find('input[name=hub_ip]').val();
+        const name = $form.find('input[name=hub_name]').val() || ip;
+        if (!ip) return;
+        if (!confirm(
+            `Reboot hub "${name}" (${ip})?\n\n` +
+            `The hub goes OFFLINE for ~2-3 minutes and all its automations pause. ` +
+            `Use this to try reviving a dead Matter bridge / eventsocket.`
+        )) return;
+        try {
+            setStatus($form, 'Rebooting…');
+            const res = await fetchJSON(`/api/hubs/${ip}/reboot`, { method: 'POST' });
+            setStatus($form, res.reboot_initiated
+                ? 'Reboot initiated — hub offline ~2-3 min'
+                : 'Reboot request sent');
+        } catch (err) {
+            setStatus($form, 'Reboot failed: ' + err.message, true);
         }
     });
 
@@ -211,6 +272,21 @@ $(function () {
             hub_name: '', hub_ip: '', maker_api_app_number: '',
             maker_api_token_env: '', is_primary: false, is_enabled: true,
         }));
+    });
+    $('#btn-reboot-all-hubs').on('click', async function () {
+        if (!confirm(
+            'Reboot ALL enabled hubs?\n\n' +
+            'Every hub goes OFFLINE for ~2-3 minutes and all automations pause. ' +
+            'Use this when the Matter bridges / eventsockets are dead across the board.'
+        )) return;
+        const $btn = $(this).prop('disabled', true).text('⟳ Rebooting all…');
+        try {
+            const res = await fetchJSON('/api/hubs/reboot-all', { method: 'POST' });
+            const ok = (res.results || []).filter(r => r.reboot_initiated).length;
+            $btn.text(`⟳ Rebooted ${ok}/${res.count} — offline ~2-3 min`);
+        } catch (err) {
+            $btn.text('⟳ Reboot all failed').prop('disabled', false);
+        }
     });
     // ↻ device-cache refresh — pops the modal (operator types device # or
     // 0 for all). Lives next to the hubs panel because hub-side driver

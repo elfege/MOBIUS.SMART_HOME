@@ -9,8 +9,14 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies
+#  - curl: healthcheck
+#  - espeak-ng + ffmpeg: local Sonos TTS (services/sonos) — synthesize and
+#    transcode announcement clips on the box; no cloud TTS. Without these,
+#    only the pre-recorded canonical clips in static/audio/sonos/ play.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    espeak-ng \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for layer caching

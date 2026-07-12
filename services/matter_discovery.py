@@ -1,18 +1,23 @@
 """
 Matter Discovery Service
 
-Background service that periodically scans Hubitat hubs for Matter devices,
-updates their online/offline status, and auto-commissions new devices into
-our matter-server fabric.
+Background service that periodically scans THE single selected Matter hub
+(SINGLE-HUB MATTER POLICY, 2026-07-11 — Matter-only; every other subsystem
+stays multi-hub) for Matter devices and updates their online/offline status.
+
+Commissioning is NEVER automatic here: the rolling auto-commissioner was
+REMOVED 2026-07-10 (it saturated device fabric slots) and bulk commissioning
+was removed entirely 2026-07-11. Commissioning is per-device, user-initiated,
+via the UI only.
 
 Runs as a recurring task via the existing APScheduler infrastructure.
 Configurable scan interval (default: 5 minutes).
 
 Architecture:
-    APScheduler (interval) → scan_and_commission()
-        ├── POST /hub/matterDetails/json per hub → discover devices
+    APScheduler (interval) → _scan_and_commission()   [name kept for job-id stability]
+        ├── GET /hub/matterDetails/json on THE Matter hub → discover devices
         ├── UPSERT hubitat_matter_devices via PostgREST → update status
-        └── commission_with_code per new online device → join our fabric
+        └── Phase 4: reconcile device_matter_map (mapping only, no commissioning)
 """
 
 import os
@@ -192,18 +197,16 @@ class MatterDiscoveryService:
                     device_name = device.get('name', device.get('label', 'Unknown'))
                     is_online = device.get('online', device.get('isOnline', False))
 
-                    # Name match to Maker API device
+                    # Name match to Maker API device — EXACT name.lower() ONLY
+                    # (operator directive 2026-07-09). Fuzzy/partial matching was
+                    # removed: any substring overlap counted, which produced
+                    # nonsensical cross-matches (e.g. "Light bedroom 1" ↔ "Light
+                    # Laundry"). Exact-only means a non-match stays UNMATCHED (the
+                    # operator resolves it via the card's "edit" dropdown) rather
+                    # than being silently mis-mapped to the wrong device.
                     match_name = device_name.strip().lower()
                     maker_match = maker_by_name.get(match_name)
                     confidence = 'exact' if maker_match else 'none'
-
-                    # Fuzzy match: try partial
-                    if not maker_match:
-                        for mk_name, mk_dev in maker_by_name.items():
-                            if match_name in mk_name or mk_name in match_name:
-                                maker_match = mk_dev
-                                confidence = 'fuzzy'
-                                break
 
                     ip_addr = device.get('ipAddress', device.get('ip', ''))
                     derived_mac = mac_from_ipv6_ll(ip_addr)
@@ -301,56 +304,16 @@ class MatterDiscoveryService:
 
         logger.info(f"Matter scan: {upserted} devices upserted, {len(errors)} hub errors")
 
-        # --- Phase 3: Auto-commission eligible devices ---
-        # Only attempt devices that are:
-        #   - online
-        #   - not yet commissioned
-        #   - under the max attempt limit
-        #   - past their exponential backoff cooldown
+        # --- Phase 3: REMOVED (2026-07-10, operator directive) ---
+        # The rolling AUTO-commissioner is GONE. It re-opened pairing windows and
+        # (re)added our fabric to devices on a 5-minute timer, exhausting device
+        # fabric slots / CHIP session pools and DOSing matter-server (the WS
+        # retransmission storm that made every command fail). Commissioning is now
+        # ONLY ever operator-initiated — the Commission button ->
+        # POST /api/matter/auto-commission, one device on demand. Discovery
+        # (Phases 1-2) and mapping reconcile (Phase 4) still run on the timer;
+        # commissioning NEVER does. Auto-discovery good, auto-commission bad.
         commissioned = 0
-        try:
-            resp = req.get(
-                f"{postgrest_url}/hubitat_matter_devices",
-                params={
-                    "is_online": "eq.true",
-                    "is_commissioned": "eq.false",
-                    "commission_attempts": f"lt.{MAX_COMMISSION_ATTEMPTS}",
-                    "select": "*"
-                },
-                headers={"Accept": "application/json"},
-                timeout=5
-            )
-            if resp.ok:
-                candidates = resp.json()
-                # Filter by backoff cooldown (can't do date math in PostgREST)
-                now = datetime.now(timezone.utc)
-                eligible = []
-                for dev in candidates:
-                    attempts = dev.get('commission_attempts', 0)
-                    last_attempt = dev.get('last_commission_attempt')
-                    if attempts > 0 and last_attempt:
-                        # Exponential backoff: base * 2^(attempts-1)
-                        backoff_secs = COMMISSION_BASE_BACKOFF_SECONDS * (2 ** (attempts - 1))
-                        try:
-                            last_ts = datetime.fromisoformat(last_attempt.replace('Z', '+00:00'))
-                            if now - last_ts < timedelta(seconds=backoff_secs):
-                                logger.debug(
-                                    f"Skipping {dev.get('device_name')} — "
-                                    f"backoff {backoff_secs}s, attempt {attempts}/{MAX_COMMISSION_ATTEMPTS}"
-                                )
-                                continue
-                        except (ValueError, TypeError):
-                            pass  # Malformed timestamp, allow retry
-                    eligible.append(dev)
-
-                if eligible:
-                    logger.info(
-                        f"Commission eligible: {len(eligible)} devices "
-                        f"(skipped {len(candidates) - len(eligible)} on backoff/limit)"
-                    )
-                    commissioned = await self._commission_devices(eligible)
-        except Exception as e:
-            logger.warning(f"Auto-commission phase failed: {e}")
 
         # --- Phase 4: Reconcile mappings ---
         # Match commissioned nodes to discovered devices and auto-create
@@ -633,37 +596,60 @@ class MatterDiscoveryService:
 
     def _get_hub_configs(self) -> list:
         """
-        Build list of hub configs from environment variables.
-        Returns list of dicts with ip, token, app_number, name.
+        Return the ONE hub Matter is allowed to interact with, as a one-element
+        list (list shape kept so the Phase-1 scan loop is unchanged).
+
+        SINGLE-HUB MATTER POLICY (operator directive 2026-07-11, Matter-ONLY —
+        every non-Matter subsystem stays multi-hub): discovery used to scan
+        EVERY hub from env vars; hubMesh mirrors then produced duplicate rows
+        and commissioning could target any hub. Resolution mirrors
+        app._resolve_matter_hub (sync variant for this service's thread):
+        system_settings.matter_hub_id if it points at a real hub row, else the
+        hub_config row marked is_primary (the "main" hub). Token comes from the
+        env var NAMED by hub_config.maker_api_token_env. Returns [] when
+        nothing resolves — the scan cycle no-ops with a warning.
         """
-        hubs = []
+        import requests
 
-        # Main hub
-        main_ip = os.environ.get('HUBITAT_HUB_IP_MAIN')
-        main_token = os.environ.get('HUBITAT_API_TOKEN_MAIN')
-        main_app = os.environ.get('HUBITAT_API_NUMBER_MAIN')
-        if main_ip and main_token and main_app:
-            hubs.append({
-                'ip': main_ip,
-                'token': main_token,
-                'app_number': main_app,
-                'name': 'main_hub'
-            })
-
-        # Other hubs (1-3)
-        for i in range(1, 4):
-            ip = os.environ.get(f'HUBITAT_HUB_IP_OTHER_HUB_{i}')
-            token = os.environ.get(f'HUBITAT_API_TOKEN_OTHER_HUB_{i}')
-            app_num = os.environ.get(f'HUBITAT_API_NUMBER_OTHER_HUB_{i}')
-            if ip and token and app_num:
-                hubs.append({
-                    'ip': ip,
-                    'token': token,
-                    'app_number': app_num,
-                    'name': f'other_hub_{i}'
-                })
-
-        return hubs
+        pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+        sel = ("id,hub_name,hub_ip,is_primary,is_enabled,"
+               "maker_api_app_number,maker_api_token_env")
+        row = None
+        try:
+            r = requests.get(f"{pg}/system_settings",
+                             params={"key": "eq.matter_hub_id", "select": "value"},
+                             timeout=5)
+            raw = (str(r.json()[0].get("value") or "").strip()
+                   if r.ok and r.json() else "")
+            if raw.isdigit():
+                r2 = requests.get(f"{pg}/hub_config",
+                                  params={"id": f"eq.{int(raw)}", "select": sel},
+                                  timeout=5)
+                if r2.ok and r2.json():
+                    row = r2.json()[0]
+        except Exception as e:
+            logger.debug(f"matter_hub_id lookup failed: {e}")
+        if row is None:
+            try:
+                r3 = requests.get(f"{pg}/hub_config",
+                                  params={"is_primary": "eq.true", "select": sel,
+                                          "limit": "1"},
+                                  timeout=5)
+                if r3.ok and r3.json():
+                    row = r3.json()[0]
+            except Exception as e:
+                logger.warning(f"primary hub lookup failed: {e}")
+        if row is None:
+            logger.warning("matter_discovery: no Matter hub resolvable (no "
+                           "matter_hub_id selection, no primary hub) — skipping scan")
+            return []
+        token_env = row.get('maker_api_token_env') or ''
+        return [{
+            'ip': row['hub_ip'],
+            'token': os.environ.get(token_env, '') if token_env else '',
+            'app_number': str(row.get('maker_api_app_number') or ''),
+            'name': row['hub_name'],
+        }]
 
 
 # ---------------------------------------------------------------------------

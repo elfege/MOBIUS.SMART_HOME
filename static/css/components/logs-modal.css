@@ -1,0 +1,103 @@
+/* =========================================================================
+   Live Logs modal (navbar "Logs") — Hubitat-PATTERN live log stream restyled
+   to the MOBIUS dark theme. Colorblind-safe palette only (canonical PIN.1-5):
+   red / blue / white / black families, shape-first level badges [E][W][I][D].
+   NO green / yellow / orange anywhere.
+   ========================================================================= */
+
+.logsm-overlay {
+    position: fixed; inset: 0; z-index: 1200;
+    background: rgba(5, 7, 12, 0.72);
+    display: flex; align-items: center; justify-content: center;
+}
+.logsm-panel {
+    width: 96vw; height: 92vh;
+    display: flex; flex-direction: column;
+    background: #10131a; border: 1px solid #2a2f3a; border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+}
+
+/* ---- header / toolbar ---------------------------------------------------- */
+.logsm-head {
+    display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+    padding: 0.5rem 0.8rem; border-bottom: 1px solid #2a2f3a;
+    color: #cdd6f4; font-size: 0.85rem;
+}
+.logsm-state { color: #6a7080; font-family: monospace; font-size: 0.72rem; }
+.logsm-spacer { flex: 1; }
+.logsm-btn {
+    background: #1a1f2b; color: #cdd6f4; border: 1px solid #2a2f3a;
+    border-radius: 5px; padding: 0.25rem 0.6rem; font-size: 0.75rem; cursor: pointer;
+}
+.logsm-btn:hover { background: #232a3a; }
+.logsm-btn.active { border-color: #89b4fa; color: #89b4fa; }
+.logsm-x { font-weight: 700; }
+.logsm-q {
+    background: #0c0e13; color: #cdd6f4; border: 1px solid #2a2f3a;
+    border-radius: 5px; padding: 0.25rem 0.5rem; font-size: 0.75rem; width: 170px;
+}
+
+/* Level checkboxes — SHAPE-first (letter badges), CVD-safe colors */
+.logsm-levels { display: inline-flex; gap: 0.35rem; align-items: center; }
+.logsm-lv { display: inline-flex; align-items: center; gap: 0.15rem; cursor: pointer; }
+.logsm-lv input { accent-color: #89b4fa; }
+.logsm-badge {
+    display: inline-block; min-width: 1.15em; text-align: center;
+    border-radius: 3px; font-family: monospace; font-weight: 700; font-size: 0.72rem;
+    padding: 0 0.15em;
+}
+.logsm-badge-error   { background: #e64553; color: #ffffff; }              /* solid red */
+.logsm-badge-warning { color: #f38ba8; border: 1px solid #f38ba8; }        /* outlined red-pink */
+.logsm-badge-info    { color: #89b4fa; border: 1px solid #3a4664; }        /* blue */
+.logsm-badge-debug   { color: #8087a2; border: 1px solid #2a2f3a; }        /* dim gray */
+
+/* Sources dropdown (checkbox list — same list as the chips, kept in sync) */
+.logsm-dd { position: relative; }
+.logsm-dd-panel {
+    position: absolute; right: 0; top: calc(100% + 4px); z-index: 5;
+    max-height: 46vh; overflow: auto; min-width: 300px;
+    background: #141826; border: 1px solid #2a2f3a; border-radius: 8px;
+    padding: 0.4rem; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.logsm-dd-tools { display: flex; gap: 0.4rem; margin-bottom: 0.35rem; }
+.logsm-dd-row {
+    display: flex; align-items: center; gap: 0.4rem;
+    padding: 0.15rem 0.25rem; font-size: 0.75rem; cursor: pointer;
+    border-radius: 4px; color: #cdd6f4;
+}
+.logsm-dd-row:hover { background: #1c2233; }
+.logsm-dd-row em { margin-left: auto; color: #6a7080; font-style: normal; font-size: 0.68rem; }
+.logsm-dd-row input { accent-color: #89b4fa; }
+
+/* ---- source chips strip (Hubitat-style clickable names) ------------------ */
+.logsm-chips {
+    display: flex; gap: 0.35rem; flex-wrap: wrap; align-items: center;
+    padding: 0.4rem 0.8rem; border-bottom: 1px solid #2a2f3a;
+    max-height: 5.6rem; overflow: auto;
+}
+.logsm-chip {
+    --chip: #89b4fa;
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    padding: 0.12rem 0.5rem; border-radius: 999px; cursor: pointer;
+    font-size: 0.72rem; font-family: monospace;
+    color: var(--chip); border: 1px solid var(--chip); background: transparent;
+    user-select: none;
+}
+.logsm-chip em { color: #6a7080; font-style: normal; font-size: 0.65rem; }
+.logsm-chip:hover { background: rgba(137, 180, 250, 0.08); }
+.logsm-chip.off { color: #4a5061; border-color: #2a2f3a; opacity: 0.6; text-decoration: line-through; }
+
+/* ---- the stream ----------------------------------------------------------- */
+.logsm-stream {
+    flex: 1; margin: 0; padding: 0.6rem 0.8rem; overflow: auto;
+    background: #0c0e13; color: #c8ccd8;
+    font-size: 0.74rem; line-height: 1.4;
+    white-space: pre-wrap; word-break: break-word;
+}
+.logsm-line { display: block; }
+.logsm-l-error   { color: #f38ba8; }
+.logsm-l-warning { color: #d7dae3; }
+.logsm-l-info    { color: #c8ccd8; }
+.logsm-l-debug   { color: #7a8095; }
+.logsm-src { font-weight: 600; }

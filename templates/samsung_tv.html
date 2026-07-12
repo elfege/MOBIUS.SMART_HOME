@@ -580,6 +580,9 @@
                 <label for="cfg-mac">MAC Address</label>
                 <input type="text" id="cfg-mac" value="{{ status.mac }}" placeholder="AABBCCDDEEFF">
 
+                <label for="cfg-port">Control Port</label>
+                <input type="text" id="cfg-port" value="{{ port or '' }}" placeholder="auto (8001 / 8002 if SSL)">
+
                 <label for="cfg-ssl">Use WSS (SSL)</label>
                 <input type="checkbox" id="cfg-ssl" {{ 'checked' if status.use_ssl else '' }}>
 
@@ -705,7 +708,7 @@
 (function () {
     "use strict";
 
-    const API_BASE      = "/samsung-tv/api";
+    const API_BASE      = "{{ api_base or '/samsung-tv/api' }}";
     const POLL_INTERVAL = 5000;   // ms — status refresh frequency
     let   _pollTimer    = null;
     let   _termCount    = 0;
@@ -997,10 +1000,12 @@
     // ── Configure ────────────────────────────────────────────────────────────
 
     document.getElementById("btn-configure").addEventListener("click", async () => {
+        const portRaw = document.getElementById("cfg-port").value.trim();
         const body = {
             tv_ip:       document.getElementById("cfg-ip").value.trim()  || undefined,
             mac_address: document.getElementById("cfg-mac").value.trim() || undefined,
             use_ssl:     document.getElementById("cfg-ssl").checked,
+            port:        portRaw ? parseInt(portRaw, 10) : undefined,
         };
         // Remove undefined keys
         Object.keys(body).forEach(k => body[k] === undefined && delete body[k]);

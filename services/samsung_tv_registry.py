@@ -173,6 +173,7 @@ class SamsungTVRegistry:
             mac_address = (row.get("mac_address") or "").replace(":", "").upper(),
             token       = row.get("token") or "",
             use_ssl     = bool(row.get("use_ssl", True)),
+            ws_port     = row.get("port"),
             name        = row.get("samsung_name") or "samsung_tv",
         )
 

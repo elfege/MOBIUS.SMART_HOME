@@ -58,9 +58,15 @@ versioned, and reasoned about.
   (automation: instances, subscriptions, memoization), `dscore` (system
   settings, health, audit) — exposed through a single `api` view schema for
   PostgREST.
-- **Matter support.** Embedded `python-matter-server`; matter nodes appear in
-  the UI with online/last-seen staleness highlights and a quick-link back to
-  the Hubitat editor for any device also paired through Hubitat.
+- **Matter, controlled directly.** MOBIUS runs its own Matter controller
+  (`matterjs-server`, on the matter.js SDK) and holds an admin fabric on each
+  device, so it drives Matter devices **directly over the Matter protocol** —
+  Hubitat is only a fallback command path. Devices are discovered two ways,
+  deduplicated by MAC → serial → name: from the selected Hubitat hub(s)
+  (multi-hub, admin API) and directly over mDNS (`_matterc._udp`, no hub).
+  Bulk commissioning is strictly sequential (one pairing window at a time) with
+  a live CHIP-level log stream. Matter-over-Thread devices route through a hub
+  with a built-in Thread border router (Hubitat C-8 / C-8 Pro).
 - **Contract-drift watcher.** Polls Hubitat's platform version on a schedule
   and runs a canary against the admin API; surfaces deltas as soon as a hub
   firmware update changes a wire format.
@@ -101,7 +107,7 @@ stay on the hub.
         ▼                ▼
    ┌──────────────────────────┐         ┌───────────────────────┐
    │ Jinja2 + ES6 modules UI  │         │ matter-server         │
-   │ behind nginx HTTPS       │         │ (python-matter-server)│
+   │ behind nginx HTTPS       │         │ (matterjs, matter.js) │
    └──────────────────────────┘         └───────────────────────┘
 ```
 
@@ -114,7 +120,7 @@ stay on the hub.
 | `postgres`          | 5433 → 5432         | Database (substrate of record)             |
 | `postgrest`         | 3002 → 3001         | Auto-REST over the `api` view schema       |
 | `webhook-dispatcher`| 5050                | Single Hubitat target; fans out to clients |
-| `matter-server`     | 5580                | Matter fabric, surfaced via the app        |
+| `matter-server`     | 5580                | Matter controller (`matterjs`); MOBIUS's admin fabric — direct Matter control |
 
 ### Repository layout
 

@@ -263,10 +263,14 @@ smarthome_start__resolve_tv_token() {
 smarthome_start__configure_runtime() {
 	# Defaults for external-facing service ports + the webhook target list.
 	# Each value honors an existing environment override so deployments can pin
-	# ports. WEBHOOK_TARGETS fans out to the app container plus TILES, so the
-	# Hubitat side configures a single endpoint regardless of which projects
-	# are running.
-	export WEBHOOK_TARGETS="${WEBHOOK_TARGETS:-http://${SMARTHOME_START__APP_CONTAINER}:${APP_INTERNAL_PORT:-5000}/api/webhook/event,http://tiles-app:80/api/webhook/event}"
+	# ports. The Hubitat side configures a SINGLE endpoint (the dispatcher) and
+	# it fans out from there.
+	#
+	# P0 of the TILES decommission (2026-07-12): the `tiles-app` fan-out target
+	# was DEAD — TILES removed its /api/webhook/event intake in May 2026, so the
+	# dispatcher had been POSTing every Hubitat event into a black hole. Dropped.
+	# (The TILES-network connect below is now moot too; it goes at P5 retirement.)
+	export WEBHOOK_TARGETS="${WEBHOOK_TARGETS:-http://${SMARTHOME_START__APP_CONTAINER}:${APP_INTERNAL_PORT:-5000}/api/webhook/event}"
 }
 
 smarthome_start__load_environment() {

@@ -888,3 +888,59 @@
 .dbg-bad  { color: #e57373; }   /* CVD-safe red — orphan / error / unreachable */
 .dbg-warn { color: #b5bdc8; opacity: 0.85; }
 .dbg-cur  { color: #89b4fa; }   /* CVD-safe blue — our current fabric */
+
+/* =========================================================================
+   MATTER TERMINAL DOCK (2026-07-12) — persistent right-side live terminal.
+   Collapsible via the vertical edge tab; resizable via the left grip
+   (320px .. 95vw, persisted). Colors follow the CVD-safe palette:
+   blue #89b4fa tags, red #e57373 errors, grays for server detail.
+   ========================================================================= */
+.matter-dock {
+    position: fixed; top: 60px; right: 0; bottom: 0;
+    width: 480px; max-width: 95vw; z-index: 900;
+    display: flex; flex-direction: row;
+    background: #10131a; border-left: 1px solid #2a2f3a;
+    box-shadow: -6px 0 18px rgba(0, 0, 0, 0.45);
+}
+.matter-dock.collapsed { width: 0 !important; border-left: none; box-shadow: none; }
+.matter-dock.collapsed .matter-dock-inner,
+.matter-dock.collapsed .matter-dock-grip { display: none; }
+
+/* Vertical always-visible tab on the dock's outer (left) edge */
+.matter-dock-tab {
+    position: absolute; left: -26px; top: 38%;
+    writing-mode: vertical-rl; text-orientation: mixed;
+    padding: 0.6rem 0.15rem; border: 1px solid #2a2f3a; border-right: none;
+    border-radius: 6px 0 0 6px; cursor: pointer;
+    background: #1a1f2b; color: #89b4fa;
+    font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em;
+}
+.matter-dock-tab:hover { background: #232a3a; }
+
+/* Drag-to-resize grip (inner left edge) */
+.matter-dock-grip {
+    width: 6px; cursor: ew-resize; flex: 0 0 6px;
+    background: linear-gradient(90deg, #2a2f3a, transparent);
+}
+.matter-dock-grip:hover, .matter-dock.dragging .matter-dock-grip { background: #89b4fa55; }
+
+.matter-dock-inner { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.matter-dock-head {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.4rem 0.6rem; border-bottom: 1px solid #2a2f3a;
+    color: #cdd6f4; font-size: 0.8rem;
+}
+.matter-dock-head .dock-check { color: #9aa0b0; font-size: 0.75rem; cursor: pointer; white-space: nowrap; }
+.matter-dock-head .dock-spacer { flex: 1; }
+.matter-dock-log {
+    flex: 1; margin: 0; padding: 0.5rem 0.6rem; overflow: auto;
+    min-height: 0; max-height: none;              /* override .comm-log caps — dock fills its column */
+    font-size: 0.72rem; line-height: 1.35;
+    background: #0c0e13; color: #c8ccd8; white-space: pre-wrap; word-break: break-word;
+}
+.matter-dock-foot {
+    padding: 0.2rem 0.6rem; border-top: 1px solid #2a2f3a;
+    color: #6a7080; font-size: 0.68rem; font-family: monospace;
+}
+/* While dragging, kill text selection so the resize feels native */
+body.matter-dock-resizing { user-select: none !important; cursor: ew-resize !important; }

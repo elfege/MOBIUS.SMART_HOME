@@ -23,6 +23,8 @@
     <link rel="stylesheet" href="/static/css/theme-neutral.css">
     <!-- Navbar location-mode picker (component styles for the .nav-mode block) -->
     <link rel="stylesheet" href="/static/css/components/navbar-mode.css">
+    <!-- Live Logs modal (navbar "Logs" button) — Hubitat-pattern live log stream -->
+    <link rel="stylesheet" href="/static/css/components/logs-modal.css">
 
     <!-- Chart.js (lightweight charting for KPI dashboards) -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
@@ -48,6 +50,13 @@
                 <a href="#" id="nav-restart-app" class="nav-link"
                    title="Restart the whole application (start.sh) — ~30-60s downtime, reconnects itself"
                    onclick="return false;">&#10227; Restart</a>
+                {# Live Logs modal (operator directive 2026-07-12): Hubitat-style
+                   live backend logs with per-source (apps/drivers/services)
+                   and per-level filters. Wired by
+                   static/js/components/logs-modal.js. #}
+                <a href="#" id="nav-logs" class="nav-link"
+                   title="Live backend logs — every app instance, driver and service, with per-source and per-level filters"
+                   onclick="return false;">&#9636; Logs</a>
                 {# Matter moved into Settings → Matter tab (operator directive 2026-06-17).
                    The top-level navbar should host primary workflows; Matter
                    commissioning is an infrastructure concern that belongs
@@ -217,6 +226,9 @@
 
     <!-- Main JS -->
     <script type="module" src="/static/js/main.js"></script>
+
+    <!-- Live Logs modal (self-wiring: binds the navbar #nav-logs button) -->
+    <script type="module" src="/static/js/components/logs-modal.js"></script>
 
     {% block extra_js %}{% endblock %}
 </body>

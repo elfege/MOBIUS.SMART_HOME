@@ -88,7 +88,7 @@
                      NEVER triggers this automatically anymore — the scan→commission
                      auto-chain was removed 2026-07-11 (it saturated fabric slots). -->
                 <button class="btn btn-small btn-secondary" id="btn-commission-all"
-                        title="Commission every online, uncommissioned device on the selected Matter hub — explicit user action, never automatic">Commission All</button>
+                        title="Commission every online, uncommissioned device on the selected Matter hubs — ONE AT A TIME (single pairing window, settle pause between devices). Explicit user action, never automatic">Commission All</button>
                 <button class="btn btn-small btn-danger" id="btn-remove-all-discovered"
                         title="Remove ALL: decommission + soft-delete every device (re-scan restores them)">Remove all</button>
                 <button class="btn btn-small btn-danger" id="btn-force-remove-all-discovered"
@@ -164,6 +164,35 @@
         </div>
     </div>
 </div>
+
+<!-- MATTER TERMINAL DOCK (operator directive 2026-07-12): a persistent
+     right-side terminal DEDICATED TO MATTER, streaming the same two live
+     feeds as the commission modal — [cli] client op-log + [srv] matterjs
+     CHIP log. Laterally collapsible via the edge tab; drag the left grip
+     to resize up to 95% of the viewport. Width + collapsed state persist
+     in localStorage. Polling stops while collapsed. -->
+<aside id="matter-dock" class="matter-dock collapsed" aria-label="Matter live terminal">
+    <div class="matter-dock-grip" id="matter-dock-grip"
+         title="Drag to resize (320px – 95% of the window)"></div>
+    <button id="matter-dock-tab" class="matter-dock-tab"
+            title="Matter terminal — live [cli] client + [srv] matterjs CHIP logs">TERMINAL</button>
+    <div class="matter-dock-inner">
+        <div class="matter-dock-head">
+            <strong>Matter terminal</strong>
+            <label class="dock-check" title="Our WebSocket commands/results (matter client op-log)">
+                <input type="checkbox" id="dock-show-cli" checked> [cli]</label>
+            <label class="dock-check" title="matterjs CHIP log (PASE/attestation/AddNOC detail)">
+                <input type="checkbox" id="dock-show-srv" checked> [srv]</label>
+            <span class="dock-spacer"></span>
+            <button class="btn btn-small btn-secondary" id="dock-pause"
+                    title="Freeze the stream (polling continues; display pauses)">Pause</button>
+            <button class="btn btn-small btn-secondary" id="dock-clear"
+                    title="Clear the terminal display">Clear</button>
+        </div>
+        <pre id="matter-dock-log" class="comm-log matter-dock-log"></pre>
+        <div class="matter-dock-foot" id="matter-dock-state">idle</div>
+    </div>
+</aside>
 {% endblock %}
 
 {% block extra_js %}

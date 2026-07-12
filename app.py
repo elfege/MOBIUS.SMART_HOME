@@ -76,6 +76,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Live-logs UI tap (2026-07-12): ring-buffer handler on the ROOT logger feeds
+# the navbar "Logs" modal (GET /api/logs/tail / /api/logs/sources). Installed
+# immediately after basicConfig so every subsequent logger is captured.
+from services.log_stream import install_ring_log_handler, get_log_handler  # noqa: E402
+install_ring_log_handler()
+
 
 # ---------------------------------------------------------------------------
 # Pydantic request models
@@ -2675,26 +2681,98 @@ class MatterDecommissionBody(BaseModel):
     keep_current: Optional[bool] = False
 
 
+async def _matter_reconcile_decommissioned(node_ids: List[int]) -> Dict[str, int]:
+    """
+    DB half of a decommission — keep the database honest about the fabric.
+
+    A decommission removes our fabric FROM THE DEVICE, but until 2026-07-12
+    nothing cleared the DB side, so hubitat_matter_devices rows kept
+    is_commissioned=true + a dead our_node_id and device_matter_map kept rows
+    pointing at nodes that no longer exist ("mapping stale — no current
+    device" ghosts; Commission All then skipped those devices as 'already
+    commissioned'). For every decommissioned node id:
+      - hubitat_matter_devices: is_commissioned=false, our_node_id=null
+      - device_matter_map: DELETE the link rows (explicit scoped DELETE of
+        link records only — no device/table cascade; per the no-CASCADE policy)
+    Best-effort per id; returns {"devices_reconciled": n, "mappings_deleted": m}.
+    """
+    if not node_ids:
+        return {"devices_reconciled": 0, "mappings_deleted": 0}
+    import requests as req
+    pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    ids_csv = ",".join(str(i) for i in node_ids)
+    devices = mappings = 0
+    try:
+        r = await asyncio.to_thread(lambda: req.patch(
+            f"{pg}/hubitat_matter_devices",
+            params={"our_node_id": f"in.({ids_csv})"},
+            json={"is_commissioned": False, "our_node_id": None},
+            headers={"Content-Type": "application/json", "Prefer": "return=representation"},
+            timeout=5))
+        devices = len(r.json()) if r.ok else 0
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"decommission reconcile: device rows PATCH failed: {e}")
+    try:
+        r = await asyncio.to_thread(lambda: req.delete(
+            f"{pg}/device_matter_map",
+            params={"matter_node_id": f"in.({ids_csv})"},
+            headers={"Prefer": "return=representation"},
+            timeout=5))
+        mappings = len(r.json()) if r.ok else 0
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"decommission reconcile: mapping rows DELETE failed: {e}")
+    if devices or mappings:
+        logger.info(f"decommission reconcile: {devices} device row(s) uncommissioned, "
+                    f"{mappings} mapping(s) deleted for nodes [{ids_csv}]")
+    return {"devices_reconciled": devices, "mappings_deleted": mappings}
+
+
 @app.post("/api/matter/nodes/{node_id}/decommission", tags=["matter"])
 async def matter_decommission_node(node_id: int, body: Optional[MatterDecommissionBody] = None):
-    """Remove OUR fabrics from one device (frees the slots we filled)."""
+    """Remove OUR fabrics from one device (frees the slots we filled). With
+    keep_current=false (full leave) the DB is reconciled too: the device row
+    goes back to uncommissioned and its mapping rows are deleted, so the UI
+    and Commission All see reality instead of a ghost."""
     from services.matter_debug import get_diagnostics
     keep = bool(body and body.keep_current)
     try:
-        return await get_diagnostics().decommission_node(node_id, keep_current=keep)
+        result = await get_diagnostics().decommission_node(node_id, keep_current=keep)
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e))
+    if not keep:  # fully left the device -> clear DB state for this node
+        result["reconciled"] = await _matter_reconcile_decommissioned([node_id])
+    return result
 
 
 @app.post("/api/matter/decommission-all", tags=["matter"])
 async def matter_decommission_all(body: Optional[MatterDecommissionBody] = None):
-    """Decommission OUR fabrics from EVERY commissioned node (UI warning-gated)."""
+    """Decommission OUR fabrics from EVERY commissioned node (UI warning-gated).
+    With keep_current=false the DB is reconciled for every node that was in the
+    fabric (rows back to uncommissioned + mappings deleted) — previously the DB
+    kept claiming is_commissioned=true after a full decommission, which is why
+    'Decommission all' looked like it did nothing and Commission All skipped
+    everything."""
+    from services.matter_client import get_matter_client
     from services.matter_debug import get_diagnostics
     keep = bool(body and body.keep_current)
+    # Snapshot the node ids BEFORE decommissioning (afterwards they're gone).
+    node_ids: List[int] = []
+    if not keep:
+        try:
+            client = get_matter_client()
+            if client.is_connected or await client.connect():
+                nodes = await client.get_nodes()
+                node_ids = [int(n.get("node_id")) for n in (nodes or [])
+                            if n.get("node_id") is not None]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"decommission-all: pre-snapshot of node ids failed: {e}")
     try:
-        return await get_diagnostics().decommission_all(keep_current=keep)
+        result = await get_diagnostics().decommission_all(keep_current=keep)
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e))
+    if not keep and node_ids:
+        result["reconciled"] = await _matter_reconcile_decommissioned(node_ids)
+    return result
 
 
 @app.get("/api/matter/nodes", tags=["matter"])
@@ -3680,26 +3758,143 @@ class BulkCommissionBody(BaseModel):
     confirmed: bool = False
 
 
+# ---------------------------------------------------------------------------
+# Bulk commission — STRICTLY SEQUENTIAL, background run + status polling.
+#
+# Operator directive 2026-07-12 ("Commission All doesn't work well. Probably
+# overflow. Hubitat can handle only one device at a time"): the previous
+# implementation ran 3 commissions CONCURRENTLY (Semaphore(3) + gather) — three
+# simultaneous pairing windows on the same hub and three competing PASE
+# sessions, with zero settle time. The required flow is:
+#     get code for 1 → wait for that one to be fully done →
+#     pause so the hub catches its breath → next device.
+#
+# It also runs as a BACKGROUND task with a status endpoint: a serialized run
+# over N devices takes N × (commission ~15s + settle 8s) — minutes — and a
+# synchronous HTTP response would be killed by the nginx proxy read timeout
+# long before finishing. The UI polls /auto-commission-all/status instead.
+# Single uvicorn worker → a module-level state dict is race-free enough here.
+# ---------------------------------------------------------------------------
+_BULK_COMMISSION_SETTLE_S = 8.0            # hub "breath" between devices
+_BULK_COMMISSION_DEVICE_TIMEOUT_S = 120.0  # hard ceiling per device (a wedged
+                                           # device must not stall the run)
+_BULK_COMMISSION_MAX_CONSECUTIVE_FAILURES = 3  # circuit breaker: hub is wedged
+
+_bulk_commission_state: Dict[str, Any] = {"running": False}
+
+
+async def _bulk_commission_worker(devices: List[Dict[str, Any]], hub_label: str) -> None:
+    """
+    The sequential bulk-commission loop (background task).
+
+    For each device row, in order: run the full one-click auto-commission
+    (openPairingWindow on the device's OWN hub → commission_with_code → self-
+    clean → map/PATCH), WAIT for it to finish (or hit the per-device ceiling),
+    then sleep _BULK_COMMISSION_SETTLE_S before the next device so the hub's
+    pairing subsystem recovers. Never two pairing windows at once.
+
+    Guards:
+    - Per-run MAC dedup: the same physical device present on 2+ selected hubs
+      is two rows; commissioning it twice would burn two fabric slots. First
+      row wins, later rows are recorded as "skipped".
+    - Circuit breaker: _BULK_COMMISSION_MAX_CONSECUTIVE_FAILURES consecutive
+      failures aborts the run (a wedged hub should not be ground through).
+
+    Progress is written into _bulk_commission_state for the status endpoint.
+    """
+    from datetime import datetime  # app.py convention: datetime imported locally
+    st = _bulk_commission_state
+    seen_macs: set = set()
+    consecutive_failures = 0
+    aborted = False
+    try:
+        for n, device in enumerate(devices):
+            name = device.get('device_name', device['unique_id'])
+            mac = (device.get('mac_address') or '').strip().lower()
+            st["done"] = n
+            st["current"] = name
+
+            # Per-run MAC dedup — one commission per PHYSICAL device.
+            if mac and mac in seen_macs:
+                st["results"].append({
+                    "device": name, "status": "skipped",
+                    "detail": "same physical device (MAC) already commissioned this run",
+                })
+                st["skipped"] += 1
+                continue
+
+            try:
+                result = await asyncio.wait_for(
+                    matter_auto_commission(AutoCommissionRequest(unique_id=device['unique_id'])),
+                    timeout=_BULK_COMMISSION_DEVICE_TIMEOUT_S,
+                )
+                st["results"].append({"device": name, "status": "ok",
+                                      "node_id": result.get("our_node_id")})
+                st["ok"] += 1
+                consecutive_failures = 0
+                if mac:
+                    seen_macs.add(mac)
+            except asyncio.TimeoutError:
+                logger.warning(f"Bulk commission: '{name}' exceeded "
+                               f"{_BULK_COMMISSION_DEVICE_TIMEOUT_S:.0f}s ceiling")
+                st["results"].append({"device": name, "status": "error",
+                                      "detail": f"timed out after {_BULK_COMMISSION_DEVICE_TIMEOUT_S:.0f}s"})
+                st["failed"] += 1
+                consecutive_failures += 1
+            except HTTPException as e:
+                logger.warning(f"Bulk commission failed for {name}: {e.detail}")
+                st["results"].append({"device": name, "status": "error", "detail": e.detail})
+                st["failed"] += 1
+                consecutive_failures += 1
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Bulk commission failed for {name}: {e}")
+                st["results"].append({"device": name, "status": "error", "detail": str(e)})
+                st["failed"] += 1
+                consecutive_failures += 1
+
+            if consecutive_failures >= _BULK_COMMISSION_MAX_CONSECUTIVE_FAILURES:
+                aborted = True
+                logger.error(f"Bulk commission ABORTED: {consecutive_failures} consecutive "
+                             f"failures — hub pairing flow looks wedged")
+                break
+
+            # Settle pause between devices (not after the last one): let the
+            # hub close the window / recover before the next openPairingWindow.
+            if n < len(devices) - 1:
+                st["current"] = f"settling {int(_BULK_COMMISSION_SETTLE_S)}s (hub recovery)"
+                await asyncio.sleep(_BULK_COMMISSION_SETTLE_S)
+    finally:
+        st["done"] = len(st["results"])
+        st["current"] = None
+        st["running"] = False
+        st["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        summary = (f"Commissioned {st['ok']}/{st['total']} on {hub_label}"
+                   + (f", {st['failed']} failed" if st['failed'] else "")
+                   + (f", {st['skipped']} skipped (MAC dup)" if st['skipped'] else "")
+                   + (" — ABORTED (consecutive failures)" if aborted else ""))
+        st["message"] = summary
+        st["aborted"] = aborted
+        logger.info(f"Bulk commission finished: {summary}")
+
+
 @app.post("/api/matter/auto-commission-all", tags=["matter"])
 async def matter_auto_commission_all(body: Optional[BulkCommissionBody] = None):
     """
-    USER-INITIATED bulk commission: every discovered, online, uncommissioned
-    device ON THE SELECTED MATTER HUB (single-hub policy — other hubs' rows are
+    USER-INITIATED bulk commission over the SELECTED MATTER HUB SET
+    (multi-select — same set the scan uses; devices on unselected hubs are
     excluded, not errored).
 
     HARD GATE: requires {"confirmed": true} in the body — only the UI's
     "Commission All" button (behind its confirm dialog) sends it. Any legacy or
     automatic caller without the flag gets 409, so the scan-chain class of bug
     (bulk commissioning fired without the operator asking) is structurally
-    impossible to reintroduce.
+    impossible to reintroduce. NEVER runs automatically.
 
-    Only ever runs from the operator clicking "Commission All" — NEVER
-    automatically. The 2026-07-10/11 removals killed every automatic trigger
-    (the 5-min rolling commissioner and the scan→commission-all UI auto-chain,
-    which saturated device fabric slots); this explicit bulk action is the one
-    surviving multi-device path, kept by operator directive ("USER CAN run
-    this"). Concurrency capped at 3 so the hub's pairing flow and matter-server
-    PASE sessions aren't overwhelmed.
+    STARTS A BACKGROUND RUN and returns immediately with {started, total};
+    the run is strictly sequential (one pairing window at a time, settle pause
+    between devices — see _bulk_commission_worker). Poll
+    GET /api/matter/auto-commission-all/status for live progress. 409 if a
+    run is already in flight.
     """
     if body is None or not body.confirmed:
         raise HTTPException(
@@ -3707,22 +3902,70 @@ async def matter_auto_commission_all(body: Optional[BulkCommissionBody] = None):
             detail="Bulk commissioning requires explicit confirmation "
                    "({\"confirmed\": true}) — it is a user action, never automatic.")
 
+    if _bulk_commission_state.get("running"):
+        raise HTTPException(
+            status_code=409,
+            detail="A bulk commission run is already in progress — poll "
+                   "/api/matter/auto-commission-all/status.")
+
     postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
 
-    matter_hub = await _resolve_matter_hub()
-    if not matter_hub:
+    hubs = await _resolve_matter_hubs()
+    if not hubs:
         raise HTTPException(
             status_code=503,
-            detail="No Matter hub resolvable: select one (POST /api/matter/hub) "
+            detail="No Matter hub resolvable: select one or more (POST /api/matter/hub) "
                    "or mark a hub as primary in Settings → Hubs.")
+    hub_ips = [h["hub_ip"] for h in hubs if h.get("hub_ip")]
+    hub_label = ", ".join(h.get("hub_name") or h["hub_ip"] for h in hubs)
 
-    # Only devices living on THE Matter hub (plus online + uncommissioned).
+    # REALITY CHECK (2026-07-12): reconcile is_commissioned against the LIVE
+    # fabric before selecting. Rows can claim is_commissioned=true with an
+    # our_node_id that no longer exists (nodes from the pre-VENDOR_ID-fix
+    # fabric, or decommissions that never cleared the DB) — Commission All
+    # trusted the flag and silently skipped those devices forever. Any
+    # "commissioned" row whose node is NOT in the current fabric is flipped
+    # back to uncommissioned here so it gets picked up below.
+    try:
+        from services.matter_client import get_matter_client
+        import requests as req
+        client = get_matter_client()
+        if client.is_connected or await client.connect():
+            nodes = await client.get_nodes()
+            real_ids = {int(n["node_id"]) for n in (nodes or []) if n.get("node_id") is not None}
+            params = {"is_commissioned": "eq.true"}
+            if real_ids:   # nodes that exist stay commissioned; ghosts get flipped
+                params["our_node_id"] = f"not.in.({','.join(str(i) for i in sorted(real_ids))})"
+            r = await asyncio.to_thread(lambda: req.patch(
+                f"{postgrest_url}/hubitat_matter_devices", params=params,
+                json={"is_commissioned": False, "our_node_id": None},
+                headers={"Content-Type": "application/json", "Prefer": "return=representation"},
+                timeout=5))
+            ghosts = len(r.json()) if r.ok else 0
+            # NULL trap: SQL NOT IN never matches NULL, so rows claiming
+            # commissioned with our_node_id NULL need their own sweep.
+            r2 = await asyncio.to_thread(lambda: req.patch(
+                f"{postgrest_url}/hubitat_matter_devices",
+                params={"is_commissioned": "eq.true", "our_node_id": "is.null"},
+                json={"is_commissioned": False},
+                headers={"Content-Type": "application/json", "Prefer": "return=representation"},
+                timeout=5))
+            ghosts += len(r2.json()) if r2.ok else 0
+            if ghosts:
+                logger.info(f"Commission All reality-check: {ghosts} row(s) claimed "
+                            f"commissioned but their node is not in the live fabric — reset")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Commission All reality-check skipped: {e}")
+
+    # Online + uncommissioned + not soft-removed, on the selected hub SET.
     resp = await aget(
         f"{postgrest_url}/hubitat_matter_devices",
         params={
             "is_online": "eq.true",
             "is_commissioned": "eq.false",
-            "hub_ip": f"eq.{matter_hub['hub_ip']}",
+            "is_removed": "eq.false",
+            "hub_ip": f"in.({','.join(hub_ips)})",
+            "order": "hub_ip,device_name",
         },
         timeout=5,
     )
@@ -3731,41 +3974,71 @@ async def matter_auto_commission_all(body: Optional[BulkCommissionBody] = None):
 
     devices = resp.json()
     if not devices:
-        return {"message": f"No online uncommissioned devices on {matter_hub['hub_name']}",
-                "commissioned": 0, "failed": 0, "results": []}
+        return {"started": False, "total": 0,
+                "message": f"No online uncommissioned devices on {hub_label}"}
 
-    # Cap concurrent commissions at 3 (the old code claimed 3 in its docstring
-    # but actually ran ALL devices at once — Semaphore(len(devices)) — which
-    # hammered the hub's pairing flow).
-    sem = asyncio.Semaphore(3)
+    # Fresh run state, then hand off to the background worker.
+    from datetime import datetime  # app.py convention: datetime imported locally
+    _bulk_commission_state.clear()
+    _bulk_commission_state.update({
+        "running": True,
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "finished_at": None,
+        "hubs": hub_label,
+        "total": len(devices),
+        "done": 0, "ok": 0, "failed": 0, "skipped": 0,
+        "current": None, "results": [], "message": None, "aborted": False,
+    })
+    asyncio.create_task(_bulk_commission_worker(devices, hub_label))
 
-    async def commission_one(device):
-        """Commission a single device, respecting the semaphore."""
-        unique_id = device['unique_id']
-        device_name = device.get('device_name', unique_id)
-        async with sem:
-            try:
-                body = AutoCommissionRequest(unique_id=unique_id)
-                result = await matter_auto_commission(body)
-                return {"device": device_name, "status": "ok", "node_id": result.get("our_node_id")}
-            except HTTPException as e:
-                logger.warning(f"Bulk commission failed for {device_name}: {e.detail}")
-                return {"device": device_name, "status": "error", "detail": e.detail}
-            except Exception as e:
-                logger.warning(f"Bulk commission failed for {device_name}: {e}")
-                return {"device": device_name, "status": "error", "detail": str(e)}
+    return {"started": True, "total": len(devices), "hubs": hub_label,
+            "message": f"Sequential commission of {len(devices)} device(s) on {hub_label} started"}
 
-    results = await asyncio.gather(*[commission_one(d) for d in devices])
 
-    commissioned = sum(1 for r in results if r["status"] == "ok")
-    failed = sum(1 for r in results if r["status"] == "error")
+@app.get("/api/matter/auto-commission-all/status", tags=["matter"])
+async def matter_auto_commission_all_status():
+    """
+    Live progress of the (background, sequential) bulk-commission run: {running,
+    total, done, ok, failed, skipped, current, results[], message, aborted,
+    started_at, finished_at}. {running: false} with no totals = no run yet
+    this app lifetime. State is in-memory only (resets on app restart) — it is
+    run telemetry, not durable data; the durable outcome lives in
+    hubitat_matter_devices.is_commissioned / device_matter_map.
+    """
+    return dict(_bulk_commission_state)
 
-    return {
-        "message": f"Commissioned {commissioned}/{len(devices)} devices on {matter_hub['hub_name']}",
-        "commissioned": commissioned,
-        "failed": failed,
-        "results": results,
-    }
+
+# =============================================================================
+# Live Logs (navbar "Logs" modal — Hubitat-style live backend log stream)
+# =============================================================================
+
+
+@app.get("/api/logs/tail", tags=["logs"])
+async def logs_tail(after: int = 0, limit: int = 500):
+    """
+    Incremental tail of the in-process log ring (services/log_stream.py).
+
+    Pass the returned ``cursor`` back as ``after`` for a live stream — only
+    entries newer than it are returned (oldest first, capped at ``limit``).
+    Entries: {id, ts (epoch float), level, src (logger name), msg}. Filtering
+    (source/level/text) is CLIENT-side by design: the modal polls unfiltered
+    increments and filter flips are instant with no cursor games. In-memory
+    only — restarts empty the ring; `docker logs` stays the durable stream.
+    """
+    h = get_log_handler()
+    entries = h.tail(after_id=after, limit=min(max(limit, 1), 2000))
+    return {"entries": entries, "cursor": h.head_id()}
+
+
+@app.get("/api/logs/sources", tags=["logs"])
+async def logs_sources():
+    """
+    Distinct log sources currently in the ring, most-active first:
+    {src, count}. Sources are logger names — per-instance app loggers
+    ({AppClass}.{label}), service modules (services.*), app.py itself — i.e.
+    the "running apps/drivers/processes" list the modal's filters show.
+    """
+    return {"sources": get_log_handler().sources()}
 
 
 # =============================================================================

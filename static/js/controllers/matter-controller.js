@@ -401,6 +401,9 @@ $(document).ready(function () {
                                 data-node-id="${nodeId}">Test ON</button>
                         <button class="btn btn-small btn-secondary btn-test-off"
                                 data-node-id="${nodeId}">Test OFF</button>
+                        <button class="btn btn-small btn-danger btn-node-decommission"
+                                data-node-id="${nodeId}" data-node-name="${escapeHtml(name)}"
+                                title="Remove OUR fabric from this device (frees the slot; the device stays on Hubitat/other fabrics). DB is reconciled: the discovered row returns to 'uncommissioned' and its mapping is deleted.">Decommission</button>
                     </div>
                     ${mappedHtml}
                 </div>
@@ -415,6 +418,31 @@ $(document).ready(function () {
         });
         $container.find('.btn-test-off').on('click', function () {
             testMatterCommand($(this).data('node-id'), 'off');
+        });
+        // Per-tile decommission (operator directive 2026-07-12): full leave
+        // (keep_current=false) + backend DB reconcile, then refresh all panes.
+        $container.find('.btn-node-decommission').on('click', function () {
+            const nodeId = $(this).data('node-id');
+            const name = $(this).data('node-name') || `node ${nodeId}`;
+            if (!confirm(`Decommission "${name}" (node ${nodeId})?\n\n`
+                + 'Removes OUR fabric from the device — it stays on Hubitat and any other '
+                + 'fabric. The device becomes commissionable again (Commission / Commission All).')) {
+                return;
+            }
+            const $btn = $(this).prop('disabled', true).text('Decommissioning…');
+            $.ajax({
+                url: `/api/matter/nodes/${nodeId}/decommission`, method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ keep_current: false })
+            })
+            .done(function () {
+                showToast(`Decommissioned ${name}`, 'success');
+                loadNodes(); loadMappings(); loadDiscoveredDevices();
+            })
+            .fail(function (xhr) {
+                $btn.prop('disabled', false).text('Decommission');
+                showToast('Decommission failed: ' + (xhr.responseJSON?.detail || xhr.statusText), 'error');
+            });
         });
 
         // Node staleness (_is_online/_last_seen_at) just became available;
@@ -1138,11 +1166,37 @@ $(document).ready(function () {
     }
 
     function decommissionAll() {
-        if (!confirm('DECOMMISSION ALL — remove OUR fabrics from every commissioned node?\n\nThis is NOT a device reset; it removes MOBIUS fabrics via RemoveFabric. Next dialog picks orphans-only vs full-leave.')) return;
-        const keep = confirm('Keep our CURRENT fabric on each device?\n\nOK = clear ORPHANS only (recommended — devices stay controllable).\nCancel = FULLY LEAVE every device.');
-        showModal('Decommission all', 'Sweeping every node…', 'loading');
+        // TWO-STEP FLOW, abort-safe at every step (2026-07-12 — the previous
+        // version overloaded confirm()'s Cancel button to mean "FULLY LEAVE
+        // every device", so there was NO safe way to dismiss the dialog).
+        // Step 1 offers the safe default; Cancel there goes to step 2, where
+        // the destructive option needs its OWN explicit OK; Cancel = abort.
+        let keep;
+        if (confirm('DECOMMISSION ALL — safe option first:\n\n'
+                  + 'OK = clear ORPHANED fabrics only (recommended — devices stay '
+                  + 'controllable via our current fabric).\n'
+                  + 'Cancel = show the full-leave option instead.')) {
+            keep = true;
+        } else if (confirm('FULLY LEAVE every device?\n\n'
+                  + 'Removes ALL our fabrics from every commissioned node (NOT a device '
+                  + 'reset — devices stay on Hubitat/other fabrics). Rows return to '
+                  + '"uncommissioned" and their mappings are deleted; re-commission any time.\n\n'
+                  + 'OK = fully leave every device.\nCancel = do nothing.')) {
+            keep = false;
+        } else {
+            return;   // real abort path
+        }
+        showModal('Decommission all', keep ? 'Clearing orphaned fabrics on every node…'
+                                           : 'Fully leaving every node…', 'loading');
         $.ajax({ url: '/api/matter/decommission-all', method: 'POST', contentType: 'application/json', data: JSON.stringify({ keep_current: keep }) })
-            .done(function (d) { showModal('Decommission all complete', `${d.count} nodes processed (keep_current=${d.keep_current}).`, 'success'); loadNodes(); })
+            .done(function (d) {
+                const rec = d.reconciled
+                    ? ` DB reconciled: ${d.reconciled.devices_reconciled} device row(s) uncommissioned, ${d.reconciled.mappings_deleted} mapping(s) deleted.`
+                    : '';
+                showModal('Decommission all complete',
+                          `${d.count} nodes processed (keep_current=${d.keep_current}).${rec}`, 'success');
+                loadNodes(); loadMappings(); loadDiscoveredDevices();
+            })
             .fail(function (x) { showModal('Decommission all failed', x.responseJSON?.detail || 'error', 'error'); });
     }
 
@@ -1796,47 +1850,84 @@ $(document).ready(function () {
         // Explicit-user gate, both ends: this confirm dialog here, and the
         // backend 409s any call that doesn't carry {confirmed:true} — so bulk
         // commissioning can never fire without the operator asking.
+        //
+        // SEQUENTIAL + BACKGROUND (2026-07-12): the backend now commissions
+        // strictly ONE device at a time (Hubitat can only run one pairing
+        // window), with a settle pause between devices, as a background run.
+        // POST returns immediately; we POLL .../status and live-update the
+        // banner until the run finishes.
         if (!confirm(
-            'Commission ALL online, uncommissioned devices on the selected Matter hub?\n\n'
-            + 'This opens a pairing window and commissions each device (up to 3 at a time). '
-            + 'It can take several minutes. Devices on other hubs are not touched.')) {
+            'Commission ALL online, uncommissioned devices on the selected Matter hubs?\n\n'
+            + 'Devices are commissioned ONE AT A TIME (a pairing window per device, '
+            + 'with a short settle pause between them so the hub keeps up). '
+            + 'Expect roughly 20-30s per device. Devices on unselected hubs are not touched.')) {
             return;
         }
         const statusEl = $status || $('#scan-status');
-        const prefix = baseMsg || '';
+        const prefix = baseMsg ? baseMsg + ' ' : '';
 
         statusEl.removeClass('success error')
             .addClass('loading')
-            .text(prefix + ' Commissioning all online devices...')
+            .text(prefix + 'Starting sequential commission run...')
             .show();
+
+        // Poll the background run until it reports running:false, painting
+        // progress (done/total + current device) into the banner as it goes.
+        function pollRun() {
+            $.ajax({ url: '/api/matter/auto-commission-all/status', method: 'GET' })
+            .done(function (st) {
+                if (st.running) {
+                    const cur = st.current ? ` — ${st.current}` : '';
+                    statusEl.text(`${prefix}Commissioning ${st.done}/${st.total}`
+                        + ` (ok ${st.ok}, failed ${st.failed})${cur}`);
+                    setTimeout(pollRun, 2500);
+                    return;
+                }
+                // Finished (or no run state after an app restart mid-run).
+                const msg = st.message || 'Commission run finished';
+                const cls = (st.failed > 0 || st.aborted) ? 'error' : 'success';
+                statusEl.removeClass('loading').addClass(cls).text(prefix + msg);
+                if (st.results) {
+                    const errs = st.results.filter(r => r.status === 'error');
+                    if (errs.length) console.warn('Commission failures:', errs);
+                }
+                // Refresh everything
+                loadNodes();
+                loadMappings();
+                loadDiscoveredDevices();
+            })
+            .fail(function () {
+                // Transient poll failure (reload/restart) — keep trying briefly.
+                setTimeout(pollRun, 4000);
+            });
+        }
 
         $.ajax({
             url: '/api/matter/auto-commission-all',
             method: 'POST',
             contentType: 'application/json',
             data: JSON.stringify({ confirmed: true }),
-            timeout: 600000  // 10 min — commissioning each device takes time
+            timeout: 30000  // start-only: the run itself is backgrounded
         })
         .done(function (data) {
-            let msg = prefix ? prefix + ' ' : '';
-            msg += data.message;
-            if (data.failed > 0) {
-                msg += ` (${data.failed} failed)`;
-                statusEl.removeClass('loading').addClass('success').text(msg);
-                // Log failures to console for debugging
-                console.warn('Commission failures:', data.results.filter(r => r.status === 'error'));
-            } else {
-                statusEl.removeClass('loading').addClass('success').text(msg);
+            if (!data.started) {   // nothing to do (0 devices)
+                statusEl.removeClass('loading').addClass('success')
+                    .text(prefix + (data.message || 'Nothing to commission'));
+                return;
             }
-            // Refresh everything
-            loadNodes();
-            loadMappings();
-            loadDiscoveredDevices();
+            statusEl.text(`${prefix}${data.message} — waiting for first device...`);
+            setTimeout(pollRun, 1500);
         })
         .fail(function (xhr) {
+            // 409 "already in progress" → just attach to the running job.
+            if (xhr.status === 409 && (xhr.responseJSON?.detail || '').includes('already in progress')) {
+                statusEl.text(prefix + 'A run is already in progress — attaching...');
+                setTimeout(pollRun, 1000);
+                return;
+            }
             const detail = xhr.responseJSON?.detail || 'Bulk commission failed';
             statusEl.removeClass('loading').addClass('error')
-                .text(prefix + ' Commission error: ' + detail);
+                .text(prefix + 'Commission error: ' + detail);
         });
     }
 
@@ -2096,4 +2187,119 @@ $(document).ready(function () {
             setTimeout(() => $toast.remove(), 300);
         }, 3000);
     }
+
+    // =========================================================================
+    // MATTER TERMINAL DOCK (2026-07-12) — persistent right-side live terminal
+    // streaming the SAME two feeds as the commission modal, page-wide:
+    //   [cli] /api/matter/debug/log     (our WS commands/results, seq cursor)
+    //   [srv] /api/matter/server-log    (matterjs CHIP log, byte-offset cursor)
+    // Separate cursors from the modal's so both can run at once. Collapsible
+    // (edge tab), drag-resizable via the left grip (320px..95vw), both
+    // persisted in localStorage. Polling stops while collapsed or hidden.
+    // =========================================================================
+    const _DOCK_POLL_MS = 1500, _DOCK_MAX_LINES = 2500;
+    let _dockTimer = null, _dockCliSeq = 0, _dockSrvOffset = -1, _dockPaused = false;
+
+    function _dockAppend(html) {
+        const $log = $('#matter-dock-log');
+        const el = $log[0];
+        if (!el) return;
+        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        $log.append(html);
+        // Trim the oldest lines so an all-night session can't grow unbounded.
+        const kids = el.children;
+        if (kids.length > _DOCK_MAX_LINES) {
+            for (let i = kids.length - _DOCK_MAX_LINES; i > 0; i--) el.removeChild(el.firstChild);
+        }
+        if (atBottom) el.scrollTop = el.scrollHeight;
+    }
+
+    function _dockPoll() {
+        if (_dockPaused) return;
+        const showCli = $('#dock-show-cli').is(':checked');
+        const showSrv = $('#dock-show-srv').is(':checked');
+        // 1) client op-log — cursor always advances (even when hidden) so
+        //    re-enabling [cli] doesn't dump the backlog.
+        $.getJSON(`/api/matter/debug/log?since_seq=${_dockCliSeq}&limit=120`).done(function (d) {
+            if (d.records && d.records.length) {
+                if (showCli) {
+                    let html = '';
+                    d.records.forEach(function (r) {
+                        const cls = r.level === 'ERROR' ? 'dbg-bad' : (r.level === 'WARNING' ? 'dbg-warn' : '');
+                        html += `<span class="${cls}">${r.ts.slice(11, 19)} <b>[cli]</b> ${escapeHtml(r.msg)}</span>\n`;
+                    });
+                    _dockAppend(html);
+                }
+                _dockCliSeq = d.last_seq;
+            }
+            $('#matter-dock-state').text(`cli seq ${_dockCliSeq} · srv @${_dockSrvOffset}${_dockPaused ? ' · PAUSED' : ''}`);
+        });
+        // 2) matterjs CHIP log — first poll only seeds the tail offset.
+        $.getJSON(`/api/matter/server-log?since=${_dockSrvOffset}`).done(function (s) {
+            if (s.available && s.lines && s.lines.length && _dockSrvOffset >= 0 && showSrv) {
+                let html = '';
+                s.lines.forEach(function (ln) {
+                    const low = ln.toLowerCase();
+                    const cls = (low.includes('error') || low.includes('(133)') || low.includes('failed')
+                                 || low.includes('invalidcommand')) ? 'dbg-bad'
+                              : (low.includes('warn') ? 'dbg-warn' : 'dbg-srv');
+                    html += `<span class="${cls}"><b>[srv]</b> ${escapeHtml(ln)}</span>\n`;
+                });
+                _dockAppend(html);
+            }
+            if (s.available) _dockSrvOffset = s.offset;
+        });
+    }
+
+    function _dockSetCollapsed(collapsed) {
+        $('#matter-dock').toggleClass('collapsed', collapsed);
+        localStorage.setItem('matterDock.collapsed', collapsed ? '1' : '0');
+        if (collapsed) {
+            if (_dockTimer) { clearInterval(_dockTimer); _dockTimer = null; }
+        } else if (!_dockTimer) {
+            _dockPoll();
+            _dockTimer = setInterval(_dockPoll, _DOCK_POLL_MS);
+        }
+    }
+
+    function initMatterDock() {
+        const $dock = $('#matter-dock');
+        if (!$dock.length) return;
+
+        // Restore persisted width + collapsed state (default: collapsed).
+        const w = parseInt(localStorage.getItem('matterDock.width') || '480', 10);
+        $dock.css('width', Math.min(Math.max(w, 320), window.innerWidth * 0.95) + 'px');
+        _dockSetCollapsed(localStorage.getItem('matterDock.collapsed') !== '0');
+
+        $('#matter-dock-tab').on('click', function () {
+            _dockSetCollapsed(!$dock.hasClass('collapsed'));
+        });
+        $('#dock-clear').on('click', function () { $('#matter-dock-log').empty(); });
+        $('#dock-pause').on('click', function () {
+            _dockPaused = !_dockPaused;
+            $(this).text(_dockPaused ? 'Resume' : 'Pause');
+        });
+
+        // Drag-to-resize: grip tracks the pointer; width = viewport right
+        // edge minus pointer X, clamped [320px .. 95vw], persisted on release.
+        $('#matter-dock-grip').on('mousedown', function (e) {
+            e.preventDefault();
+            $dock.addClass('dragging');
+            $('body').addClass('matter-dock-resizing');
+            function onMove(ev) {
+                const px = Math.min(Math.max(window.innerWidth - ev.clientX, 320),
+                                    window.innerWidth * 0.95);
+                $dock.css('width', px + 'px');
+            }
+            function onUp() {
+                $(document).off('mousemove', onMove).off('mouseup', onUp);
+                $dock.removeClass('dragging');
+                $('body').removeClass('matter-dock-resizing');
+                localStorage.setItem('matterDock.width', parseInt($dock.css('width'), 10));
+            }
+            $(document).on('mousemove', onMove).on('mouseup', onUp);
+        });
+    }
+
+    initMatterDock();
 });

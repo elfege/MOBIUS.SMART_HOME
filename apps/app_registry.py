@@ -90,6 +90,13 @@ def initialize_registry(instance_manager=None) -> None:
     from apps.sonos.app import SonosApp
     register_app_type(SonosApp)
 
+    # Humidifier — MAINTAIN humidity: plug ON when air is dry (below
+    # threshold) + room occupied, OFF once target reached / room empty /
+    # contact open. Bang-bang port of the Groovy HUMIDIFIER app. Distinct
+    # from fan_automation, which REDUCES humidity (exhaust).
+    from apps.humidifier.app import HumidifierApp
+    register_app_type(HumidifierApp)
+
     # Register with instance manager if provided
     if instance_manager:
         for type_name, app_class in _app_types.items():

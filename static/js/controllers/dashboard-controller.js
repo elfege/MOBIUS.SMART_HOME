@@ -362,14 +362,29 @@ export class DashboardController {
             const ariaExp = isExpanded ? 'true' : 'false';
             const caret = isExpanded ? '▾' : '▸';
             const gridStyle = isExpanded ? '' : ' style="display:none;"';
+            // Bulk pause/resume for every instance of this app type. Buttons
+            // stopPropagation so a click doesn't also toggle the group open.
+            // Reuses the same per-instance /pause + /resume endpoints as the
+            // per-card button (no bulk backend) — see pauseAllInApp().
+            const plural = n !== 1 ? 's' : '';
             return `
                 <div class="app-group" data-app="${typeId}">
-                    <button class="app-group-header" aria-expanded="${ariaExp}"
-                            onclick="dashboard.toggleGroup(this, '${gridId}')">
-                        <span class="app-group-caret">${caret}</span>
-                        <span class="app-group-name">${utils.escapeHtml(name)}</span>
-                        <span class="app-group-count">${n} instance${n !== 1 ? 's' : ''}</span>
-                    </button>
+                    <div class="app-group-header-row">
+                        <button class="app-group-header" aria-expanded="${ariaExp}"
+                                onclick="dashboard.toggleGroup(this, '${gridId}')">
+                            <span class="app-group-caret">${caret}</span>
+                            <span class="app-group-name">${utils.escapeHtml(name)}</span>
+                            <span class="app-group-count">${n} instance${plural}</span>
+                        </button>
+                        <span class="app-group-actions">
+                            <button type="button" class="app-group-action-btn"
+                                    title="Pause all ${n} ${utils.escapeHtml(name)} instance${plural}"
+                                    onclick="event.stopPropagation(); dashboard.pauseAllInApp('${typeId}', true)">&#10074;&#10074; Pause all</button>
+                            <button type="button" class="app-group-action-btn"
+                                    title="Resume all ${n} ${utils.escapeHtml(name)} instance${plural}"
+                                    onclick="event.stopPropagation(); dashboard.pauseAllInApp('${typeId}', false)">&#9654; Resume all</button>
+                        </span>
+                    </div>
                     <div class="instances-grid app-group-instances" id="${gridId}"${gridStyle}>${cards}</div>
                 </div>`;
         }).join('');
@@ -708,49 +723,107 @@ export class DashboardController {
             if (isPaused) {
                 await api.post(`/instances/${instanceId}/resume`);
             } else {
-                // Explicit reason — flags this pause as user-initiated.
-                // AML's on_mode_change only auto-resumes when the reason is
-                // 'mode_exclusion', so 'ui_button' (and any other manually
-                // assigned reason) is safe from accidental auto-resume on
-                // mode flips.
-                //
-                // Pause duration is per-instance: read pauseDuration +
-                // pauseDurationUnit from the instance's settings, convert
-                // to minutes. 0 = indefinite (no auto-resume; user must
-                // hit Resume manually). Fallback to 60 minutes only if
-                // neither setting is declared by the app type. Surfaced
-                // 2026-06-16 — the previous hardcoded 60 was silently
-                // auto-resuming pauses the user intended to be indefinite.
-                // Universal pause contract (2026-06-16): every app declares
-                // pauseDuration + pauseDurationUnit (Seconds|Minutes) +
-                // resumeOnModeChange. We send duration_seconds when the unit
-                // is Seconds so sub-minute pauses don't degenerate to
-                // indefinite via integer-divide rounding.
                 const inst = this.instances.find(i => i.id === instanceId);
-                const settings = (inst && inst.settings) || {};
-                const body = { reason: 'ui_button' };
-                if ('pauseDuration' in settings) {
-                    const raw = parseInt(settings.pauseDuration, 10);
-                    if (!isNaN(raw) && raw >= 0) {
-                        const unit = (settings.pauseDurationUnit || 'Minutes');
-                        if (unit === 'Seconds') {
-                            body.duration_seconds = raw;
-                        } else {
-                            body.duration_minutes = raw;
-                        }
-                    } else {
-                        body.duration_minutes = 60;
-                    }
-                } else {
-                    // App type pre-dates the universal contract — legacy
-                    // 60-minute pause stays as the safe fallback.
-                    body.duration_minutes = 60;
-                }
-                await api.post(`/instances/${instanceId}/pause`, body);
+                await api.post(`/instances/${instanceId}/pause`, this._pauseBodyFor(inst));
             }
             await this.loadInstances();
         } catch (error) {
             utils.notify(`Failed to ${isPaused ? 'resume' : 'pause'} instance: ${error.message}`, 'error');
+        }
+    }
+
+    /**
+     * Build the per-instance pause request body per the universal pause
+     * contract. Extracted from togglePause so bulk pause (pauseAllInApp)
+     * reuses byte-identical behaviour.
+     *
+     * Explicit reason 'ui_button' flags this as user-initiated — AML's
+     * on_mode_change only auto-resumes when the reason is 'mode_exclusion',
+     * so a manual pause is safe from accidental auto-resume on mode flips.
+     *
+     * Duration is per-instance: read pauseDuration + pauseDurationUnit from
+     * the instance's settings. 0 = indefinite (no auto-resume). We send
+     * duration_seconds when the unit is Seconds so sub-minute pauses don't
+     * degenerate to indefinite via integer-divide rounding. App types that
+     * pre-date the universal contract (2026-06-16) fall back to 60 minutes.
+     *
+     * @param {object} inst - The instance object (may be undefined).
+     * @returns {object} Pause request body.
+     */
+    _pauseBodyFor(inst) {
+        const settings = (inst && inst.settings) || {};
+        const body = { reason: 'ui_button' };
+        if ('pauseDuration' in settings) {
+            const raw = parseInt(settings.pauseDuration, 10);
+            if (!isNaN(raw) && raw >= 0) {
+                const unit = (settings.pauseDurationUnit || 'Minutes');
+                if (unit === 'Seconds') {
+                    body.duration_seconds = raw;
+                } else {
+                    body.duration_minutes = raw;
+                }
+            } else {
+                body.duration_minutes = 60;
+            }
+        } else {
+            body.duration_minutes = 60;
+        }
+        return body;
+    }
+
+    /**
+     * Bulk pause or resume EVERY instance of one app type.
+     *
+     * UI-only: reuses the existing per-instance POST /instances/{id}/pause
+     * and /resume endpoints (no bulk backend), so each transition is
+     * identical to clicking that instance's own Pause/Resume button.
+     *
+     * Only instances that actually need the transition are touched, so a
+     * second "Pause all" click does not re-pause already-paused instances
+     * (which would reset their pause timers). Calls run concurrently; a
+     * single-instance failure is counted, not fatal to the rest.
+     *
+     * @param {number|string} typeId - The app_type_id of the group.
+     * @param {boolean} pause - true = pause all, false = resume all.
+     */
+    async pauseAllInApp(typeId, pause) {
+        const targets = this.instances.filter(
+            i => String(i.app_type_id) === String(typeId)
+        );
+        if (!targets.length) return;
+
+        // Skip instances already in the desired state (idempotent).
+        const acting = targets.filter(i => !!i.is_paused !== pause);
+        if (!acting.length) {
+            utils.notify(
+                `All ${targets.length} already ${pause ? 'paused' : 'running'}`,
+                'info'
+            );
+            return;
+        }
+
+        let ok = 0, fail = 0;
+        await Promise.all(acting.map(async inst => {
+            try {
+                if (pause) {
+                    await api.post(`/instances/${inst.id}/pause`, this._pauseBodyFor(inst));
+                } else {
+                    await api.post(`/instances/${inst.id}/resume`);
+                }
+                ok++;
+            } catch (e) {
+                fail++;
+            }
+        }));
+
+        await this.loadInstances();
+
+        const verb = pause ? 'Paused' : 'Resumed';
+        if (fail) {
+            utils.notify(`${verb} ${ok}/${acting.length} — ${fail} failed`, 'error');
+        } else {
+            // 'info' (blue), not 'success' (green) — colorblind palette.
+            utils.notify(`${verb} ${ok} instance${ok !== 1 ? 's' : ''}`, 'info');
         }
     }
 

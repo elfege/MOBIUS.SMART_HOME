@@ -4,11 +4,23 @@ Scheduler Service
 Manages background scheduled tasks using APScheduler. Provides:
 - Timeout scheduling (turn off lights after N minutes)
 - Health checks
-- Pause expiration
-- Persistent job storage (survives restarts)
 
-Jobs are stored in PostgreSQL for durability. When the service restarts,
-pending jobs are restored from the database.
+IMPORTANT — restart semantics (do NOT assume durability here):
+The APScheduler jobstore is an in-memory ``MemoryJobStore``. Every scheduled
+job (including auto-resume one-shots) is DESTROYED on any app restart/reload.
+The ``scheduled_jobs`` PostgreSQL table is an audit/metadata mirror only —
+``_restore_pending_jobs`` repopulates the in-process ``_jobs`` tracking dict
+from it but does NOT re-add jobs to APScheduler (and could not: callbacks are
+in-process lambdas/bound methods, not importable references). So a job written
+here will not fire again after a restart.
+
+Durability that MUST survive restarts therefore does not live in this service.
+Timed-pause auto-resume is guaranteed by a durable-state reconciler that reads
+the ``app_instances.pause_expires_at`` column on a recurring cadence — see
+``services.instance_manager.resume_expired_pauses`` (added 2026-07-11 after a
+timed pause survived only until the next restart). Add future
+must-survive-restart behavior the same way (durable column + reconciler), not
+by trusting this scheduler.
 """
 
 import os
@@ -24,10 +36,13 @@ import requests
 
 class SchedulerService:
     """
-    Background task scheduler with persistent job storage.
+    Background task scheduler (IN-MEMORY jobstore — jobs do NOT survive a
+    restart; see the module docstring).
 
-    Uses APScheduler for in-memory scheduling with PostgreSQL as
-    a backup store for job metadata (enables recovery after restart).
+    Uses APScheduler with a MemoryJobStore. PostgreSQL (`scheduled_jobs`) is an
+    audit/metadata mirror only — it does NOT make jobs re-fire after a restart.
+    Must-survive-restart behavior belongs in a durable-state reconciler (e.g.
+    instance_manager.resume_expired_pauses), not here.
 
     Job types:
     - 'turn_off': Turn off lights after motion timeout
@@ -517,9 +532,18 @@ class SchedulerService:
                         timeout=5
                     )
                 else:
-                    # Job in future — re-add to scheduler.
+                    # Job still in the future: record its METADATA only. NOTE
+                    # this does NOT re-arm APScheduler — the callback is an
+                    # in-process lambda that cannot be reconstructed from a DB
+                    # row, so the job will not actually fire. Behavior that must
+                    # survive a restart is guaranteed elsewhere by a durable
+                    # reconciler (instance_manager.resume_expired_pauses), not
+                    # by this bookkeeping. Kept only for get_job()/audit lookups.
                     self._jobs[job['job_id']] = job
-                    self.logger.info(f"Restored pending job: {job['job_id']}")
+                    self.logger.info(
+                        f"Recorded pending job metadata (NOT re-armed): "
+                        f"{job['job_id']}"
+                    )
 
             self.logger.info(
                 f"Restored {len(jobs)} non-timeout pending jobs from database"

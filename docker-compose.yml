@@ -51,22 +51,26 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: smarthome-app
-    # Dev override: enable hot reload (Dockerfile CMD is production-clean)
-    # Output piped through tee so nginx can serve startup.log on the reloading page
-    command: ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port 5000 --workers 1 --timeout-keep-alive 120 --reload --reload-dir /app 2>&1 | tee /app/logs/startup.log"]
+    # --reload DROPPED (2026-07-11, operator directive): this is the live home.
+    # uvicorn --reload's WatchFiles restarted the app on ANY file save (agent
+    # edits, the parallel instances' edits) → a ~1-2s 502 each time → the nginx
+    # "Application is starting up" page + a proxy DOWN/RECOVERED alert, even when
+    # "nothing was going on". Without --reload the app only recycles on an
+    # explicit ./start.sh or `docker restart smarthome-app`.
+    # Output piped through tee so nginx can serve startup.log on the reloading page.
+    command: ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port 5000 --workers 1 --timeout-keep-alive 120 2>&1 | tee /app/logs/startup.log"]
     ports:
       - "${APP_EXTERNAL_PORT:-5001}:${APP_INTERNAL_PORT:-5000}"
     environment:
       PYTHONUNBUFFERED: "1"
 
-      # HOT-RELOAD NOTE (verified 2026-06-24): uvicorn --reload's WatchFiles DOES
-      # detect edits to the DIRECTORY mounts (./apps, ./services, ./templates,
-      # ./static) across the bind mount on this host — no polling needed. The ONE
-      # exception is ./app.py, mounted as a SINGLE FILE (./app.py:/app/app.py):
-      # atomic-write editors replace the host inode, which a file-level bind mount
-      # doesn't track, so app.py edits are invisible in-container until ./start.sh
-      # (or a docker cp). Keep app logic in apps/ + services/ for live reload;
-      # app.py (routes/wiring/migrations) changes need ./start.sh.
+      # RELOAD SEMANTICS (updated 2026-07-11, --reload removed): there is NO
+      # Python hot-reload anymore. PYTHON changes — app.py AND the directory
+      # mounts (apps/, services/) — require `docker restart smarthome-app` (or
+      # ./start.sh) to take effect. STATIC assets are unaffected: templates/
+      # (Jinja, rendered per-request) and static/ (served per-request) still
+      # show on a plain browser reload with no restart. So: JS/CSS/HTML = browser
+      # reload; any .py = restart the container.
 
       # Hubitat credentials (standardized names, mapped from AWS by start.sh)
       HUBITAT_API_TOKEN_MAIN: ${HUBITAT_API_TOKEN_MAIN}
@@ -99,6 +103,12 @@ services:
       # Server configuration
       SERVER_IP: ${SERVER_IP:-<LAN_IP>}
 
+      # Matter controller identity — stamped onto the command learning-log
+      # (dshub.matter_command_feedback.controller) so worked-rates segment
+      # before/after the migration. Now matterjs-server (the controller image is
+      # ghcr.io/matter-js/matterjs-server); was the archived python-matter-server.
+      MATTER_CONTROLLER_IMPL: "${MATTER_CONTROLLER_IMPL:-matterjs-server}"
+
       # Sonos announcement subsystem (services/sonos). SSDP multicast doesn't
       # cross the Docker bridge, so seed the speaker IPs for in-container
       # discovery; unicast control + room-name lookup work over the bridge.
@@ -123,10 +133,14 @@ services:
       SAMSUNG_TV_NAME: "${SAMSUNG_TV_NAME:-living_room_tv}"
       SAMSUNG_TV_APP_NAME: "${SAMSUNG_TV_APP_NAME:-Smart Home Controller}"
     volumes:
-      # Mount source for development (hot reload via uvicorn --reload)
+      # Bind-mount source so edits land in-container without a rebuild. NOTE:
+      # no hot-reload (--reload removed) — Python changes need a container
+      # restart; static/templates are served per-request (browser reload only).
       - ./app.py:/app/app.py
       - ./apps:/app/apps
       - ./services:/app/services
+      # matter-server's CHIP log (read-only) — streamed into the commission modal.
+      - matter_server_logs:/matter-logs:ro
       # Restart trigger tmpfs (canonical RESTART.1-4): the UI Restart button
       # (POST /api/restart) writes "reboot" here; the host-side
       # smarthome-restart-watcher.service picks it up and runs start.sh.
@@ -243,19 +257,44 @@ services:
   # MUST use host networking for mDNS device discovery.
   # ---------------------------------------------------------------------------
   matter-server:
-    image: ghcr.io/home-assistant-libs/python-matter-server:stable
+    # matter.js-based controller — drop-in replacement for the ARCHIVED
+    # home-assistant-libs/python-matter-server (final v8.1.2, dead upstream).
+    # Same v8.1.2-compatible WebSocket API (ws://host:5580/ws), Matter 1.4.2,
+    # actively maintained. Migrated 2026-07-10 after python-matter-server's
+    # "Node is not (yet) available" invoke bug (GH #649/#685) made every
+    # on/off / RemoveFabric / decommission INVOKE fail while reads still worked.
+    # Drop-in verified 2026-07-10 by a side-by-side spike: our unmodified
+    # services/matter_client.py connected and round-tripped server_info/get_nodes.
+    # Plan: docs/plans/migrate_matter_controller_from_archived_python_matter_server_to_maintained_matterjs_server_drop_in.md
+    image: ghcr.io/matter-js/matterjs-server:stable
     container_name: smarthome-matter-server
     restart: unless-stopped
-    network_mode: host
-    privileged: true
+    network_mode: host          # required for mDNS operational discovery
+    # matter.js image runs as uid 1000 and cannot chown /data itself; running
+    # as root lets it own the fresh (root-owned) named volume without a chown
+    # dance. No BLE here (we commission over IP, network_only) so no privileged
+    # / dbus needed — a narrower surface than the old privileged container.
+    user: "0:0"
     volumes:
-      - matter_data:/data/
-      - /run/dbus:/run/dbus
+      # FRESH volume on purpose: matter.js storage format differs from
+      # python-matter-server AND a new controller means a NEW fabric (devices
+      # must be re-commissioned into it). The old `matter_data` volume is left
+      # untouched so a rollback is just reverting this block + ./start.sh.
+      - matter_js_data:/data
+      # Shared CHIP-log volume: matterjs writes its verbose commissioning log
+      # here (LOG_FILE below) and the smart-home app tails it read-only, so the
+      # UI commission modal can stream the SERVER-side CHIP detail (AddNOC /
+      # attestation / PASE-CASE) — the app container has no docker socket, so a
+      # shared file is the clean bridge.
+      - matter_server_logs:/logs
     environment:
-      MATTER_SERVER__INSTANCE_NAME: "0_MOBIUS.SMART_HOME"
-      MATTER_SERVER__PORT: "${MATTER_PORT:-5580}"
-      MATTER_SERVER__VENDORID: "65521"
-      MATTER_SERVER__FABRICID: "1"
+      PORT: "${MATTER_PORT:-5580}"
+      LOG_LEVEL: "info"
+      LOG_FILE: "/logs/matter-server.log"
+      # matter.js defaults (VENDOR_ID 0xfff1 = 65521, FABRIC_ID 1) already match
+      # the prior controller's identity; pinned here so it survives restarts.
+      VENDOR_ID: "0xfff1"
+      FABRIC_ID: "1"
 
   # ---------------------------------------------------------------------------
   # autoheal — restarts any container labeled `autoheal=true` when the Docker
@@ -300,4 +339,12 @@ volumes:
   app_logs:
     driver: local
   matter_data:
+    driver: local
+  # matter.js controller storage (post-2026-07-10 migration). Separate from the
+  # legacy `matter_data` volume, which is retained for rollback.
+  matter_js_data:
+    driver: local
+  # Shared CHIP log: matter-server writes, smart-home app tails (read-only) to
+  # stream server-side commissioning detail into the UI modal.
+  matter_server_logs:
     driver: local

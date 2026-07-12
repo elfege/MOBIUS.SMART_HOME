@@ -827,6 +827,87 @@ class InstanceManager:
             "skipped_grace": skipped_grace,
         }
 
+    def resume_expired_pauses(self) -> Dict[str, Any]:
+        """
+        Resume every instance whose TIMED pause has elapsed.
+
+        This is the restart-proof guarantee for timed pauses. ``pause()``
+        schedules a one-shot auto-resume in an APScheduler ``MemoryJobStore``
+        (services.scheduler_service) which is DESTROYED by any app
+        restart/reload, and nothing re-arms it — ``_restore_pending_jobs``
+        only repopulates a tracking dict, it never calls ``add_job`` (and the
+        callback is an unpersistable lambda). So before this, a restart
+        between a pause and its expiry left the instance paused forever.
+
+        Root cause this closes: 2026-07-11, STP "TV Allowed Time" (instance
+        13) was paused 5 h via the UI; a stack restart 10 min before its
+        auto-resume was due wiped the in-memory timer, and it sat paused ~14 h
+        overnight — the kids' TV was never re-gated. Same failure mode for any
+        timed pause in any app (AML, rules, …).
+
+        The fix reads the DURABLE ``pause_expires_at`` column instead of the
+        volatile scheduler, so an overdue pause self-heals within one tick of
+        any restart. Registered to run once at startup (catch pauses that
+        expired during downtime) and on a recurring 60 s cadence (app.py).
+        Indefinite pauses (``pause_expires_at IS NULL``) are never touched —
+        the ``lte`` filter excludes NULLs, so a manual/indefinite pause stays
+        paused until explicitly resumed. Idempotent: only ``is_paused=true``
+        rows are selected, so a resumed instance is not re-processed.
+
+        Returns a small report dict: ``{"status", "resumed": [ids],
+        "checked": n}``.
+        """
+        resumed: List[int] = []
+        try:
+            # App and DB share the host clock, so an app-computed UTC cutoff is
+            # skew-free. PostgREST filter values are literals (it does not
+            # evaluate SQL now()), hence we pass the timestamp explicitly.
+            cutoff = datetime.now(timezone.utc).isoformat()
+            resp = self._http.get(
+                f"{self.postgrest_url}/app_instances",
+                params={
+                    "is_paused": "eq.true",
+                    "pause_expires_at": f"lte.{cutoff}",
+                    "select": "id,label,pause_expires_at",
+                },
+                headers={"Accept": "application/json"},
+                timeout=5,
+            )
+            if resp.status_code != 200:
+                self.logger.warning(
+                    f"resume_expired_pauses: query HTTP {resp.status_code}"
+                )
+                return {"status": "error", "http": resp.status_code, "resumed": []}
+            rows = resp.json()
+        except Exception as e:
+            self.logger.warning(f"resume_expired_pauses: query failed: {e}")
+            return {"status": "error", "error": str(e), "resumed": []}
+
+        for row in rows:
+            iid = row.get("id")
+            if iid is None:
+                continue
+            try:
+                if self.resume_instance(iid):
+                    resumed.append(iid)
+                    self.logger.info(
+                        f"resume_expired_pauses: auto-resumed instance {iid} "
+                        f"({row.get('label', '?')}) — pause expired at "
+                        f"{row.get('pause_expires_at')}"
+                    )
+            except Exception as e:
+                self.logger.error(
+                    f"resume_expired_pauses: resume of {iid} raised: {e}",
+                    exc_info=True,
+                )
+
+        if resumed:
+            self.logger.info(
+                f"resume_expired_pauses: resumed {len(resumed)} "
+                f"expired pause(s): {resumed}"
+            )
+        return {"status": "ok", "resumed": resumed, "checked": len(rows)}
+
     def _start_from_db(self, instance_id: int) -> bool:
         """
         Fetch the current DB row for an instance and start it.

@@ -135,11 +135,24 @@ class MatterDiagnostics:
     # -- reads -----------------------------------------------------------------
 
     async def read_fabrics(self, node_id: int) -> Dict[str, Any]:
-        """Parsed OperationalCredentials fabric table for one node."""
+        """Parsed OperationalCredentials fabric table for one node.
+
+        Returns a graceful error dict (never raises) when the node is absent
+        from the current fabric: matterjs raises "Node N does not exist" for an
+        unknown node rather than returning None (common after the migration
+        reset the fabric to 0 nodes). Propagating that turned EVERY caller —
+        read_fabrics route, node_diagnostics, decommission_node — into a 500.
+        """
         await self._ensure()
-        node = await self._client.get_node(node_id)
+        _NF = {"node_id": node_id, "fabrics": [], "commissioned_fabrics": None,
+               "max_fabrics": _MAX_FABRICS, "current_fabric_index": None,
+               "full": False, "our_orphan_count": 0}
+        try:
+            node = await self._client.get_node(node_id)
+        except Exception as e:  # noqa: BLE001 - node not in this controller
+            return {**_NF, "error": f"{type(e).__name__}: {e}"}
         if not node:
-            return {"node_id": node_id, "error": "node not found", "fabrics": []}
+            return {**_NF, "error": "node not found"}
         current = self._attr(node, _OPCREDS_CLUSTER, _ATTR_CURRENT_FABRIC_INDEX)
         count = self._attr(node, _OPCREDS_CLUSTER, _ATTR_COMMISSIONED_FABRICS)
         raw = self._attr(node, _OPCREDS_CLUSTER, _ATTR_FABRICS) or []

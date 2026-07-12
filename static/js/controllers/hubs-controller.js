@@ -136,6 +136,35 @@ function renderHub(hub, health) {
     fillForm($form, hub);
     applyHealth($form, health);
 
+    // Hardware / Thread chip (capability, not health): C-8-family hubs have a
+    // BUILT-IN Thread border router — the property that decides whether Thread
+    // Matter devices can commission through the hub at all (C-7 and earlier
+    // have no Thread radio; pairing Thread devices on them fails). Colorblind-
+    // safe: label + shape carry the meaning; Thread hubs use the vetted
+    // high-luminance blue, others neutral grey.
+    const hwv = (hub.hardware_version || '').trim();
+    if (hwv) {
+        const isThread = hwv.toUpperCase().startsWith('C-8');
+        const tip = isThread
+            ? 'This hub has a BUILT-IN Thread border router (C-8 family). Thread Matter '
+              + 'devices (battery sensors, buttons, many plugs) can only be commissioned '
+              + 'and routed through a hub with a border router — prefer this hub as the '
+              + 'Matter hub for Thread devices.'
+            : `Hardware ${hwv}: no built-in Thread border router — Thread Matter devices `
+              + 'cannot be commissioned through this hub (WiFi/Ethernet Matter devices are fine).';
+        $(`<span class="hub-thread-chip" tabindex="0"></span>`)
+            .text(isThread ? `${hwv} · Thread ?` : `${hwv} ?`)
+            .attr('title', tip)
+            .css({
+                display: 'inline-block', marginLeft: '.5rem', padding: '.1rem .45rem',
+                borderRadius: '10px', fontSize: '.75rem', cursor: 'help',
+                background: isThread ? '#1e2a4a' : '#333',
+                color: isThread ? '#89b4fa' : '#aaa',
+                border: isThread ? '1px solid #89b4fa' : '1px solid #555',
+            })
+            .insertAfter($form.find('.hub-health-firmware'));
+    }
+
     $form.on('submit', async function (e) {
         e.preventDefault();
         const id = $form.attr('data-hub-id');

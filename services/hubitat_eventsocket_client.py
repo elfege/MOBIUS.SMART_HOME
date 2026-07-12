@@ -156,6 +156,52 @@ class HubitatEventsocketClient:
             self._http_session = None
         logger.info('hubitat_eventsocket: stopped')
 
+    async def stop_hub(self, hub_name: str) -> bool:
+        """Cancel and drop ONE hub's eventsocket task.
+
+        Called from hub CRUD when a hub is deleted or disabled. Before this,
+        NOTHING touched the socket lifecycle on hub CRUD (tasks were built once
+        at boot), so a removed/disabled hub's reconnect loop ran forever —
+        connecting the stale IP, getting HTTP 200, and PATCHing hub_health
+        failures that surfaced as the phantom 'Hub N' banner (audit F3.1).
+
+        Idempotent: returns False if no task was running for ``hub_name``.
+        """
+        task = self._tasks.pop(hub_name, None)
+        # Keep the in-memory hub list consistent so a later full start() does
+        # NOT respawn a hub we intentionally stopped.
+        self._hubs = [h for h in self._hubs if h.get('hub_name') != hub_name]
+        if task is None:
+            return False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f'hubitat_eventsocket: stop_hub {hub_name} error: {e}')
+        logger.info(f'hubitat_eventsocket: stopped hub task {hub_name}')
+        return True
+
+    async def start_hub(self, hub: Dict) -> None:
+        """Spawn (or respawn) ONE hub's eventsocket task.
+
+        Called from hub CRUD when a hub is created, enabled, or renamed —
+        makes add/enable take effect live, without the 'restart to pick it up'
+        anti-pattern. Idempotent: cancels any existing task under the same
+        ``hub_name`` first.
+        """
+        name = hub['hub_name']
+        existing = self._tasks.get(name)
+        if existing is not None and not existing.done():
+            existing.cancel()
+        self._hubs = [h for h in self._hubs if h.get('hub_name') != name]
+        self._hubs.append(hub)
+        self._tasks[name] = supervised_spawn(
+            self._run_hub(hub), name=f'eventsocket:{name}'
+        )
+        logger.info(f'hubitat_eventsocket: started hub task {name}')
+
     # ------------------------------------------------------------------
     # hub_health writes (best-effort — never raise into the WS loop)
     # ------------------------------------------------------------------
@@ -570,3 +616,20 @@ async def stop_eventsocket() -> None:
 def get_client() -> Optional[HubitatEventsocketClient]:
     """Accessor for monitoring/admin endpoints."""
     return _client
+
+
+async def stop_hub_socket(hub_name: str) -> bool:
+    """Stop one hub's eventsocket task on the running client (hub delete/disable/
+    rename-teardown). No-op (returns False) if the eventsocket client isn't up."""
+    c = get_client()
+    if c is None:
+        return False
+    return await c.stop_hub(hub_name)
+
+
+async def start_hub_socket(hub: Dict) -> None:
+    """Start/respawn one hub's eventsocket task on the running client (hub
+    create/enable/rename). No-op if the eventsocket client isn't running."""
+    c = get_client()
+    if c is not None:
+        await c.start_hub(hub)

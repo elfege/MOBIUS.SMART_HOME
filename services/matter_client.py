@@ -585,6 +585,20 @@ class MatterClient:
         """Get matter-server status information."""
         return await self._send_command("server_info")
 
+    async def get_fabric_label(self) -> Optional[str]:
+        """The fabric label matterjs stamps into a device's fabric table when it
+        commissions (the human-readable admin name the device stores). Default
+        is 'HomeAssistant'; we set it to MOBIUS.HOME. Does NOT affect Apple
+        Home's 'Matter Test' text — that is keyed on our VendorID (0xFFF1)."""
+        r = await self._send_command("get_fabric_label")
+        return r.get("fabric_label") if isinstance(r, dict) else None
+
+    async def set_default_fabric_label(self, label: str) -> None:
+        """Set the fabric label used for FUTURE commissions (matterjs
+        set_default_fabric_label). Max 32 chars per the Matter spec. Existing
+        nodes are unaffected — relabel those with UpdateFabricLabel per node."""
+        await self._send_command("set_default_fabric_label", {"label": label[:32]})
+
 
 # =============================================================================
 # Device Matter Mapping (PostgREST queries)

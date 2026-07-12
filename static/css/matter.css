@@ -682,8 +682,31 @@
 }
 
 .matter-modal[data-type="error"] .matter-modal-header h4 { color: var(--color-toast-error); }
-.matter-modal[data-type="success"] .matter-modal-header h4 { color: var(--color-toast-success); }
+/* Colorblind (PIN.1-5 / MSG-477): success must NOT be green. On the LIGHT modal
+   surface use a dark pure blue — readable on white, unlike the dark-bg
+   --color-terminal-blue (#89b4fa) which would be pale-on-white. Red stays
+   reserved for error. (The verdict modal is a question, not a success, so it
+   uses data-type="info"/neutral and never hits this rule.) */
+.matter-modal[data-type="success"] .matter-modal-header h4 { color: #0033B3; }
 .matter-modal[data-type="loading"] .matter-modal-header h4 { color: var(--color-toast-info); }
+
+/* Text inputs inside a matter modal (e.g. #matter-verdict-notes). The app-global
+   input color is a light grey tuned for dark surfaces; on the LIGHT modal
+   background that renders pale-on-white — effectively invisible (operator
+   screenshot: typed text only findable by its spellcheck squiggle). Force a
+   readable near-black on white with a legible-but-distinct placeholder. The
+   ::placeholder rule MUST live in CSS — it cannot be set inline. */
+.matter-modal input[type="text"],
+#matter-verdict-notes {
+    color: #1a1a1a;
+    background: #fff;
+    border: 1px solid #b9b9b9;
+}
+.matter-modal input[type="text"]::placeholder,
+#matter-verdict-notes::placeholder {
+    color: #667085;
+    opacity: 1;
+}
 
 .matter-modal-body {
     padding: 4px 20px 16px;
@@ -773,7 +796,81 @@
     padding: 0; display: flex; flex-direction: column;
 }
 .matter-debug-section { margin-bottom: 0.9rem; font-size: 0.85rem; line-height: 1.5; }
-.matter-debug-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.5rem; }
+/* Two-source discovery layout: hub-discovered (left, fallback-capable) vs
+   mDNS-direct (right, no hub). Collapses to one column on narrow screens. */
+.matter-two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; align-items: start; }
+@media (max-width: 1100px) { .matter-two-col { grid-template-columns: 1fr; } }
+.matter-col-title { display: flex; align-items: center; gap: .6rem; margin: .2rem 0 .6rem; }
+.matter-col-sub { font-size: .75rem; font-weight: 400; color: #9aa0b0; }
+
+/* mDNS result cards + dedup chips. CVD-safe: blue/grey/white, shape+label. */
+.mdns-card { border: 1px solid #3a3f52; border-radius: 8px; padding: .6rem .8rem; margin-bottom: .6rem; }
+.mdns-card-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.mdns-card-body { font-size: .8rem; color: #9aa0b0; margin: .35rem 0; }
+.mdns-dup-chip, .mdns-new-chip {
+    font-size: .72rem; padding: .1rem .45rem; border-radius: 10px; cursor: help;
+}
+.mdns-dup-chip { background: #1e2a4a; color: #89b4fa; border: 1px solid #89b4fa; }
+.mdns-new-chip { background: #2a2a2a; color: #cdd6f4; border: 1px solid #777; }
+
+/* "?" help badge (e.g. Thread explainer next to the Matter hub selector).
+   Colorblind-safe: vetted high-luminance blue, meaning carried by the glyph. */
+.matter-help-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.2rem; height: 1.2rem; border-radius: 50%; cursor: help;
+    font-size: .8rem; font-weight: 700;
+    background: #1e2a4a; color: #89b4fa; border: 1px solid #89b4fa;
+}
+
+/* MULTI-SELECT MATTER HUBS picker (section header). Colorblind-safe: neutral
+   greys; meaning carried by labels + checkboxes, not color. */
+.matter-hub-picker { position: relative; display: inline-block; }
+.matter-hub-select {
+    padding: .3rem .6rem; border-radius: 4px; font: inherit; font-size: .85rem;
+    border: 1px solid #555; background: #1e1e2e; color: #cdd6f4; cursor: pointer;
+    max-width: 22rem; text-align: left;
+}
+.matter-hub-panel {
+    position: absolute; top: 100%; left: 0; z-index: 20; margin-top: .25rem;
+    min-width: 16rem; max-width: 24rem; padding: .4rem;
+    background: #1e1e2e; border: 1px solid #555; border-radius: 6px;
+    box-shadow: 0 6px 18px rgba(0,0,0,.5);
+}
+.matter-hub-opt {
+    display: flex; align-items: center; gap: .5rem; padding: .3rem .4rem;
+    font-size: .82rem; color: #cdd6f4; cursor: pointer; border-radius: 4px;
+}
+.matter-hub-opt:hover { background: #2a2a3a; }
+.also-on-chip {
+    font-size: .7rem; padding: .05rem .4rem; border-radius: 10px; cursor: help;
+    background: #1e2a4a; color: #89b4fa; border: 1px solid #89b4fa; margin-left: .4rem;
+}
+
+/* Commission modal (live-log). Reuses .matter-debug-overlay/.matter-debug for
+   the big centered panel; these tune the code row, status line, and a TALL log
+   pane so the whole CHIP-level commissioning stream is visible as it happens. */
+.matter-commission { width: min(920px, 94vw); max-height: 88vh; }
+.matter-commission .comm-body { display: flex; flex-direction: column; gap: .6rem; padding: .2rem 0; }
+.comm-code-row { display: flex; gap: .5rem; align-items: center; }
+.comm-code-input {
+    flex: 1; padding: .5rem .6rem; border-radius: 5px; font: inherit; font-size: .9rem;
+    border: 1px solid #89b4fa; background: #11111b; color: #cdd6f4;
+}
+.comm-status { font-size: .88rem; line-height: 1.5; padding: .4rem .5rem; border-radius: 5px; background: #181825; }
+.comm-status.loading { color: #cdd6f4; }
+.comm-status.success { color: #7ec27e; background: #16281c; }
+.comm-status.error   { color: #e57373; background: #2a1616; }
+.comm-log { min-height: 42vh; max-height: 60vh; }
+/* [srv] = matter-server CHIP lines; muted so [cli] + errors still stand out. */
+.comm-log .dbg-srv { color: #9aa0b0; }
+.comm-log b { color: #89b4fa; font-weight: 600; }
+
+.matter-debug-actions { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.5rem; }
+.matter-debug-actions .dbg-act-row { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.matter-debug-actions .dbg-level-input {
+    width: 4.5rem; padding: .25rem .4rem; border-radius: 4px;
+    border: 1px solid #b9b9b9; color: #1a1a1a; background: #fff; font: inherit; font-size: .85rem;
+}
 .matter-debug-logbar {
     padding: 0.4rem 0.75rem; border-bottom: 1px solid #333;
     font-size: 0.8rem; color: #9aa7b0; flex-shrink: 0;

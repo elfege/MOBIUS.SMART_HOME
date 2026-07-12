@@ -209,18 +209,41 @@ def _purge_or_soft_delete(dev: Dict[str, Any]) -> str:
     return "removed"
 
 
+def _soft_remove_discovered_row(unique_id: str) -> bool:
+    """Mark the hubitat_matter_devices row (THE table the UI's discovered cards
+    read) removed. This was THE missing half of removal (audit F5 fallout,
+    caught live 2026-07-11 — 'remove all doesn't remove shit'): the service
+    only wrote matter_devices.active, a frozen backfill table the UI never
+    displays, so cards never disappeared. Returns True if a row was marked."""
+    try:
+        r = requests.patch(
+            f"{_pg()}/hubitat_matter_devices",
+            params={"unique_id": f"eq.{unique_id}"},
+            json={"is_removed": True, "removed_at": _now_iso()},
+            headers={"Content-Type": "application/json",
+                     "Prefer": "return=representation"},
+            timeout=5,
+        )
+        return r.status_code in (200, 204) and bool(r.text and r.json())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("matter_removal: discovered-row soft-remove %s failed: %s",
+                       unique_id, e)
+        return False
+
+
 async def remove_matter_device_by_uid(unique_id: str, reason: str = "",
                                        performed_by: str = "api", force: bool = False) -> Dict[str, Any]:
     """
     Soft-remove a DISCOVERED device by unique_id (works for cards that aren't
     commissioned and have no node_id). Decommissions its Matter node first if it
-    HAS one and not force. Row kept (active=false, removed_at=now) so a re-scan
-    reactivates it. Mirrors remove_matter_device but keyed on the card's uid.
+    HAS one and not force. Marks BOTH stores: hubitat_matter_devices.is_removed
+    (what the UI cards read — the previously missing half) AND the canonical
+    matter_devices row when one exists (post-migration discoveries have none;
+    that must NOT abort the removal). A MANUAL re-scan restores the row; the
+    periodic discovery timer does NOT resurrect removed rows.
     """
-    dev = _get_device_by_uid(unique_id)
-    if dev is None:
-        return {"unique_id": unique_id, "soft_deleted": False, "reason": "no active device for uid"}
-    node_id = dev.get("matter_node_id")
+    dev = _get_device_by_uid(unique_id)   # canonical row — may be None (post-migration)
+    node_id = (dev or {}).get("matter_node_id")
     decommissioned = False
     decommission_error: Optional[str] = None
     if node_id and not force:
@@ -232,12 +255,21 @@ async def remove_matter_device_by_uid(unique_id: str, reason: str = "",
             logger.info("matter_removal: remove_node(%s) returned: %s", node_id, e)
     elif force:
         decommission_error = "skipped (force)"
-    action = _purge_or_soft_delete(dev)   # 'purged' if Hubitat device is gone, else 'removed'
-    _log(dev, node_id, action, decommissioned, reason, performed_by)
+
+    # THE user-visible half: hide the discovered card.
+    ui_removed = _soft_remove_discovered_row(unique_id)
+
+    # Canonical-store half (when a canonical row exists).
+    action = "removed"
+    if dev is not None:
+        action = _purge_or_soft_delete(dev)   # 'purged' if Hubitat device gone
+    _log(dev if dev is not None else {"unique_id": unique_id},
+         node_id, action, decommissioned, reason, performed_by)
     return {
         "unique_id": unique_id, "node_id": node_id,
         "decommissioned": decommissioned, "decommission_error": decommission_error,
-        "soft_deleted": action == "removed", "purged": action == "purged",
+        "soft_deleted": ui_removed or (dev is not None and action == "removed"),
+        "purged": action == "purged",
     }
 
 
@@ -249,9 +281,13 @@ async def remove_all_discovered(force: bool = False, reason: str = "bulk remove"
     Returns {total, removed, force}.
     """
     try:
+        # Iterate the UI's OWN table (hubitat_matter_devices), not the frozen
+        # matter_devices backfill — the old source only knew 8 backfill-era
+        # rows, so 'Remove all' skipped everything discovered since (the other
+        # half of the 2026-07-11 'removes nothing' bug).
         r = requests.get(
-            f"{_pg()}/matter_devices",
-            params={"active": "eq.true", "select": "id,unique_id,matter_node_id"},
+            f"{_pg()}/hubitat_matter_devices",
+            params={"is_removed": "not.is.true", "select": "unique_id,our_node_id"},
             timeout=10,
         )
         devices = r.json() if r.status_code == 200 else []

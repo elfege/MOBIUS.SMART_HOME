@@ -4,6 +4,7 @@
 
 {% block extra_css %}
 <link rel="stylesheet" href="/static/css/e2e-test.css">
+<link rel="stylesheet" href="/static/css/components/app-group.css?v=20260709a">
 <style>
 .ws-health-alert {
     margin: 0 0 1rem;
@@ -26,7 +27,7 @@
 }
 .app-group { margin-bottom: .9rem; }
 .app-group-header {
-    display: flex; align-items: center; gap: .6rem; width: 100%; text-align: left;
+    display: flex; align-items: center; gap: .6rem; flex: 1 1 auto; min-width: 0; text-align: left;
     background: rgba(255,255,255,0.03); border: 1px solid var(--color-border, #333);
     border-radius: 8px; padding: .6rem .9rem; cursor: pointer;
     color: var(--color-text); font-size: 1rem; font-family: inherit;
@@ -81,7 +82,7 @@
 
 {% block extra_js %}
 <script type="module">
-    import { DashboardController } from '/static/js/controllers/dashboard-controller.js?v=20260705d';
+    import { DashboardController } from '/static/js/controllers/dashboard-controller.js?v=20260709a';
     import { api } from '/static/js/main.js';
 
     $(document).ready(function() {
@@ -104,6 +105,14 @@
         const now = Date.now();
         const RECENT_MS = 5 * 60 * 1000;
         const offenders = (rows || []).filter(r => {
+            // A hub whose COMMAND PATH works (Maker/admin 'Commands OK') is
+            // delivering device state through the reconcile poll regardless of
+            // its eventsocket. Its WS being down is therefore NOT an alarm — the
+            // poll is the safety net — so we don't surface it. This is the fix
+            // for the phantom 'Hub 4' banner: home_3's Maker API was fine
+            // ('Commands OK'), only its WS wouldn't upgrade, yet it kept raising
+            // a scary warning. Only warn when a hub can't deliver EITHER way.
+            if (r.command_path_ok === true) return false;
             if (r.ws_connected === false) return true;
             const lf = r.ws_last_failure_at;
             if (lf && (now - new Date(lf).getTime()) < RECENT_MS) return true;
@@ -125,7 +134,11 @@
         const lines = offenders.map(r => {
             const conn = r.ws_connected ? 'connected' : 'DISCONNECTED';
             const fr = r.ws_last_failure_reason || '';
-            return `Hub ${r.hub_id}: ws ${conn}` + (fr ? ` — last error: ${fr}` : '');
+            // Label by hub NAME (e.g. 'home_3'), not the raw hub_id — the id
+            // rendered as the confusing phantom 'Hub 4'. Falls back to the id if
+            // the name isn't in the payload (older /api/hubs/health responses).
+            const label = r.hub_name || `Hub ${r.hub_id}`;
+            return `${label}: ws ${conn}` + (fr ? ` — last error: ${fr}` : '');
         }).join('<br>');
         const recommendation = makerOn
             ? '<br><br>Maker API is currently enabled — it will pick up the slack until WS recovers.'

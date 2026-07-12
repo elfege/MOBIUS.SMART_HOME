@@ -70,8 +70,25 @@
         <div class="matter-section-header">
             <h3>Hubitat Matter Devices</h3>
             <div class="header-actions">
-                <button class="btn btn-small btn-primary" id="btn-scan-hubs">Scan All Hubs</button>
-                <button class="btn btn-small btn-secondary" id="btn-commission-all">Commission All</button>
+                <!-- MULTI-SELECT MATTER HUBS: scanning covers every CHECKED hub;
+                     the same physical device on 2+ hubs is deduped by MAC (one
+                     card), and commissioning is per-device via its own hub.
+                     Default = the hub marked main; the SET persists in
+                     system_settings.matter_hub_ids. -->
+                <span id="matter-hub-picker" class="matter-hub-picker">
+                    <button type="button" id="matter-hub-toggle" class="matter-hub-select"
+                            title="Which hubs Matter scans — check one or more; devices on multiple hubs are deduped">Select Matter hubs ▾</button>
+                    <div id="matter-hub-panel" class="matter-hub-panel" style="display:none;"></div>
+                </span>
+                <span class="matter-help-badge" tabindex="0"
+                      title="'Thread' marks hubs with a BUILT-IN Thread border router (Hubitat C-8 / C-8 Pro). Thread Matter devices (many battery sensors, buttons, plugs) can ONLY be commissioned and routed through a hub that has a border router — C-7 and earlier have no Thread radio, so Matter pairing for Thread devices fails on them (failsafe timeout). If you use Thread devices, pick a Thread hub as the Matter hub.">?</span>
+                <button class="btn btn-small btn-primary" id="btn-scan-hubs"
+                        title="Scan the selected Matter hub for Matter devices">Scan Hub</button>
+                <!-- USER-initiated bulk commission (selected hub only). Scanning
+                     NEVER triggers this automatically anymore — the scan→commission
+                     auto-chain was removed 2026-07-11 (it saturated fabric slots). -->
+                <button class="btn btn-small btn-secondary" id="btn-commission-all"
+                        title="Commission every online, uncommissioned device on the selected Matter hub — explicit user action, never automatic">Commission All</button>
                 <button class="btn btn-small btn-danger" id="btn-remove-all-discovered"
                         title="Remove ALL: decommission + soft-delete every device (re-scan restores them)">Remove all</button>
                 <button class="btn btn-small btn-danger" id="btn-force-remove-all-discovered"
@@ -84,13 +101,38 @@
             </div>
         </div>
         <p class="help-text">
-            Discover Matter devices paired to your Hubitat hubs. Auto-matched to Hubitat
-            devices by exact name. Fix mismatches using the dropdown, then commission into
-            our Matter controller (so we drive them directly over Matter, Hubitat as fallback).
+            Discover Matter devices paired to <strong>the selected Matter hub</strong>
+            (single-hub policy — default is the hub marked main). Auto-matched to Hubitat
+            devices by exact name. Fix mismatches using the dropdown, then commission
+            each device individually into our Matter controller (so we drive them
+            directly over Matter, Hubitat as fallback).
         </p>
         <div id="scan-status" class="commission-result" style="display:none;"></div>
-        <div id="discovered-container">
-            <div class="matter-empty">Click "Scan All Hubs" to discover Matter devices</div>
+        <!-- TWO SOURCES, TWO COLUMNS (operator directive 2026-07-11):
+             LEFT  = devices discovered FROM THE HUB (Hubitat-linked → the
+                     Hubitat FALLBACK command path applies to these only).
+             RIGHT = devices discovered DIRECTLY over mDNS (no hub involved —
+                     Matter-direct only, no fallback). Same physical device
+                     appearing in both is deduped (MAC → serial → name) and
+                     flagged, never duplicated. -->
+        <div class="matter-two-col">
+            <div class="matter-col">
+                <h4 class="matter-col-title">From hub <span class="matter-col-sub">Hubitat-linked — fallback-capable</span></h4>
+                <div id="discovered-container">
+                    <div class="matter-empty">Click "Scan Hub" to discover Matter devices on the selected hub</div>
+                </div>
+            </div>
+            <div class="matter-col">
+                <h4 class="matter-col-title">From mDNS <span class="matter-col-sub">direct, no hub — Matter-only, no fallback</span>
+                    <button class="btn btn-small btn-primary" id="btn-scan-mdns"
+                            title="Browse the LAN directly (_matterc._udp) for Matter devices currently in commissioning mode — no hub involved">Scan mDNS</button>
+                    <button class="btn btn-small btn-secondary" id="btn-commission-code-direct"
+                            title="Commission a NEW device by pairing code even if it isn't listed above — the code's discriminator lets the controller find it on the network. Factory QR/label for new devices; hub/HomeKit window code for already-paired ones.">Commission (code)</button>
+                </h4>
+                <div id="mdns-container">
+                    <div class="matter-empty">Click "Scan mDNS" to find devices in pairing mode — no hub needed</div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -98,6 +140,12 @@
     <div class="matter-section">
         <div class="matter-section-header">
             <h3>Hubitat &harr; Matter Mapping</h3>
+            <div class="header-actions">
+                <button class="btn btn-small btn-secondary" id="btn-rebuild-mappings"
+                        title="Regenerate mappings from discovered devices: every non-removed device with a node in our fabric gets a row (endpoint 1). Idempotent.">Rebuild mapping</button>
+                <button class="btn btn-small btn-danger" id="btn-remove-all-mappings"
+                        title="Delete ALL mapping rows (link records only — no device or node is touched). Rebuild any time.">Remove all</button>
+            </div>
         </div>
         <p class="help-text">
             Link a Hubitat device to its Matter counterpart. Commands will be sent via both protocols.

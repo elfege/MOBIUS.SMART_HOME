@@ -11,7 +11,7 @@ import asyncio
 import logging
 import traceback
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Request, Query, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -317,6 +317,12 @@ def run_db_migrations():
         "ALTER TABLE hub_health ADD COLUMN IF NOT EXISTS command_path_contract VARCHAR(10)",
         "ALTER TABLE hub_health ADD COLUMN IF NOT EXISTS command_path_checked_at TIMESTAMPTZ",
         "ALTER TABLE hub_health ADD COLUMN IF NOT EXISTS command_path_error TEXT",
+        # Discovered-card soft-removal (2026-07-11): Remove/Remove-all mark the
+        # hubitat_matter_devices row (THE table the UI reads) instead of only
+        # the frozen matter_devices backfill table. Manual re-scan clears it;
+        # the periodic timer never writes it (no resurrection).
+        "ALTER TABLE hubitat_matter_devices ADD COLUMN IF NOT EXISTS is_removed BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE hubitat_matter_devices ADD COLUMN IF NOT EXISTS removed_at TIMESTAMPTZ",
 
         # Grant PostgREST access to all new tables + their sequences.
         "GRANT SELECT, INSERT, UPDATE, DELETE ON event_routings TO smarthome_anon",
@@ -712,6 +718,25 @@ async def lifespan(app: FastAPI):
     from services.matter_watchdog import start_matter_watchdog
     start_matter_watchdog()
 
+    # Stamp our fabric LABEL so devices carry a MEANINGFUL admin name instead of
+    # matterjs's "HomeAssistant" default (2026-07-11 operator directive). This is
+    # the fabric-descriptor label the device stores + our debug console and the
+    # Hubitat Fabric Manager driver display. NOTE: it does NOT change Apple
+    # Home's "Matter Test" text — that is keyed on our test VendorID 0xFFF1, not
+    # the label. matterjs may reset the default to "HomeAssistant" on its own
+    # restart, so we (re)assert it on every app startup. Best-effort.
+    async def _set_matter_fabric_label():
+        label = os.environ.get("MATTER_FABRIC_LABEL", "MOBIUS.HOME")[:32]
+        try:
+            from services.matter_client import get_matter_client
+            mc = get_matter_client()
+            if mc.is_connected or await mc.connect():
+                await mc.set_default_fabric_label(label)
+                logger.info(f"matter: default fabric label set to '{label}'")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"matter: could not set default fabric label: {e}")
+    asyncio.create_task(_set_matter_fabric_label())
+
     # Start device cache refresh (Matter-first, Maker API fallback)
     from services.device_cache_refresh import start_cache_refresh, stop_cache_refresh
     refresh_interval = int(os.environ.get('DEVICE_CACHE_REFRESH_INTERVAL', '120'))
@@ -883,6 +908,32 @@ async def lifespan(app: FastAPI):
         logger.info("instance_revive_watchdog: scheduled every 300s (grace 900s)")
     except Exception as e:
         logger.warning(f"instance_revive_watchdog schedule failed: {e}")
+
+    # Timed-pause expiry reconciler (2026-07-11). The restart-proof guarantee
+    # for timed pauses. pause() schedules its auto-resume in an in-memory
+    # APScheduler jobstore that is destroyed by any restart/reload with nothing
+    # re-arming it, so a restart between a pause and its expiry left the
+    # instance paused forever — STP "TV Allowed Time" (inst 13) sat paused ~14h
+    # after a restart 10 min before its resume was due, the kids' TV un-gated
+    # all night. This reconciler resumes instances whose DURABLE
+    # pause_expires_at has elapsed, self-healing within one tick of any restart.
+    # Run once now to catch pauses that expired during downtime, then every 60s
+    # (bounds over-run to <=60s). Cheap: one indexed query. See
+    # services.instance_manager.resume_expired_pauses.
+    try:
+        from services.scheduler_service import get_scheduler
+        from services.instance_manager import get_instance_manager
+        get_instance_manager().resume_expired_pauses()  # immediate catch-up on boot
+        get_scheduler()._scheduler.add_job(
+            func=lambda: get_instance_manager().resume_expired_pauses(),
+            trigger='interval',
+            seconds=60,
+            id='pause_expiry_reconciler',
+            replace_existing=True,
+        )
+        logger.info("pause_expiry_reconciler: scheduled every 60s")
+    except Exception as e:
+        logger.warning(f"pause_expiry_reconciler schedule failed: {e}")
 
     # Periodic device reclassification (2026-06-19). Classification used to
     # run ONLY at startup or on a manual refresh (↻), so a device removed
@@ -1064,6 +1115,13 @@ app.include_router(samsung_tv_router)
 # See docs/plans/samsung_tv_multi_instance_refactor_per_instance_ip_mac_token_in_database.md
 from apps.samsung_tv.instance_router import router as samsung_tv_instance_router  # noqa: E402
 app.include_router(samsung_tv_instance_router)
+
+# Matter command feedback — USER-INPUT-BASED learning log (operator directive
+# 2026-07-11): every Test ON/OFF attempt is logged, then the modal's visual
+# confirmation ("It worked"/"It didn't") is patched onto the row.
+# Table: dshub.matter_command_feedback (migrate_matter_command_feedback_learning_log.sql).
+from services.matter_command_feedback import router as matter_feedback_router  # noqa: E402
+app.include_router(matter_feedback_router)
 
 # Certificate-installation routes (/install-cert, /api/cert/status). Serves the
 # shared MOBIUS local CA so users trust HTTPS once instead of clicking through
@@ -2383,8 +2441,9 @@ async def matter_status():
 
 class MatterNodeCommandBody(BaseModel):
     """Body for POST /api/matter/nodes/{node_id}/command — direct Matter test."""
-    command: str                       # 'on' | 'off'
+    command: str                       # 'on' | 'off' | 'level'
     endpoint_id: Optional[int] = 1
+    level: Optional[int] = None        # 0-100, required when command == 'level'
 
 
 @app.post("/api/matter/nodes/{node_id}/command", tags=["matter"])
@@ -2403,17 +2462,25 @@ async def matter_node_command(node_id: int, body: MatterNodeCommandBody):
     from services.matter_client import get_matter_client
     from services.matter_debug import get_diagnostics
     command = (body.command or "").strip().lower()
-    if command not in ("on", "off"):
-        raise HTTPException(status_code=400, detail="command must be 'on' or 'off'")
+    if command not in ("on", "off", "level", "setlevel"):
+        raise HTTPException(status_code=400, detail="command must be 'on', 'off', or 'level'")
+    is_level = command in ("level", "setlevel")
+    if is_level and body.level is None:
+        raise HTTPException(status_code=400, detail="level (0-100) is required for a level command")
     client = get_matter_client()
     diag = get_diagnostics()
     endpoint = body.endpoint_id if body.endpoint_id is not None else 1
     seq0 = diag.oplog._seq          # op-log position BEFORE the command
     ok, result, detail = False, None, None
-    logger.info(f"[matter cmd] node={node_id} ep={endpoint} cmd={command} -> invoke OnOff cluster 6")
+    cluster = 8 if is_level else 6  # LevelControl vs OnOff — for the log line only
+    logger.info(f"[matter cmd] node={node_id} ep={endpoint} cmd={command} -> invoke cluster {cluster}")
     try:
         if not client.is_connected and not await client.connect():
             detail = "Cannot connect to matter-server (is the container running?)"
+        elif is_level:
+            lvl = max(0, min(100, int(body.level)))
+            result = await client.send_hubitat_command(node_id, endpoint, "setLevel", [lvl])
+            ok = result is not None
         else:
             result = await client.send_hubitat_command(node_id, endpoint, command)
             ok = result is not None
@@ -2447,6 +2514,15 @@ async def matter_node_fabrics(node_id: int):
         return await get_diagnostics().read_fabrics(node_id)
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        # A node not present in the current controller (e.g. 0 nodes on the
+        # fresh matterjs fabric post-migration, or a stale/old node id) makes
+        # the underlying get_node raise a Matter error. Don't 500 the debug
+        # console — return a clean, readable result so the actions still render.
+        logger.warning(f"read_fabrics(node {node_id}) failed: {e}")
+        return {"node_id": node_id, "error": f"{type(e).__name__}: {e}",
+                "fabrics": [], "commissioned_fabrics": None, "max_fabrics": 5,
+                "our_orphan_count": 0}
 
 
 @app.get("/api/matter/nodes/{node_id}/diagnostics", tags=["matter"])
@@ -2457,6 +2533,11 @@ async def matter_node_diagnostics(node_id: int):
         return await get_diagnostics().node_diagnostics(node_id)
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        # See matter_node_fabrics: a node absent from the current controller
+        # raises rather than returning None. Keep the console usable.
+        logger.warning(f"node_diagnostics(node {node_id}) failed: {e}")
+        return {"node_id": node_id, "error": f"{type(e).__name__}: {e}"}
 
 
 @app.get("/api/matter/server/diagnostics", tags=["matter"])
@@ -2472,6 +2553,101 @@ async def matter_debug_log(since_seq: int = 0, limit: int = 200):
     debug console. Poll with the returned last_seq for an incremental tail."""
     from services.matter_debug import get_diagnostics
     return get_diagnostics().op_log(since_seq=since_seq, limit=limit)
+
+
+_ANSI_RE = __import__("re").compile(r"\x1b\[[0-9;]*m")
+_MATTER_SERVER_LOG = "/matter-logs/matter-server.log"
+
+
+class FabricLabelBody(BaseModel):
+    """Body for POST /api/matter/fabric-label."""
+    label: str
+    relabel_existing: bool = True   # also UpdateFabricLabel on current nodes
+
+
+@app.get("/api/matter/fabric-label", tags=["matter"])
+async def matter_get_fabric_label():
+    """The fabric label matterjs stamps on new commissions (default MOBIUS.HOME).
+    Informational: this is the admin name a device STORES for our fabric — shown
+    in our debug console + the Hubitat Fabric Manager driver, NOT in Apple Home
+    (that reads our VendorID 0xFFF1 → 'Matter Test')."""
+    from services.matter_client import get_matter_client
+    mc = get_matter_client()
+    if not mc.is_connected and not await mc.connect():
+        raise HTTPException(status_code=503, detail="matter controller unreachable")
+    return {"default_fabric_label": await mc.get_fabric_label(),
+            "note": "Apple Home shows 'Matter Test' from our test VendorID 0xFFF1, not this label."}
+
+
+@app.post("/api/matter/fabric-label", tags=["matter"])
+async def matter_set_fabric_label(body: FabricLabelBody):
+    """Set the default fabric label (future commissions) and, by default,
+    UpdateFabricLabel on every CURRENT node (0x3E cmd 0x09) so already-commissioned
+    devices get relabelled too. Max 32 chars (Matter spec)."""
+    label = (body.label or "").strip()[:32]
+    if not label:
+        raise HTTPException(status_code=400, detail="label required (1–32 chars)")
+    from services.matter_client import get_matter_client
+    mc = get_matter_client()
+    if not mc.is_connected and not await mc.connect():
+        raise HTTPException(status_code=503, detail="matter controller unreachable")
+    await mc.set_default_fabric_label(label)
+    relabelled, errors = [], []
+    if body.relabel_existing:
+        try:
+            nodes = await mc.get_nodes() or []
+        except Exception as e:  # noqa: BLE001
+            nodes = []
+            errors.append(f"get_nodes: {e}")
+        for n in nodes:
+            nid = n.get("node_id") or n.get("nodeId")
+            if nid is None:
+                continue
+            try:
+                # UpdateFabricLabel — OperationalCredentials (62) command 0x09.
+                await mc.send_command(nid, 0, 62, "UpdateFabricLabel", {"label": label})
+                relabelled.append(nid)
+            except Exception as e:  # noqa: BLE001
+                errors.append({"node": nid, "error": str(e)})
+    logger.info(f"matter fabric-label set to '{label}'; relabelled nodes {relabelled}")
+    return {"default_fabric_label": label, "relabelled_nodes": relabelled, "errors": errors}
+
+
+@app.get("/api/matter/server-log", tags=["matter"])
+async def matter_server_log(since: int = -1, max_bytes: int = 60000):
+    """
+    Tail the matter-server (matterjs) CHIP-level log — the SERVER-side detail
+    (PASE/CASE, attestation, AddNOC status, error codes) that the client op-log
+    can't see. matterjs writes it to a shared volume (LOG_FILE); the app tails
+    it read-only. Byte-offset incremental: pass the returned `offset` back as
+    `since` for a live stream. since=-1 (default) starts near the tail.
+
+    Returns {available, lines[], offset}. `available:false` until the next full
+    ./start.sh wires the shared volume + LOG_FILE.
+    """
+    import os
+    path = _MATTER_SERVER_LOG
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return {"available": False, "lines": [], "offset": 0}
+    if since < 0 or since > size:
+        start = max(0, size - max_bytes)   # first poll: last ~max_bytes only
+    else:
+        start = since
+        if size - start > max_bytes:       # don't return a huge backlog at once
+            start = size - max_bytes
+    try:
+        def _read():
+            with open(path, "r", errors="replace") as f:
+                f.seek(start)
+                data = f.read()
+                return data, f.tell()
+        data, offset = await asyncio.to_thread(_read)
+    except Exception as e:  # noqa: BLE001
+        return {"available": False, "lines": [], "offset": since, "error": str(e)}
+    lines = [_ANSI_RE.sub("", ln).rstrip() for ln in data.splitlines() if ln.strip()]
+    return {"available": True, "lines": lines, "offset": offset}
 
 
 class MatterFabricRemoveBody(BaseModel):
@@ -2651,6 +2827,15 @@ async def matter_commission(body: MatterCommissionRequest):
     """
     from services.matter_client import get_matter_client
 
+    # Normalize the pairing code (MSG-670): operators paste manual codes with
+    # dashes/spaces ("1275-690-9098"). Strip separators from NUMERIC codes only
+    # — QR payloads ("MT:...") use a base-38 charset where '-' is a legal
+    # character, so those pass through verbatim. Without this we were relying
+    # on the matter-server's parser to forgive formatting.
+    code = (body.code or "").strip()
+    if not code.upper().startswith("MT:"):
+        code = code.replace("-", "").replace(" ", "")
+
     client = get_matter_client()
     if not client.is_connected:
         connected = await client.connect()
@@ -2661,7 +2846,7 @@ async def matter_commission(body: MatterCommissionRequest):
             )
 
     try:
-        result = await client.commission_with_code(body.code)
+        result = await client.commission_with_code(code)
         return {"message": "Device commissioned", "node": result}
     except Exception as e:
         raw = str(e)
@@ -2680,6 +2865,19 @@ async def matter_commission(body: MatterCommissionRequest):
                     "Usually the Hubitat pairing window EXPIRED — click 'Get Setup Code' "
                     "again and paste + Commission within ~2 minutes, with the device powered "
                     "on and on the LAN.")
+        elif "checksum" in low or "invalid checksum" in low:
+            hint = ("The code's checksum is wrong — a typo, a truncated/expired code, or a "
+                    "QR string pasted with characters dropped. Re-copy the FULL code.")
+        elif "133" in low or "invalid command" in low:
+            hint = ("The device rejected the pairing (CHIP 133). Common causes: (1) the "
+                    "commissioning window CLOSED before we finished — generate a FRESH "
+                    "'Get Setup Code' and Commission within ~2 min; (2) a SECOND Matter "
+                    "controller was interfering (e.g. an orphan-purge side-boot — it's now "
+                    "stopped); (3) you pasted the device's FACTORY label code on an "
+                    "already-paired device — use the hub/HomeKit-generated window code instead.")
+        elif "no memory" in low or "sendnoc" in low or "0x0b" in low:
+            hint = ("The device's fabric table is FULL (~5 slots). Free one first: clear our "
+                    "orphans (Debug console), or the Hubitat Fabric Manager driver, then retry.")
         else:
             hint = "Check the matter-server logs for the CHIP-level cause."
         raise HTTPException(status_code=502, detail=f"{raw} — {hint}")
@@ -2754,27 +2952,330 @@ async def matter_delete_mapping(hubitat_device_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.delete("/api/matter/map", tags=["matter"])
+async def matter_delete_all_mappings():
+    """Remove ALL Hubitat↔Matter mappings (the mapping section's 'Remove all').
+    Rows are plain link records (no device/node state is touched) — rebuild
+    them any time with POST /api/matter/map/rebuild."""
+    postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    r = await adelete(
+        f"{postgrest_url}/device_matter_map",
+        params={"hubitat_device_id": "not.is.null"},   # PostgREST DELETE needs a filter
+        headers={"Prefer": "return=representation"},
+        timeout=10,
+    )
+    if r.status_code not in (200, 204):
+        raise HTTPException(status_code=r.status_code, detail=r.text[:300])
+    try:
+        removed = len(r.json()) if r.text else 0
+    except Exception:
+        removed = 0
+    logger.info(f"matter map: removed ALL {removed} mappings (operator action)")
+    return {"removed": removed}
+
+
+@app.post("/api/matter/map/rebuild", tags=["matter"])
+async def matter_rebuild_mappings():
+    """Rebuild Hubitat↔Matter mappings from the discovered-devices table:
+    every non-removed device that has BOTH a Hubitat device id and a node in
+    our fabric (our_node_id) gets an upserted device_matter_map row (endpoint
+    1). Devices without a node are skipped — commission first, then rebuild.
+    Idempotent (merge-duplicates on the hubitat_device_id key)."""
+    postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    r = await aget(
+        f"{postgrest_url}/hubitat_matter_devices",
+        params={"is_removed": "not.is.true",
+                "our_node_id": "not.is.null",
+                "select": "unique_id,device_name,hubitat_device_id,our_node_id"},
+        timeout=10,
+    )
+    if r.status_code != 200:
+        raise HTTPException(status_code=r.status_code, detail=r.text[:300])
+    rows = r.json()
+    created, skipped = 0, 0
+    for d in rows:
+        hid = (d.get("hubitat_device_id") or "").strip()
+        if not hid:
+            skipped += 1
+            continue
+        w = await apost(
+            f"{postgrest_url}/device_matter_map",
+            json={"hubitat_device_id": hid,
+                  "matter_node_id": d["our_node_id"],
+                  "matter_endpoint_id": 1,
+                  "device_name": d.get("device_name") or ""},
+            headers={"Content-Type": "application/json",
+                     "Prefer": "resolution=merge-duplicates"},
+            timeout=5,
+        )
+        if w.status_code in (200, 201, 204):
+            created += 1
+        else:
+            skipped += 1
+            logger.warning(f"map rebuild: upsert failed for {hid}: {w.status_code}")
+    logger.info(f"matter map rebuild: {created} upserted, {skipped} skipped "
+                f"(of {len(rows)} node-bearing devices)")
+    return {"rebuilt": created, "skipped": skipped,
+            "candidates": len(rows),
+            "note": "devices without our_node_id are excluded — commission them first, then rebuild"}
+
+
+_MATTER_HUB_SEL = ("id,hub_name,hub_ip,is_primary,is_enabled,"
+                   "maker_api_app_number,maker_api_token_env,hardware_version")
+
+
+async def _resolve_matter_hubs() -> List[Dict[str, Any]]:
+    """
+    Resolve the SET of hubs Matter may scan for devices.
+
+    MULTI-SELECT MATTER HUBS (operator directive 2026-07-11, evolving the
+    earlier single-hub stopgap now that MAC dedup makes multi-hub safe):
+    discovery scans this set; a physical device seen on >1 hub is deduped by
+    MAC (EUI-64) at read time so it never shows twice and is never
+    double-commissioned. COMMISSIONING is per-device via the device's OWN hub
+    (auto), so it is unaffected by how many hubs are selected. Resolution:
+      1. system_settings.matter_hub_ids (JSON array of ids) -> those hub rows;
+      2. legacy system_settings.matter_hub_id (single id) -> that row;
+      3. the is_primary=true hub;
+      4. [] (nothing resolvable — callers surface a clear error).
+    Ids pointing at no hub row are dropped; selection order is preserved.
+    """
+    import json
+    pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    ids: List[int] = []
+    try:
+        r = await aget(f"{pg}/system_settings",
+                       params={"key": "eq.matter_hub_ids", "select": "value"}, timeout=5)
+        if r.status_code == 200 and r.json():
+            raw = r.json()[0].get("value")
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(parsed, list):
+                ids = [int(x) for x in parsed if str(x).strip().lstrip("-").isdigit()]
+    except Exception as e:
+        logger.debug(f"matter_hub_ids read failed: {e}")
+    if not ids:  # legacy single-id setting
+        try:
+            r = await aget(f"{pg}/system_settings",
+                           params={"key": "eq.matter_hub_id", "select": "value"}, timeout=5)
+            if r.status_code == 200 and r.json():
+                raw = str(r.json()[0].get("value") or "").strip()
+                if raw.isdigit():
+                    ids = [int(raw)]
+        except Exception:
+            pass
+    if ids:
+        try:
+            r = await aget(f"{pg}/hub_config",
+                           params={"id": f"in.({','.join(str(i) for i in ids)})",
+                                   "select": _MATTER_HUB_SEL}, timeout=5)
+            rows = r.json() if r.status_code == 200 else []
+            if rows:
+                order = {hid: n for n, hid in enumerate(ids)}
+                rows.sort(key=lambda h: order.get(h["id"], 999))
+                return rows
+        except Exception as e:
+            logger.warning(f"matter_hub_ids lookup failed: {e}")
+    try:
+        r = await aget(f"{pg}/hub_config",
+                       params={"is_primary": "eq.true", "select": _MATTER_HUB_SEL, "limit": "1"},
+                       timeout=5)
+        if r.status_code == 200 and r.json():
+            return r.json()
+    except Exception as e:
+        logger.warning(f"primary hub lookup failed: {e}")
+    return []
+
+
+async def _resolve_matter_hub() -> Optional[Dict[str, Any]]:
+    """The primary of the selected Matter-hub set (or the first). Retained for
+    single-hub call sites; multi-hub scanning uses _resolve_matter_hubs()."""
+    hubs = await _resolve_matter_hubs()
+    if not hubs:
+        return None
+    for h in hubs:
+        if h.get("is_primary"):
+            return h
+    return hubs[0]
+
+
+@app.post("/api/matter/discover-mdns", tags=["matter"])
+async def matter_discover_mdns():
+    """
+    Discover commissionable Matter devices DIRECTLY over mDNS (_matterc._udp)
+    via the matter controller — NO hub involved. This is the hub-free half of
+    discovery (2026-07-11 operator directive: Matter should not rely on a hub).
+
+    Returns live (non-persisted) results: devices currently in commissioning
+    mode. Each is enriched with a MAC derived from its IPv6 link-local address
+    (EUI-64) and cross-matched against hub-discovered rows by MAC/IP — the
+    dedup key hierarchy is MAC → serial → normalized name, so the same physical
+    device shows as ONE identity with source chips, never two cards.
+    """
+    from services.matter_client import get_matter_client
+    from services.matter_discovery import mac_from_ipv6_ll
+    client = get_matter_client()
+    if not client.is_connected and not await client.connect():
+        raise HTTPException(status_code=503, detail="matter controller unreachable")
+    try:
+        found = await asyncio.wait_for(client._send_command("discover"), timeout=45)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"mDNS discover failed: {e}")
+    found = found if isinstance(found, list) else []
+
+    # Cross-match against hub-discovered rows (dedup: MAC first, then IP).
+    pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    hub_rows = []
+    try:
+        hr = await aget(f"{pg}/hubitat_matter_devices",
+                        params={"is_removed": "not.is.true",
+                                "select": "unique_id,device_name,hub_name,hub_ip,mac_address,ip_address,our_node_id"},
+                        timeout=5)
+        hub_rows = hr.json() if hr.status_code == 200 else []
+    except Exception:
+        pass
+    by_mac = {(r.get("mac_address") or "").lower(): r for r in hub_rows if r.get("mac_address")}
+    by_ip = {(r.get("ip_address") or "").strip(): r for r in hub_rows if r.get("ip_address")}
+
+    out = []
+    for d in found:
+        addrs = d.get("addresses") or []
+        mac = None
+        ipv4 = None
+        for a in addrs:
+            if a.startswith("fe80::") and not mac:
+                mac = mac_from_ipv6_ll(a.split("%")[0])
+            if "." in a and ":" not in a:
+                ipv4 = a
+        match = (by_mac.get((mac or "").lower())
+                 or by_ip.get(ipv4 or "")
+                 or None)
+        out.append({
+            "instance_name": d.get("instance_name"),
+            "vendor_id": d.get("vendor_id"),
+            "product_id": d.get("product_id"),
+            "device_name": d.get("device_name") or "",
+            "commissioning_mode": d.get("commissioning_mode"),
+            "long_discriminator": d.get("long_discriminator"),
+            "ipv4": ipv4,
+            "mac": mac,
+            "addresses": addrs,
+            # Same physical device already known via a hub → dedup chip, and
+            # commissioning it here ADDS our fabric (multi-admin), it doesn't
+            # duplicate the device. Hub-linked rows keep the Hubitat fallback;
+            # pure-mDNS devices are Matter-direct only (no fallback path).
+            "hub_match": ({"unique_id": match.get("unique_id"),
+                           "device_name": match.get("device_name"),
+                           "hub_name": match.get("hub_name"),
+                           "our_node_id": match.get("our_node_id")}
+                          if match else None),
+        })
+    return {"devices": out, "count": len(out)}
+
+
+@app.get("/api/matter/hub", tags=["matter"])
+async def matter_hub_get():
+    """The Matter hub selection: every hub (for the dropdown) + the currently
+    resolved single Matter hub (selected, or the main/primary hub by default).
+
+    Each hub carries `hardware_version` (from the hub's /hub/details/json,
+    probed + persisted lazily when unknown) and the derived `has_thread_br`:
+    C-8 family hubs have a BUILT-IN Thread border router; C-7 and earlier have
+    none, so Thread Matter devices cannot commission/route through them (the
+    2026-07-11 Hub-1 pairing saga, MSG-682). The UI badges Thread-capable hubs
+    so the operator picks the right Matter hub."""
+    pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    r = await aget(f"{pg}/hub_config",
+                   params={"select": "id,hub_name,hub_ip,is_primary,is_enabled,hardware_version",
+                           "order": "id"},
+                   timeout=5)
+    hubs = r.json() if r.status_code == 200 else []
+    for h in hubs:
+        if not h.get("hardware_version"):
+            # Lazy self-heal for new/unknown hubs: one quick probe, persisted.
+            try:
+                pr = await aget(f"http://{h['hub_ip']}/hub/details/json", timeout=4)
+                hv = (pr.json() or {}).get("hardwareVersion") if pr.status_code == 200 else None
+                if hv:
+                    h["hardware_version"] = hv
+                    await apatch(f"{pg}/hub_config",
+                                 params={"id": f"eq.{h['id']}"},
+                                 json={"hardware_version": hv},
+                                 headers={"Content-Type": "application/json"},
+                                 timeout=5)
+            except Exception as e:
+                logger.debug(f"hub {h.get('hub_name')} hardware probe skipped: {e}")
+        hv = (h.get("hardware_version") or "").upper()
+        h["has_thread_br"] = hv.startswith("C-8")   # C-8 / C-8 Pro
+    selected = await _resolve_matter_hubs()
+    return {"hubs": hubs, "selected_ids": [h["id"] for h in selected],
+            "selected": selected}
+
+
+class MatterHubSelectBody(BaseModel):
+    """Body for POST /api/matter/hub — the SET of hubs Matter may scan.
+    Accepts hub_ids (preferred, multi-select) or a single hub_id (back-compat)."""
+    hub_ids: Optional[List[int]] = None
+    hub_id: Optional[int] = None
+
+
+@app.post("/api/matter/hub", tags=["matter"])
+async def matter_hub_set(body: MatterHubSelectBody):
+    """Persist the Matter hub SELECTION SET (system_settings.matter_hub_ids).
+    Discovery scans every selected hub; devices are deduped by MAC so one
+    physical device on multiple hubs is one card, commissioned once (via its
+    own hub, auto). An empty set is rejected — at least one hub is required."""
+    ids = body.hub_ids if body.hub_ids is not None else (
+        [body.hub_id] if body.hub_id is not None else [])
+    ids = sorted({int(i) for i in ids})
+    if not ids:
+        raise HTTPException(status_code=400, detail="Select at least one hub")
+    pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    r = await aget(f"{pg}/hub_config",
+                   params={"id": f"in.({','.join(str(i) for i in ids)})",
+                           "select": "id,hub_name,hub_ip"}, timeout=5)
+    rows = r.json() if r.status_code == 200 else []
+    found_ids = {h["id"] for h in rows}
+    missing = [i for i in ids if i not in found_ids]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"No hub(s) with id {missing}")
+    import json as _json
+    w = await apost(
+        f"{pg}/system_settings",
+        json={"key": "matter_hub_ids", "value": _json.dumps(ids), "value_type": "json",
+              "description": "Set of hubs Matter scans (multi-select; dedup by MAC)"},
+        headers={"Content-Type": "application/json",
+                 "Prefer": "resolution=merge-duplicates"},
+        timeout=5,
+    )
+    if w.status_code not in (200, 201, 204):
+        raise HTTPException(status_code=w.status_code, detail=w.text[:300])
+    logger.info(f"Matter hub set updated: {[h['hub_name'] for h in rows]}")
+    return {"ok": True, "selected": rows, "selected_ids": ids}
+
+
 @app.post("/api/matter/discover", tags=["matter"])
 async def matter_discover():
     """
-    Discover Matter devices from all configured Hubitat hubs.
-
-    Queries each hub's /hub/matterDetails/json endpoint, deduplicates
-    by unique_id, and stores results in hubitat_matter_devices table.
+    Discover Matter devices from the SELECTED SET of Matter hubs (multi-select;
+    default = the main/primary hub). Queries each hub's /hub/matterDetails/json
+    and stores results in hubitat_matter_devices (per-hub rows). The same
+    physical device on >1 hub is deduped by MAC at READ time (list endpoint),
+    so it is never shown twice or double-commissioned.
     """
     import requests as req
 
     postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
 
-    # Collect hub IPs to scan
-    hubs = []
-    main_ip = os.environ.get('HUBITAT_HUB_IP_MAIN')
-    if main_ip:
-        hubs.append({"ip": main_ip, "name": "main"})
-    for i in range(1, 4):
-        ip = os.environ.get(f'HUBITAT_HUB_IP_OTHER_HUB_{i}')
-        if ip:
-            hubs.append({"ip": ip, "name": f"other_hub_{i}"})
+    # The selected set of Matter hubs (multi-select). Scanning multiple hubs is
+    # safe because devices are deduped by MAC; commissioning is still per-device
+    # via the device's own hub.
+    matter_hubs = await _resolve_matter_hubs()
+    if not matter_hubs:
+        raise HTTPException(
+            status_code=503,
+            detail="No Matter hub resolvable: select one or more (POST /api/matter/hub) "
+                   "or mark a hub as primary in Settings → Hubs.")
+    hubs = [{"ip": h["hub_ip"], "name": h["hub_name"]} for h in matter_hubs]
 
     # First, get all Maker API devices for name matching
     from services.hubitat_client import get_default_client
@@ -2821,30 +3322,45 @@ async def matter_discover():
                 match_confidence = 'none'
                 name_lower = matter_name.lower()
 
-                # Exact match
+                # Exact name match ONLY (name.lower()). Fuzzy substring matching
+                # was REMOVED (audit R1e / F5): it mis-bound devices — e.g. a
+                # Matter "Light" matching Maker "Light Desk"/"Light Bedroom" — and
+                # it diverged from services/matter_discovery.py, which is
+                # exact-only per the 2026-07-09 directive. Last-writer-wins on the
+                # same table meant the two paths fought; both are exact now.
                 if name_lower in maker_by_name:
                     maker_match = maker_by_name[name_lower]
                     match_confidence = 'exact'
-                else:
-                    # Fuzzy: check if Matter name is contained in or contains a Maker name
-                    for mk_name, mk_dev in maker_by_name.items():
-                        if name_lower in mk_name or mk_name in name_lower:
-                            maker_match = mk_dev
-                            match_confidence = 'fuzzy'
-                            break
+
+                # MAC = the cross-hub dedup key (multi-hub scanning). Derived
+                # from the device's IPv6 link-local (EUI-64) — burned-in and
+                # fabric-independent, so the same physical device on 2 hubs
+                # collapses to ONE card at read time. (Serial is a stronger key
+                # but needs a per-device fullJson fetch; MAC is free here and
+                # reliable for these LAN devices — operator's point.)
+                from services.matter_discovery import mac_from_ipv6_ll as _mac
+                _ip = device.get('ipAddress', '') or ''
+                _mac_addr = _mac(_ip.split('%')[0]) if _ip.startswith('fe80::') else None
 
                 row = {
                     "unique_id": unique_id,
                     "device_name": matter_name,
                     "manufacturer": device.get('manufacturer', ''),
                     "model": device.get('model', ''),
-                    "ip_address": device.get('ipAddress', ''),
+                    "ip_address": _ip,
+                    "mac_address": _mac_addr,
                     "is_online": device.get('online', False),
                     "hub_ip": hub['ip'],
                     "hub_name": hub['name'],
                     "hubitat_node_id": device.get('nodeId', 0),
                     "hubitat_device_id": str(device.get('id', '')),
                     "hubitat_dni": device.get('dni', ''),
+                    # MANUAL scan resurrects soft-removed rows for the scanned
+                    # hub (the documented Remove contract: 're-scan restores').
+                    # The periodic timer upsert does NOT write these keys, so it
+                    # never resurrects removed rows.
+                    "is_removed": False,
+                    "removed_at": None,
                 }
 
                 if maker_match:
@@ -2879,20 +3395,73 @@ async def matter_discover():
 
 @app.get("/api/matter/hubitat-devices", tags=["matter"])
 async def matter_hubitat_devices():
-    """Get all discovered Hubitat Matter devices from database."""
+    """Discovered Hubitat Matter devices for the UI cards.
+
+    - Excludes soft-removed rows (is_removed) — Remove/Remove-all actually hide
+      cards now (2026-07-11 fix; removal used to write only the frozen
+      matter_devices table, so 'remove all removed nothing').
+    - hub_name is OVERRIDDEN with the LIVE hub_config name resolved by hub_ip:
+      the stored column is frozen at discovery time and survives hub renames
+      (rows still said 'other_hub_2' months after the hub became home_2 —
+      audit F11). Display always derives from live config (P4).
+    - DEDUP by MAC (multi-hub scanning): a physical device seen on >1 hub is
+      collapsed to ONE card. The representative is the row on a primary hub
+      (else the first), with `also_on_hubs` listing the other hubs — so the UI
+      shows one device and commissioning targets one owning hub. Rows with NO
+      MAC are never merged (each stays its own card)."""
     import requests as req
 
     postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
     try:
         resp = req.get(
             f"{postgrest_url}/hubitat_matter_devices",
-            params={"order": "device_name.asc"},
+            params={"order": "device_name.asc", "is_removed": "not.is.true"},
             headers={"Accept": "application/json"},
             timeout=5
         )
-        if resp.ok:
-            return resp.json()
-        return []
+        if not resp.ok:
+            return []
+        rows = resp.json()
+        # Live hub-name + primary flag by hub_ip.
+        live, primary_ips = {}, set()
+        try:
+            hc = req.get(f"{postgrest_url}/hub_config",
+                         params={"select": "hub_name,hub_ip,is_primary"}, timeout=5)
+            if hc.ok:
+                for h in hc.json():
+                    live[h["hub_ip"]] = h["hub_name"]
+                    if h.get("is_primary"):
+                        primary_ips.add(h["hub_ip"])
+        except Exception as e:
+            logger.debug(f"hub-name live-enrich skipped: {e}")
+        for r in rows:
+            r["hub_name"] = live.get(r.get("hub_ip"), r.get("hub_name"))
+
+        # Dedup by MAC. Group only rows that HAVE a mac; null-mac rows pass
+        # through individually (keyed by unique_id so they can't merge).
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        singles: List[Dict[str, Any]] = []
+        for r in rows:
+            mac = (r.get("mac_address") or "").lower()
+            if mac:
+                groups.setdefault(mac, []).append(r)
+            else:
+                singles.append(r)
+        out: List[Dict[str, Any]] = list(singles)
+        for mac, grp in groups.items():
+            if len(grp) == 1:
+                out.append(grp[0]); continue
+            # Representative: prefer a primary-hub row, then one that has our
+            # node (already commissioned), then first.
+            grp.sort(key=lambda x: (
+                0 if x.get("hub_ip") in primary_ips else 1,
+                0 if x.get("our_node_id") is not None else 1))
+            rep = dict(grp[0])
+            rep["also_on_hubs"] = [g.get("hub_name") for g in grp[1:]]
+            rep["hub_count"] = len(grp)
+            out.append(rep)
+        out.sort(key=lambda x: (x.get("device_name") or "").lower())
+        return out
     except Exception as e:
         logger.error(f"Failed to get hubitat matter devices: {e}")
         return []
@@ -2971,13 +3540,20 @@ async def matter_auto_commission(body: AutoCommissionRequest):
 
     postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
 
-    # Step 1: Look up device
-    resp = req.get(
+    # Step 1: Look up device. NOTE: every outbound call in this async route is
+    # wrapped in asyncio.to_thread — `requests` is SYNCHRONOUS and this app runs
+    # a SINGLE uvicorn worker, so a bare req.get here blocks the WHOLE event loop
+    # (every other request, including the Docker health check). The
+    # openPairingWindow call below (a slow/flapping Hubitat hub, up to its
+    # timeout) did exactly that: it froze the app long enough for the health
+    # check to fail and autoheal to RESTART the container mid-commission — so
+    # commissioning could never finish. Threading the blocking I/O is the fix.
+    resp = await asyncio.to_thread(lambda: req.get(
         f"{postgrest_url}/hubitat_matter_devices",
         params={"unique_id": f"eq.{body.unique_id}"},
         headers={"Accept": "application/json"},
-        timeout=5
-    )
+        timeout=5,
+    ))
     if not resp.ok or not resp.json():
         raise HTTPException(status_code=404, detail="Device not found in discovery table")
 
@@ -2986,16 +3562,21 @@ async def matter_auto_commission(body: AutoCommissionRequest):
     if not device.get('is_online'):
         raise HTTPException(status_code=400, detail=f"Device '{device['device_name']}' is offline")
 
-    # Step 2: Open pairing window on Hubitat hub
+    # Step 2: Open pairing window on the device's OWN hub (multi-hub: commission
+    # is per-device via whichever hub currently administers it — "commission
+    # auto"). No single-hub gate anymore; the once-per-physical-device invariant
+    # is enforced by MAC dedup (one card per device), not by restricting hubs.
+    # (threaded — see note above). Timeout lowered 90s -> 30s: a hub that can't
+    # open a window in 30s is down, and 90s is a needlessly long freeze even threaded.
     hub_ip = device['hub_ip']
     hubitat_node = device['hubitat_node_id']
 
     try:
-        pair_resp = req.get(
+        pair_resp = await asyncio.to_thread(lambda: req.get(
             f"http://{hub_ip}/hub/matter/openPairingWindow",
             params={"node": hubitat_node},
-            timeout=90
-        )
+            timeout=30,
+        ))
         if not pair_resp.ok:
             raise HTTPException(
                 status_code=502,
@@ -3037,6 +3618,25 @@ async def matter_auto_commission(body: AutoCommissionRequest):
             detail=f"matter-server commission failed: {e}"
         )
 
+    # Step 3b: SELF-CLEANING COMMISSION (MSG-696). The moment we hold a fresh
+    # admin fabric on this device, sweep OUR stale 0xFFF1 orphans off it
+    # (keep_current=True removes only our non-current fabrics). This stops the
+    # slot accumulation that saturates devices and blocks future pairing — the
+    # cleaner is now automatic at the one moment we're guaranteed to have admin
+    # rights, instead of buried behind a commissioned card. Best-effort: a
+    # cleanup hiccup must not fail an otherwise-successful commission.
+    orphans_cleared = None
+    if our_node_id is not None:
+        try:
+            from services.matter_debug import get_diagnostics
+            _rep = await get_diagnostics().decommission_node(our_node_id, keep_current=True)
+            orphans_cleared = _rep.get("removed_indices")
+            if orphans_cleared:
+                logger.info(f"auto-commission: self-cleaned {len(orphans_cleared)} "
+                            f"stale 0xFFF1 fabric(s) on node {our_node_id}")
+        except Exception as e:
+            logger.warning(f"auto-commission: self-clean on node {our_node_id} failed: {e}")
+
     # Step 4: Create device_matter_map entry
     if our_node_id is not None:
         req.post(
@@ -3070,43 +3670,74 @@ async def matter_auto_commission(body: AutoCommissionRequest):
         "message": f"Commissioned '{device['device_name']}'",
         "our_node_id": our_node_id,
         "hubitat_device_id": device['hubitat_device_id'],
-        "setup_code_used": setup_code[:8] + "..." if setup_code else None
+        "setup_code_used": setup_code[:8] + "..." if setup_code else None,
+        "orphans_cleared": orphans_cleared,   # our stale 0xFFF1 fabrics removed post-commission
     }
 
 
-@app.post("/api/matter/auto-commission-all", tags=["matter"])
-async def matter_auto_commission_all():
-    """
-    Auto-commission ALL discovered, online, uncommissioned Hubitat Matter devices.
+class BulkCommissionBody(BaseModel):
+    """Body for POST /api/matter/auto-commission-all — the explicit-user gate."""
+    confirmed: bool = False
 
-    Runs up to 3 commissions in parallel (limited by semaphore to avoid
-    overwhelming the Hubitat hub or matter-server). Each device gets its
-    pairing window opened and is commissioned independently.
+
+@app.post("/api/matter/auto-commission-all", tags=["matter"])
+async def matter_auto_commission_all(body: Optional[BulkCommissionBody] = None):
     """
-    import asyncio
-    import requests as req
+    USER-INITIATED bulk commission: every discovered, online, uncommissioned
+    device ON THE SELECTED MATTER HUB (single-hub policy — other hubs' rows are
+    excluded, not errored).
+
+    HARD GATE: requires {"confirmed": true} in the body — only the UI's
+    "Commission All" button (behind its confirm dialog) sends it. Any legacy or
+    automatic caller without the flag gets 409, so the scan-chain class of bug
+    (bulk commissioning fired without the operator asking) is structurally
+    impossible to reintroduce.
+
+    Only ever runs from the operator clicking "Commission All" — NEVER
+    automatically. The 2026-07-10/11 removals killed every automatic trigger
+    (the 5-min rolling commissioner and the scan→commission-all UI auto-chain,
+    which saturated device fabric slots); this explicit bulk action is the one
+    surviving multi-device path, kept by operator directive ("USER CAN run
+    this"). Concurrency capped at 3 so the hub's pairing flow and matter-server
+    PASE sessions aren't overwhelmed.
+    """
+    if body is None or not body.confirmed:
+        raise HTTPException(
+            status_code=409,
+            detail="Bulk commissioning requires explicit confirmation "
+                   "({\"confirmed\": true}) — it is a user action, never automatic.")
 
     postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
 
-    # Get all online, uncommissioned devices
-    resp = req.get(
+    matter_hub = await _resolve_matter_hub()
+    if not matter_hub:
+        raise HTTPException(
+            status_code=503,
+            detail="No Matter hub resolvable: select one (POST /api/matter/hub) "
+                   "or mark a hub as primary in Settings → Hubs.")
+
+    # Only devices living on THE Matter hub (plus online + uncommissioned).
+    resp = await aget(
         f"{postgrest_url}/hubitat_matter_devices",
         params={
             "is_online": "eq.true",
-            "is_commissioned": "eq.false"
+            "is_commissioned": "eq.false",
+            "hub_ip": f"eq.{matter_hub['hub_ip']}",
         },
-        headers={"Accept": "application/json"},
-        timeout=5
+        timeout=5,
     )
-    if not resp.ok:
+    if resp.status_code != 200:
         raise HTTPException(status_code=502, detail="Failed to query discovered devices")
 
     devices = resp.json()
     if not devices:
-        return {"message": "No online uncommissioned devices found", "commissioned": 0, "failed": 0, "results": []}
+        return {"message": f"No online uncommissioned devices on {matter_hub['hub_name']}",
+                "commissioned": 0, "failed": 0, "results": []}
 
-    # Full parallelism — all devices commission concurrently
-    sem = asyncio.Semaphore(len(devices))
+    # Cap concurrent commissions at 3 (the old code claimed 3 in its docstring
+    # but actually ran ALL devices at once — Semaphore(len(devices)) — which
+    # hammered the hub's pairing flow).
+    sem = asyncio.Semaphore(3)
 
     async def commission_one(device):
         """Commission a single device, respecting the semaphore."""
@@ -3118,23 +3749,22 @@ async def matter_auto_commission_all():
                 result = await matter_auto_commission(body)
                 return {"device": device_name, "status": "ok", "node_id": result.get("our_node_id")}
             except HTTPException as e:
-                logger.warning(f"Auto-commission failed for {device_name}: {e.detail}")
+                logger.warning(f"Bulk commission failed for {device_name}: {e.detail}")
                 return {"device": device_name, "status": "error", "detail": e.detail}
             except Exception as e:
-                logger.warning(f"Auto-commission failed for {device_name}: {e}")
+                logger.warning(f"Bulk commission failed for {device_name}: {e}")
                 return {"device": device_name, "status": "error", "detail": str(e)}
 
-    # Fire all commissions concurrently (semaphore limits to 3 at a time)
     results = await asyncio.gather(*[commission_one(d) for d in devices])
 
     commissioned = sum(1 for r in results if r["status"] == "ok")
     failed = sum(1 for r in results if r["status"] == "error")
 
     return {
-        "message": f"Commissioned {commissioned}/{len(devices)} devices",
+        "message": f"Commissioned {commissioned}/{len(devices)} devices on {matter_hub['hub_name']}",
         "commissioned": commissioned,
         "failed": failed,
-        "results": results
+        "results": results,
     }
 
 
@@ -3613,14 +4243,24 @@ async def list_hub_health():
     Per-hub WS + reconcile health. Used by the dashboard alert banner to
     decide whether to surface a 'recommend Maker API as fallback' warning.
     """
-    r = await aget(
-        f"{os.environ.get('POSTGREST_URL', 'http://postgrest:3001')}/hub_health",
-        params={"order": "hub_id"},
-        timeout=5,
-    )
-    if r.status_code == 200:
-        return r.json()
-    raise HTTPException(status_code=r.status_code, detail=r.text)
+    pg = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
+    r = await aget(f"{pg}/hub_health", params={"order": "hub_id"}, timeout=5)
+    if r.status_code != 200:
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    rows = r.json()
+    # Enrich each health row with the hub's NAME. hub_health has no name column
+    # (keyed by hub_id = hub_config.id), so the dashboard banner used to render
+    # the raw id — which surfaced as the confusing phantom 'Hub 4' for home_3
+    # (id 4). Join hub_config so the banner can label by name. Best-effort: if
+    # the name lookup fails the rows still return, and the UI falls back to the id.
+    try:
+        cfg = await aget(f"{pg}/hub_config", params={"select": "id,hub_name"}, timeout=5)
+        names = {c["id"]: c.get("hub_name") for c in cfg.json()} if cfg.status_code == 200 else {}
+        for row in rows:
+            row["hub_name"] = names.get(row.get("hub_id"))
+    except Exception as e:
+        logger.debug(f"hub health name-enrich skipped: {e}")
+    return rows
 
 
 @app.post("/api/hubs/{hub_ip}/reboot", tags=["hubs"])
@@ -3788,6 +4428,22 @@ async def update_hub(hub_id: int, body: Dict[str, Any]):
 
     postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
 
+    # If enable/disable or rename is in this patch, capture the BEFORE row so we
+    # can reconcile this hub's eventsocket task (spawn/teardown/respawn) after.
+    old_row = None
+    if "is_enabled" in patch or "hub_name" in patch:
+        try:
+            _pr = await aget(
+                f"{postgrest_url}/hub_config",
+                params={"id": f"eq.{hub_id}",
+                        "select": "hub_name,hub_ip,is_enabled", "limit": "1"},
+                timeout=5,
+            )
+            if _pr.status_code == 200 and _pr.json():
+                old_row = _pr.json()[0]
+        except Exception:
+            pass
+
     # If the user is setting is_primary=true, clear it on every other row
     # first — exactly one primary at a time.
     if patch.get("is_primary") is True:
@@ -3830,6 +4486,29 @@ async def update_hub(hub_id: int, body: Dict[str, Any]):
                 logger.warning(f"Could not resync devices.hub_ip: {e}")
 
         _invalidate_hub_caches()
+
+        # Reconcile this hub's eventsocket task with its new state — enable
+        # spawns it, disable tears it down, rename respawns under the new name.
+        # Makes hub edits take effect LIVE (audit F3.1 / no-restart-to-forget).
+        if old_row is not None:
+            try:
+                from services.hubitat_eventsocket_client import (
+                    start_hub_socket, stop_hub_socket,
+                )
+                old_name = old_row.get("hub_name")
+                new_name = patch.get("hub_name", old_name)
+                new_ip = patch.get("hub_ip", old_row.get("hub_ip"))
+                new_enabled = patch.get("is_enabled", old_row.get("is_enabled"))
+                if old_name and new_name != old_name:
+                    await stop_hub_socket(old_name)  # rename: kill the old task
+                if new_enabled:
+                    await start_hub_socket({"id": hub_id, "hub_name": new_name,
+                                            "hub_ip": new_ip})
+                else:
+                    await stop_hub_socket(new_name)
+            except Exception as e:
+                logger.warning(f"update_hub: eventsocket reconcile failed: {e}")
+
         return r.json() if r.status_code == 200 else {"ok": True, "id": hub_id}
     except HTTPException:
         raise
@@ -3864,7 +4543,21 @@ async def create_hub(body: Dict[str, Any]):
         if r.status_code not in (200, 201):
             raise HTTPException(status_code=r.status_code, detail=r.text)
         _invalidate_hub_caches()
-        return r.json()
+        created = r.json()
+        # Spawn the eventsocket task for the new hub immediately if enabled — no
+        # restart needed to pick it up (the inverse of no-restart-to-forget).
+        row = (created[0] if isinstance(created, list) and created
+               else created if isinstance(created, dict) else None)
+        if row and row.get("is_enabled") and row.get("hub_name"):
+            try:
+                from services.hubitat_eventsocket_client import start_hub_socket
+                await start_hub_socket({
+                    "id": row.get("id"), "hub_name": row.get("hub_name"),
+                    "hub_ip": row.get("hub_ip"),
+                })
+            except Exception as e:
+                logger.warning(f"create_hub: eventsocket spawn failed: {e}")
+        return created
     except HTTPException:
         raise
     except Exception as e:
@@ -3884,6 +4577,20 @@ async def delete_hub(hub_id: int):
     """
     postgrest_url = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
     try:
+        # 0) Capture this hub's NAME before the row is gone — the eventsocket
+        #    tasks are keyed by hub_name, so we need it to tear the task down.
+        hub_name = None
+        try:
+            nr = await aget(
+                f"{postgrest_url}/hub_config",
+                params={"id": f"eq.{hub_id}", "select": "hub_name", "limit": "1"},
+                timeout=5,
+            )
+            if nr.status_code == 200 and nr.json():
+                hub_name = nr.json()[0].get("hub_name")
+        except Exception:
+            pass
+
         # 1) INTELLIGENT CASCADE (NOT a SQL CASCADE — that would DELETE the
         #    devices). devices.hub_id is NOT NULL, so we can't detach; instead
         #    reassign this hub's devices to another remaining hub (prefer the
@@ -3930,6 +4637,27 @@ async def delete_hub(hub_id: int):
         if d.status_code not in (200, 204):
             raise HTTPException(status_code=d.status_code, detail=d.text)
         _invalidate_hub_caches()
+
+        # 2b) Tear down this hub's eventsocket reconnect task and delete its
+        #     hub_health row EXPLICITLY — do NOT rely on FK ON DELETE CASCADE
+        #     (audit F3.1/F3.2; CASCADE-forbidden + no-restart-to-forget policy).
+        #     Without this the deleted hub's task loops forever writing failures
+        #     into a surviving hub_health row → the phantom 'Hub N' banner. Stop
+        #     the task FIRST so a last-gasp write can't re-create the row.
+        if hub_name:
+            try:
+                from services.hubitat_eventsocket_client import stop_hub_socket
+                await stop_hub_socket(hub_name)
+            except Exception as e:
+                logger.warning(f"delete_hub: eventsocket teardown failed: {e}")
+        try:
+            await adelete(
+                f"{postgrest_url}/hub_health",
+                params={"hub_id": f"eq.{hub_id}"},
+                timeout=5,
+            )
+        except Exception as e:
+            logger.warning(f"delete_hub: hub_health row delete failed: {e}")
 
         # 3) Re-classify internally — re-home the detached devices to the
         #    remaining hubs. Best-effort: a classifier hiccup must not fail the

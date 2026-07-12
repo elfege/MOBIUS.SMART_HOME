@@ -621,10 +621,26 @@ class SamsungTVClient:
         if self._power_state == TVPowerState.OFF:
             return TVPowerState.OFF
 
-        # UNKNOWN → OFF on the first observation is fine (startup case).
+        # UNKNOWN → OFF requires the SAME streak threshold as ON → OFF
+        # (safe-start, audit F2). The old immediate transition meant every
+        # container restart re-armed the false-OFF bug the hysteresis was
+        # built to kill: _power_state resets to UNKNOWN on boot, so one
+        # flaky poll right after a restart pushed a false OFF to Hubitat
+        # (and a false WatchingTV mode change). Cost of the fix: a truly
+        # off TV takes threshold×poll-interval (~15s) to report OFF after
+        # a restart. State holds at UNKNOWN (not ON) while accumulating.
         if self._power_state == TVPowerState.UNKNOWN:
+            if self._off_streak < _OFF_STREAK_THRESHOLD:
+                self._log.info(
+                    "Suppressing UNKNOWN→OFF transition (streak %d/%d, "
+                    "reason=%s) — safe-start hysteresis after restart",
+                    self._off_streak, _OFF_STREAK_THRESHOLD, obs_reason,
+                )
+                return TVPowerState.UNKNOWN
             self._log.info(
-                "First OFF observation from UNKNOWN startup state (%s)", obs_reason
+                "UNKNOWN→OFF transition committed after %d consecutive OFF "
+                "observations (latest reason=%s)",
+                self._off_streak, obs_reason,
             )
             await self._update_power_state(TVPowerState.OFF)
             return TVPowerState.OFF

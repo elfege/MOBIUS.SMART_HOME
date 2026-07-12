@@ -178,6 +178,31 @@ def run_db_migrations():
         "ALTER TABLE hubitat_matter_devices "
         "ADD COLUMN IF NOT EXISTS last_commission_error TEXT",
 
+        # Matter setup-code VAULT (added 2026-07-12, reclaim-as-primary phase).
+        # Stores FACTORY setup codes captured at commission, encrypted AES-256-GCM
+        # (services/matter_code_vault.py). SERVER-SIDE ONLY — deliberately NOT
+        # exposed through PostgREST / the api view schema (it holds device secrets,
+        # even as ciphertext). Keyed by unique_id (the handle the commission flow
+        # already has); mac/serial stored for cross-fabric identity + backfill.
+        """CREATE TABLE IF NOT EXISTS matter_device_codes (
+            id SERIAL PRIMARY KEY,
+            unique_id VARCHAR(128),
+            mac VARCHAR(32),
+            serial VARCHAR(128),
+            device_name VARCHAR(200),
+            code_ciphertext BYTEA NOT NULL,
+            nonce BYTEA NOT NULL,
+            is_factory_code BOOLEAN NOT NULL DEFAULT true,
+            source VARCHAR(30) NOT NULL DEFAULT 'commission',
+            key_fingerprint VARCHAR(20),
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_matter_device_codes_unique_id "
+        "ON matter_device_codes(unique_id) WHERE unique_id IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_matter_device_codes_mac "
+        "ON matter_device_codes(mac) WHERE mac IS NOT NULL",
+
         # Device hub mapping table for native-hub command routing (added 2026-02-28)
         """CREATE TABLE IF NOT EXISTS device_hub_mapping (
             device_label VARCHAR(200) NOT NULL,
@@ -2307,6 +2332,15 @@ async def get_hub_mapping_stats():
 class MatterCommissionRequest(BaseModel):
     """Request body for commissioning a new Matter device."""
     code: str  # QR code string (MT:...) or manual pairing code
+    # Setup-code vault (reclaim-as-primary phase, 2026-07-12): when the operator
+    # commissions with a FACTORY/label code (not a hub/HomeKit ephemeral ECM
+    # code), flag it so we capture it encrypted for later reclaim. Ephemeral ECM
+    # codes are worthless to store, so is_factory defaults False (no capture).
+    is_factory: bool = False
+    unique_id: Optional[str] = None   # discovery handle to key the vault row
+    mac: Optional[str] = None
+    serial: Optional[str] = None
+    device_name: Optional[str] = None
 
 
 class MatterMapRequest(BaseModel):
@@ -2889,6 +2923,89 @@ async def matter_reconcile():
     return {"reconciled": reconciled}
 
 
+def _vault_pg_conn():
+    """psycopg2 connection for SERVER-SIDE-ONLY tables (the setup-code vault is
+    never exposed via PostgREST). Same env as run_db_migrations()."""
+    import psycopg2
+    return psycopg2.connect(
+        host=os.environ.get('POSTGRES_HOST', 'postgres'),
+        port=os.environ.get('POSTGRES_PORT', '5432'),
+        dbname=os.environ.get('POSTGRES_DB', 'smarthome'),
+        user=os.environ.get('POSTGRES_USER', 'smarthome_api'),
+        password=os.environ.get('POSTGRES_PASSWORD', ''),
+    )
+
+
+async def _vault_store_setup_code(code: str, *, unique_id: Optional[str] = None,
+                                  mac: Optional[str] = None, serial: Optional[str] = None,
+                                  device_name: Optional[str] = None,
+                                  is_factory: bool = True,
+                                  source: str = "commission") -> bool:
+    """
+    Encrypt + upsert a device setup code into `matter_device_codes` (best-effort,
+    fail-closed). Returns True if stored. No-op when is_factory is False (ephemeral
+    ECM codes are worthless to vault) or the vault is unavailable (missing
+    `cryptography` lib or `MATTER_CODE_ENC_KEY`). NEVER raises — a capture failure
+    must not fail an otherwise-successful commission.
+    """
+    from services import matter_code_vault as vault
+    if not is_factory or not code:
+        return False
+    if not vault.is_available():
+        logger.info("setup-code vault unavailable (no cryptography lib or "
+                    "MATTER_CODE_ENC_KEY) — skipping capture; set the key + ./deploy.sh.")
+        return False
+    enc = vault.encrypt(code)
+    if enc is None:
+        return False
+    ct, nonce = enc
+    fp = vault.key_fingerprint()
+
+    def _upsert():
+        import psycopg2
+        conn = _vault_pg_conn()
+        try:
+            with conn, conn.cursor() as cur:
+                # Prefer upsert on unique_id when we have it; else plain insert.
+                if unique_id:
+                    cur.execute(
+                        """INSERT INTO matter_device_codes
+                             (unique_id, mac, serial, device_name, code_ciphertext,
+                              nonce, is_factory_code, source, key_fingerprint, updated_at)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s, NOW())
+                           ON CONFLICT (unique_id) WHERE unique_id IS NOT NULL
+                           DO UPDATE SET mac=EXCLUDED.mac, serial=EXCLUDED.serial,
+                             device_name=EXCLUDED.device_name,
+                             code_ciphertext=EXCLUDED.code_ciphertext,
+                             nonce=EXCLUDED.nonce, is_factory_code=EXCLUDED.is_factory_code,
+                             source=EXCLUDED.source, key_fingerprint=EXCLUDED.key_fingerprint,
+                             updated_at=NOW()""",
+                        (unique_id, mac, serial, device_name,
+                         psycopg2.Binary(ct), psycopg2.Binary(nonce),
+                         True, source, fp))
+                else:
+                    cur.execute(
+                        """INSERT INTO matter_device_codes
+                             (unique_id, mac, serial, device_name, code_ciphertext,
+                              nonce, is_factory_code, source, key_fingerprint)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        (unique_id, mac, serial, device_name,
+                         psycopg2.Binary(ct), psycopg2.Binary(nonce),
+                         True, source, fp))
+        finally:
+            conn.close()
+
+    try:
+        import psycopg2  # noqa: F401 (used inside _upsert via closure import)
+        await asyncio.to_thread(_upsert)
+        logger.info(f"setup-code vaulted (source={source}, key={fp}) for "
+                    f"{device_name or unique_id or mac or 'device'}")
+        return True
+    except Exception as e:  # noqa: BLE001 — capture must never fail the caller
+        logger.warning(f"setup-code vault upsert failed (best-effort): {e}")
+        return False
+
+
 @app.post("/api/matter/commission", tags=["matter"])
 async def matter_commission(body: MatterCommissionRequest):
     """
@@ -2925,7 +3042,15 @@ async def matter_commission(body: MatterCommissionRequest):
 
     try:
         result = await client.commission_with_code(code)
-        return {"message": "Device commissioned", "node": result}
+        # Setup-code VAULT (reclaim-as-primary): if the operator flagged this as a
+        # FACTORY/label code, capture it encrypted for later reclaim. Best-effort
+        # + fail-closed — never let a capture hiccup fail a good commission.
+        vaulted = await _vault_store_setup_code(
+            code, unique_id=body.unique_id, mac=body.mac, serial=body.serial,
+            device_name=body.device_name, is_factory=body.is_factory,
+            source="commission")
+        return {"message": "Device commissioned", "node": result,
+                "factory_code_vaulted": vaulted}
     except Exception as e:
         raw = str(e)
         logger.error(f"Matter commissioning failed: {e}")
@@ -2959,6 +3084,80 @@ async def matter_commission(body: MatterCommissionRequest):
         else:
             hint = "Check the matter-server logs for the CHIP-level cause."
         raise HTTPException(status_code=502, detail=f"{raw} — {hint}")
+
+
+class FactoryCodeBackfillRequest(BaseModel):
+    """Manual label-scan backfill of a device's FACTORY setup code — for devices
+    first commissioned by Hubitat/Apple (we never saw their factory code)."""
+    code: str
+    unique_id: Optional[str] = None
+    mac: Optional[str] = None
+    serial: Optional[str] = None
+    device_name: Optional[str] = None
+
+
+@app.post("/api/matter/devices/factory-code", tags=["matter"])
+async def matter_backfill_factory_code(body: FactoryCodeBackfillRequest):
+    """
+    Vault a device's FACTORY setup code from a manual label/QR scan (the backfill
+    path for devices we didn't first-commission). Requires the vault to be active
+    (cryptography lib + MATTER_CODE_ENC_KEY) — 503 if not, so the operator gets a
+    clear 'set the key' signal rather than a silent no-op. Needs at least one
+    identity (unique_id / mac / serial)."""
+    from services import matter_code_vault as vault
+    if not vault.is_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Setup-code vault is not active: set MATTER_CODE_ENC_KEY in the "
+                   "SMARTHOME secret and ensure the cryptography lib is installed "
+                   "(./deploy.sh), then retry.")
+    if not (body.unique_id or body.mac or body.serial):
+        raise HTTPException(status_code=400,
+                            detail="Provide at least one device identity (unique_id, mac, or serial).")
+    code = (body.code or "").strip()
+    if not code.upper().startswith("MT:"):
+        code = code.replace("-", "").replace(" ", "")
+    stored = await _vault_store_setup_code(
+        code, unique_id=body.unique_id, mac=body.mac, serial=body.serial,
+        device_name=body.device_name, is_factory=True, source="manual_backfill")
+    if not stored:
+        raise HTTPException(status_code=500, detail="Failed to vault the setup code.")
+    return {"message": "Factory code vaulted", "device": body.device_name or body.unique_id}
+
+
+@app.get("/api/matter/vault/status", tags=["matter"])
+async def matter_vault_status():
+    """
+    Setup-code vault status for the UI — WITHOUT ever returning a code or
+    ciphertext: {available, key_fingerprint, count, devices:[{unique_id, mac,
+    device_name, source, is_factory_code, updated_at}]}. `available:false` means
+    the key and/or cryptography lib is missing (capture is inert)."""
+    from services import matter_code_vault as vault
+    available = vault.is_available()
+
+    def _list():
+        import psycopg2
+        conn = _vault_pg_conn()
+        try:
+            with conn, conn.cursor() as cur:
+                # NEVER select code_ciphertext/nonce here — metadata only.
+                cur.execute(
+                    "SELECT unique_id, mac, device_name, source, is_factory_code, "
+                    "updated_at FROM matter_device_codes ORDER BY updated_at DESC")
+                rows = cur.fetchall()
+                return [{"unique_id": r[0], "mac": r[1], "device_name": r[2],
+                         "source": r[3], "is_factory_code": r[4],
+                         "updated_at": r[5].isoformat() if r[5] else None} for r in rows]
+        finally:
+            conn.close()
+
+    try:
+        devices = await asyncio.to_thread(_list)
+    except Exception as e:  # noqa: BLE001 — table may not exist pre-migration
+        logger.debug(f"vault status list failed: {e}")
+        devices = []
+    return {"available": available, "key_fingerprint": vault.key_fingerprint(),
+            "count": len(devices), "devices": devices}
 
 
 @app.get("/api/matter/map", tags=["matter"])

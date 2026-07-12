@@ -64,6 +64,13 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
 
+      # Matter setup-code VAULT key (reclaim-as-primary, 2026-07-12): AES-256-GCM
+      # key for services/matter_code_vault.py, mapped from the SMARTHOME AWS
+      # secret by start.sh. Optional (`:-` default empty) — absent = the vault is
+      # inert/fail-closed, no capture. Set with:
+      #   update_aws_secret SMARTHOME MATTER_CODE_ENC_KEY "$(openssl rand -hex 32)"
+      MATTER_CODE_ENC_KEY: ${MATTER_CODE_ENC_KEY:-}
+
       # RELOAD SEMANTICS (updated 2026-07-11, --reload removed): there is NO
       # Python hot-reload anymore. PYTHON changes — app.py AND the directory
       # mounts (apps/, services/) — require `docker restart smarthome-app` (or

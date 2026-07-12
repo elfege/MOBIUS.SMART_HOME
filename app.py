@@ -203,6 +203,42 @@ def run_db_migrations():
         "CREATE INDEX IF NOT EXISTS idx_matter_device_codes_mac "
         "ON matter_device_codes(mac) WHERE mac IS NOT NULL",
 
+        # PANEL surface (TILES absorb, P1 — 2026-07-12). Both tables are
+        # SERVER-SIDE ONLY: `panel_devices` holds credential material (token
+        # HASHES) and must NEVER become a PostgREST resource, and preferences are
+        # reached through our own authenticated FastAPI routes. No api.* views.
+        #
+        # Enrolled principals (wall tablets / services). Per-device tokens are
+        # what make individual REVOCATION possible — the thing a "trusted LAN"
+        # gate can never give you. Only the SHA-256 hash is stored.
+        """CREATE TABLE IF NOT EXISTS dsapp.panel_devices (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(120) NOT NULL,
+            kind VARCHAR(20) NOT NULL DEFAULT 'panel',
+            token_hash CHAR(64) NOT NULL UNIQUE,
+            token_prefix VARCHAR(16),
+            scopes TEXT[] NOT NULL DEFAULT ARRAY['panel:read']::TEXT[],
+            require_lan BOOLEAN NOT NULL DEFAULT true,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_seen_at TIMESTAMPTZ,
+            last_seen_ip VARCHAR(64),
+            revoked_at TIMESTAMPTZ
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_panel_devices_active_token "
+        "ON dsapp.panel_devices(token_hash) WHERE revoked_at IS NULL",
+
+        # Panel preferences: JSONB by category, keyed by PROFILE (wall tablets
+        # are profiles, not people — MOBIUS.HOME has no user model). Replaces
+        # TILES' per-user user_preferences/user_settings.
+        """CREATE TABLE IF NOT EXISTS dsapp.panel_preferences (
+            id SERIAL PRIMARY KEY,
+            profile VARCHAR(60) NOT NULL DEFAULT 'default',
+            category VARCHAR(60) NOT NULL,
+            value JSONB NOT NULL DEFAULT '{}'::jsonb,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (profile, category)
+        )""",
+
         # Device hub mapping table for native-hub command routing (added 2026-02-28)
         """CREATE TABLE IF NOT EXISTS device_hub_mapping (
             device_label VARCHAR(200) NOT NULL,
@@ -1153,6 +1189,17 @@ app.include_router(samsung_tv_instance_router)
 # Table: dshub.matter_command_feedback (migrate_matter_command_feedback_learning_log.sql).
 from services.matter_command_feedback import router as matter_feedback_router  # noqa: E402
 app.include_router(matter_feedback_router)
+
+# PANEL API (TILES absorb, P1 — 2026-07-12): the authenticated surface the
+# RN/Expo panel app talks to. MAX-CONVENTIONAL, DEFAULT-DENY auth (operator
+# ruling §6b): enrolled per-device tokens (SHA-256 hashed, individually
+# revocable) + least-privilege scopes + the trusted-LAN check as a SECOND
+# factor — never the gate. This deliberately does NOT reproduce the absorbed
+# TILES posture, whose POST /api/device/<id>/command had no auth at all.
+# Package: apps/tiles_api/ (tiles-exclusive glue only; shared control logic
+# stays in services/ per the fanatic-modularization ruling).
+from apps.tiles_api.routes import router as panel_router  # noqa: E402
+app.include_router(panel_router)
 
 # Certificate-installation routes (/install-cert, /api/cert/status). Serves the
 # shared MOBIUS local CA so users trust HTTPS once instead of clicking through

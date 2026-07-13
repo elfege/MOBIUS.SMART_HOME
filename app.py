@@ -3460,6 +3460,43 @@ class AutoCommissionRequest(BaseModel):
 @app.post("/api/matter/auto-commission", tags=["matter"])
 async def matter_auto_commission(body: AutoCommissionRequest):
     """
+    Auto-commission ONE Hubitat Matter device — THE GATED ENTRY POINT.
+
+    STRICT GATING (operator directive, 2026-07-13): "two pairing storms on one
+    radio must be strictly gated." EVERY path that opens a pairing window now
+    holds the ONE global mutex, with no exception and no bypass:
+
+        manual commission      -> matter_commission            (mutex)
+        single auto-commission -> THIS endpoint                (mutex)
+        Commission All (bulk)  -> _bulk_commission_worker      (mutex, held for
+                                  the whole run; it calls the INNER function
+                                  below, never this endpoint)
+        hub->hub COPY          -> matter_hub_port orchestrator (mutex)
+
+    The earlier "deliberately not locked here to avoid deadlocking the bulk
+    worker" was a WORKAROUND, not a gate: it left this endpoint wide open, so a
+    double-click on a device card (or an auto-commission racing a manual one)
+    still produced concurrent pairing storms. The correct fix is this split —
+    the ENDPOINT takes the lock; the INNER function assumes the caller holds it.
+    A radio pairs one device at a time; a second attempt now gets a 409 naming
+    the holder instead of piling on.
+    """
+    try:
+        async with matter_pairing_lock(
+            "commission_auto", f"device:{body.unique_id}", ttl_s=300,
+        ):
+            return await _auto_commission_device(body.unique_id)
+    except PairingLockBusy as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+async def _auto_commission_device(unique_id: str):
+    """
+    The auto-commission WORK — the caller MUST already hold the global Matter
+    pairing mutex (see matter_auto_commission, which is the gated entry point,
+    and _bulk_commission_worker, which holds the lock across an entire run and
+    calls this directly so it cannot deadlock against itself).
+
     Auto-commission a Hubitat Matter device into our matter-server.
 
     Steps:
@@ -3486,7 +3523,7 @@ async def matter_auto_commission(body: AutoCommissionRequest):
     # commissioning could never finish. Threading the blocking I/O is the fix.
     resp = await asyncio.to_thread(lambda: req.get(
         f"{postgrest_url}/hubitat_matter_devices",
-        params={"unique_id": f"eq.{body.unique_id}"},
+        params={"unique_id": f"eq.{unique_id}"},
         headers={"Accept": "application/json"},
         timeout=5,
     ))
@@ -3593,7 +3630,7 @@ async def matter_auto_commission(body: AutoCommissionRequest):
     # Step 5: Update hubitat_matter_devices with our node ID
     req.patch(
         f"{postgrest_url}/hubitat_matter_devices",
-        params={"unique_id": f"eq.{body.unique_id}"},
+        params={"unique_id": f"eq.{unique_id}"},
         json={
             "our_node_id": our_node_id,
             "is_commissioned": True
@@ -3707,7 +3744,7 @@ async def _bulk_commission_worker(devices: List[Dict[str, Any]], hub_label: str)
 
             try:
                 result = await asyncio.wait_for(
-                    matter_auto_commission(AutoCommissionRequest(unique_id=device['unique_id'])),
+                    _auto_commission_device(device['unique_id']),
                     timeout=_BULK_COMMISSION_DEVICE_TIMEOUT_S,
                 )
                 st["results"].append({"device": name, "status": "ok",

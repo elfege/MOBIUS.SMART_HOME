@@ -3521,10 +3521,34 @@ async def _bulk_commission_worker(devices: List[Dict[str, Any]], hub_label: str)
     Progress is written into _bulk_commission_state for the status endpoint.
     """
     from datetime import datetime  # app.py convention: datetime imported locally
+    from services.matter_pairing_lock import matter_pairing_lock, PairingLockBusy
+
     st = _bulk_commission_state
     seen_macs: set = set()
     consecutive_failures = 0
     aborted = False
+
+    # GLOBAL MATTER-PAIRING MUTEX (operator invariant, MSG-919): a Hubitat pairs
+    # exactly ONE Matter device at a time — as source (open window) AND as target.
+    # Commission All, the hub->hub COPY orchestrator, and manual pairing from a
+    # hub's UI all contend for that single slot. Holding the shared lock for the
+    # whole run is what makes "strictly sequential" true ACROSS FEATURES, not just
+    # within this one (our per-run `running` flag cannot see the other feature).
+    try:
+        _lock_cm = matter_pairing_lock(
+            "commission_all",
+            f"{len(devices)} device(s) on {hub_label}",
+            # Worst case ~ (commission ceiling + settle) per device, plus headroom.
+            ttl_s=int(len(devices) * (_BULK_COMMISSION_DEVICE_TIMEOUT_S
+                                      + _BULK_COMMISSION_SETTLE_S)) + 300,
+        )
+        await _lock_cm.__aenter__()
+    except PairingLockBusy as e:
+        st["running"] = False
+        st["message"] = str(e)
+        st["aborted"] = True
+        logger.warning(f"Commission All refused to start: {e}")
+        return
     try:
         for n, device in enumerate(devices):
             name = device.get('device_name', device['unique_id'])
@@ -3582,6 +3606,13 @@ async def _bulk_commission_worker(devices: List[Dict[str, Any]], hub_label: str)
                 st["current"] = f"settling {int(_BULK_COMMISSION_SETTLE_S)}s (hub recovery)"
                 await asyncio.sleep(_BULK_COMMISSION_SETTLE_S)
     finally:
+        # Release the global pairing mutex FIRST — a wedged run must never keep
+        # Matter pairing locked out for other features (or for the operator
+        # pairing by hand). The lock also self-expires, but do not rely on that.
+        try:
+            await _lock_cm.__aexit__(None, None, None)
+        except Exception as e:  # noqa: BLE001 — never mask the run's own outcome
+            logger.warning(f"pairing-lock release failed (it will expire): {e}")
         st["done"] = len(st["results"])
         st["current"] = None
         st["running"] = False
@@ -3625,6 +3656,25 @@ async def matter_auto_commission_all(body: Optional[BulkCommissionBody] = None):
             status_code=409,
             detail="A bulk commission run is already in progress — poll "
                    "/api/matter/auto-commission-all/status.")
+
+    # GLOBAL MATTER-PAIRING MUTEX pre-flight (operator invariant, MSG-919). A
+    # Hubitat pairs ONE Matter device at a time, so we must refuse to START while
+    # the hub->hub COPY orchestrator (or a manual pairing) holds the slot. Checked
+    # HERE, not only in the worker, so the caller gets an immediate, actionable 409
+    # naming the holder instead of a background run that dies silently.
+    # NOTE: this is advisory (a TOCTOU gap exists between here and the worker's
+    # own acquire) — the worker's atomic acquire is the real guarantee. This check
+    # exists to make the refusal FAST and LEGIBLE, not to be the lock itself.
+    from services.matter_pairing_lock import status as _pairing_status
+    _lock = await _pairing_status()
+    if _lock.get("is_held") and not _lock.get("is_stale"):
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Matter pairing is already in progress "
+                    f"({_lock.get('holder')}"
+                    f"{': ' + _lock['holder_detail'] if _lock.get('holder_detail') else ''}). "
+                    f"A Hubitat can pair only ONE device at a time, so Commission All "
+                    f"cannot start until it finishes (expires {_lock.get('expires_at')})."))
 
     postgrest_url = os.environ.get('POSTGREST_URL', 'http://postgrest:3001')
 
@@ -3711,6 +3761,23 @@ async def matter_auto_commission_all(body: Optional[BulkCommissionBody] = None):
 
     return {"started": True, "total": len(devices), "hubs": hub_label,
             "message": f"Sequential commission of {len(devices)} device(s) on {hub_label} started"}
+
+
+@app.get("/api/matter/pairing-lock", tags=["matter"])
+async def matter_pairing_lock_status():
+    """
+    Who currently holds the GLOBAL Matter-pairing mutex.
+
+    A Hubitat pairs exactly ONE Matter device at a time (operator invariant,
+    MSG-919), so Commission All, the hub->hub COPY orchestrator, and manual
+    pairing all contend for one slot. This tells the UI (and the other feature)
+    whether pairing is available, who holds it, and when the lock expires —
+    so a refusal is actionable ("hub_port_copy is running") rather than opaque.
+
+    {is_held, holder, holder_detail, acquired_at, expires_at, is_stale}
+    """
+    from services.matter_pairing_lock import status as _lock_status
+    return await _lock_status()
 
 
 @app.get("/api/matter/auto-commission-all/status", tags=["matter"])

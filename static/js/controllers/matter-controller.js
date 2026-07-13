@@ -990,14 +990,19 @@ $(document).ready(function () {
                   </div>
                   <div class="matter-debug-col matter-debug-logcol">
                     <div class="matter-debug-logbar">Live matter-client log
-                      <span class="dbg-mono" id="dbg-logstate"></span></div>
+                      <span class="dbg-mono" id="dbg-logstate"></span>
+                      <button class="btn btn-small btn-secondary" id="dbg-copylog" style="float:right;"
+                              title="Copy the whole log to the clipboard">Copy logs</button></div>
                     <pre class="matter-debug-log" id="dbg-log"></pre>
                   </div>
                 </div>
               </div>
             </div>`);
+        // Close ONLY via the explicit Close button — NOT on backdrop click.
+        // Operator directive 2026-07-13: clicking outside (to select/copy log
+        // text or paste a value) was dismissing the modal and losing its state.
         $('#matter-debug-overlay').on('click', function (e) {
-            if ($(e.target).is('#matter-debug-overlay') || $(e.target).is('.matter-debug-close')) closeMatterDebug();
+            if ($(e.target).is('.matter-debug-close')) closeMatterDebug();
         });
         $(document).on('keydown.matterDebug', function (e) { if (e.key === 'Escape') closeMatterDebug(); });
 
@@ -1428,9 +1433,126 @@ $(document).ready(function () {
     }
 
     function closeCommissionModal() {
+        stopQrScan();  // release the camera if a scan is in progress
         if (_commLogTimer) { clearInterval(_commLogTimer); _commLogTimer = null; }
         $(document).off('keydown.matterComm');
         $('#matter-commission-overlay').remove();
+    }
+
+    // =========================================================================
+    // QR scan — read the device label's MT:… code with this device's camera
+    // (operator request 2026-07-13). Uses the native BarcodeDetector where the
+    // browser has one (Chrome/Edge/Android); falls back to the vendored jsQR
+    // (static/js/vendor/jsQR.js, MIT, lazy-loaded on first use) elsewhere
+    // (Safari/iOS). The QR payload carries the FULL 12-bit discriminator —
+    // strictly more reliable than the 11-digit manual code's 4-bit short form.
+    // getUserMedia REQUIRES a secure context: https:// (or localhost) — on a
+    // plain http:// LAN URL the browser hides the camera API entirely.
+    // =========================================================================
+    /**
+     * Copy a log <pre>'s full text to the clipboard (operator request
+     * 2026-07-13: diagnose outside the modal without retyping). Prefers the
+     * async Clipboard API (needs a secure context); falls back to the
+     * selection + execCommand path for plain-http LAN URLs.
+     * @param {string} selector - the <pre> to copy (e.g. '#comm-log')
+     */
+    function copyLogText(selector) {
+        const text = $(selector).text();
+        if (!text) { showToast('Log is empty', 'info'); return; }
+        const ok = () => showToast('Log copied to clipboard', 'success');
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(ok,
+                () => showToast('Copy refused by the browser', 'error'));
+            return;
+        }
+        // http:// fallback: hidden textarea + execCommand.
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); ok(); }
+        catch (e) { showToast('Copy failed: ' + e, 'error'); }
+        document.body.removeChild(ta);
+    }
+
+    // Delegated handlers — the buttons live inside dynamically-built modals.
+    $(document).on('click', '#comm-copylog', function () { copyLogText('#comm-log'); });
+    $(document).on('click', '#dbg-copylog', function () { copyLogText('#dbg-log'); });
+
+    let _qrStream = null;   // active camera MediaStream (null = not scanning)
+    let _qrTimer = null;    // decode-loop interval handle
+
+    function stopQrScan() {
+        if (_qrTimer) { clearInterval(_qrTimer); _qrTimer = null; }
+        if (_qrStream) { _qrStream.getTracks().forEach(t => t.stop()); _qrStream = null; }
+        $('#comm-qr-wrap').remove();
+        $('#comm-scan').prop('disabled', false).text('📷 Scan');
+    }
+
+    function qrHit(text) {
+        // Any decoded payload lands in the input (MT:… expected; the backend
+        // accepts both QR strings and numeric codes), then the camera stops.
+        $('#comm-code-input').val(String(text).trim());
+        showToast('QR code captured', 'success');
+        stopQrScan();
+    }
+
+    async function startQrScan() {
+        if (_qrStream) { stopQrScan(); return; }  // toggle off
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            showToast('Camera unavailable — open the app over https:// (secure context required)', 'error');
+            return;
+        }
+        $('#comm-scan').prop('disabled', true).text('starting…');
+        try {
+            _qrStream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: 'environment' }, audio: false,
+            });
+        } catch (e) {
+            $('#comm-scan').prop('disabled', false).text('📷 Scan');
+            showToast('Camera refused: ' + (e.name || e), 'error');
+            return;
+        }
+        $('#comm-qr-wrap').remove();
+        $('.comm-code-row').after(
+            '<div id="comm-qr-wrap" style="margin:8px 0;">' +
+            '<video id="comm-qr-video" playsinline muted autoplay ' +
+            'style="width:100%;max-height:260px;border-radius:8px;background:#000;object-fit:cover;"></video>' +
+            '</div>');
+        const video = document.getElementById('comm-qr-video');
+        video.srcObject = _qrStream;
+        await video.play().catch(() => {});
+        $('#comm-scan').prop('disabled', false).text('Stop scan');
+
+        if ('BarcodeDetector' in window) {
+            // Native path — hardware-accelerated where available.
+            const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+            _qrTimer = setInterval(async function () {
+                if (!_qrStream || video.readyState < 2) return;
+                try {
+                    const codes = await detector.detect(video);
+                    if (codes.length) qrHit(codes[0].rawValue);
+                } catch (e) { /* transient frame errors — keep scanning */ }
+            }, 300);
+        } else {
+            // Fallback path — lazy-load the vendored decoder, scan via canvas.
+            $.getScript('/static/js/vendor/jsQR.js').done(function () {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                _qrTimer = setInterval(function () {
+                    if (!_qrStream || video.readyState < 2) return;
+                    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+                    ctx.drawImage(video, 0, 0);
+                    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    const hit = window.jsQR(img.data, img.width, img.height);
+                    if (hit && hit.data) qrHit(hit.data);
+                }, 350);
+            }).fail(function () {
+                showToast('QR decoder failed to load', 'error');
+                stopQrScan();
+            });
+        }
     }
 
     /**
@@ -1452,6 +1574,8 @@ $(document).ready(function () {
             ? `<div class="comm-code-row">
                  <input type="text" id="comm-code-input" class="comm-code-input"
                         placeholder="Paste pairing code — MT:… QR string or numeric" value="${escapeHtml(opts.code || '')}">
+                 <button class="btn btn-small btn-secondary" id="comm-scan"
+                         title="Scan the device label's QR with this device's camera (needs https)">📷 Scan</button>
                  <button class="btn btn-small btn-primary" id="comm-start">Commission</button>
                </div>`
             : `<div class="comm-code-row"><button class="btn btn-small btn-primary" id="comm-start">Start commissioning</button></div>`;
@@ -1465,18 +1589,26 @@ $(document).ready(function () {
               <div class="comm-body">
                 ${codeRow}
                 <div id="comm-status" class="comm-status">Live matter-client log streaming — start when ready.</div>
-                <div class="matter-debug-logbar">Live matter-client log <span class="dbg-mono" id="comm-logstate"></span></div>
+                <div class="matter-debug-logbar">Live matter-client log <span class="dbg-mono" id="comm-logstate"></span>
+                  <button class="btn btn-small btn-secondary" id="comm-copylog" style="float:right;"
+                          title="Copy the whole log to the clipboard">Copy logs</button></div>
                 <pre class="matter-debug-log comm-log" id="comm-log"></pre>
               </div>
             </div>
           </div>`);
+        // Close ONLY via the explicit Close button — NOT on backdrop click.
+        // Operator directive 2026-07-13: clicking outside (to copy a pairing
+        // code or select log text) was killing the modal mid-commission and
+        // losing the code input + live log.
         $('#matter-commission-overlay').on('click', function (e) {
-            if ($(e.target).is('#matter-commission-overlay') || $(e.target).is('.matter-debug-close')) closeCommissionModal();
+            if ($(e.target).is('.matter-debug-close')) closeCommissionModal();
         });
         $(document).on('keydown.matterComm', function (e) { if (e.key === 'Escape') closeCommissionModal(); });
+        $('#comm-scan').on('click', startQrScan);
         $('#comm-start').on('click', function () {
             const code = opts.needsCode ? $('#comm-code-input').val().trim() : null;
             if (opts.needsCode && !code) { showToast('Paste a pairing code first', 'error'); return; }
+            stopQrScan();  // release the camera before the commission run
             runCommission(opts, code);
         });
         // Stream the log immediately, so pre-commission activity is visible too.

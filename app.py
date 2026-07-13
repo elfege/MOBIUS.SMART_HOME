@@ -683,6 +683,14 @@ app.include_router(panel_router)
 from services.matter_hub_port.router import router as matter_hub_port_router  # noqa: E402
 app.include_router(matter_hub_port_router)
 
+# The ONE global Matter-pairing mutex (a Hubitat/Matter controller pairs a single
+# device at a time). Imported at module level because BOTH the bulk paths and the
+# single-commission endpoint take it — the single path was unguarded until
+# 2026-07-13 and let concurrent commission storms through (MSG-1017).
+from services.matter_pairing_lock import (  # noqa: E402
+    PairingLockBusy, matter_pairing_lock,
+)
+
 # Certificate-installation routes (/install-cert, /api/cert/status). Serves the
 # shared MOBIUS local CA so users trust HTTPS once instead of clicking through
 # the browser warning each load. Ported from NVR; see services/cert_routes.py.
@@ -2569,6 +2577,28 @@ async def matter_commission(body: MatterCommissionRequest):
                 detail="Cannot connect to matter-server"
             )
 
+    # IN-FLIGHT GUARD (2026-07-13, from the assistant's diagnosis MSG-1017).
+    # This single-commission path had NO guard: the operator clicked Commission
+    # again while attempt 1 was still in flight (21:27 accepted while 21:26 was
+    # running), producing concurrent commission_with_code storms against the
+    # same radio. A Matter controller pairs ONE device at a time, exactly like
+    # the bulk path — so this now takes the SAME global mutex Commission All and
+    # hub->hub copy use, and refuses with 409 (naming the holder) instead of
+    # piling on. Short TTL: a single pairing is minutes, not an hour.
+    # NOTE: the bulk worker never calls THIS endpoint (it calls the auto path),
+    # so taking the lock here cannot deadlock a bulk run against itself.
+    try:
+        async with matter_pairing_lock(
+            "commission_single", f"code:…{code[-4:]}", ttl_s=300,
+        ):
+            return await _do_commission_with_code(client, code, body)
+    except PairingLockBusy as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+async def _do_commission_with_code(client, code: str, body: "MatterCommissionRequest"):
+    """The actual commission + vault + error-translation, run while holding the
+    global Matter-pairing mutex (see matter_commission)."""
     try:
         result = await client.commission_with_code(code)
         # Setup-code VAULT (reclaim-as-primary): if the operator flagged this as a
@@ -2597,6 +2627,17 @@ async def matter_commission(body: MatterCommissionRequest):
                     "Usually the Hubitat pairing window EXPIRED — click 'Get Setup Code' "
                     "again and paste + Commission within ~2 minutes, with the device powered "
                     "on and on the LAN.")
+            # POST-FAILURE DISCOVERY HINT (2026-07-13, assistant's ask MSG-1017-B).
+            # "No commissionable device discovered" is deeply misleading when a
+            # device IS sitting there in pairing mode but advertising a DIFFERENT
+            # discriminator than the code targets — discovery filters it out and
+            # says nothing. That exact mismatch (code short-disc 11 vs device
+            # advertising 8) cost the operator an hour tonight. So: look, and say
+            # what we actually see. Best-effort — a failing probe must never
+            # replace the real error.
+            probe = await _discovery_mismatch_hint(code)
+            if probe:
+                hint = probe + " " + hint
         elif "checksum" in low or "invalid checksum" in low:
             hint = ("The code's checksum is wrong — a typo, a truncated/expired code, or a "
                     "QR string pasted with characters dropped. Re-copy the FULL code.")
@@ -2902,6 +2943,95 @@ async def _resolve_matter_hub() -> Optional[Dict[str, Any]]:
         if h.get("is_primary"):
             return h
     return hubs[0]
+
+
+def _short_discriminator_from_manual_code(code: str) -> Optional[int]:
+    """
+    The 4-bit SHORT discriminator an 11-digit manual Matter setup code targets.
+
+    The manual code is NOT one flat integer — it is three base-10 CHUNKS plus a
+    Verhoeff check digit (Matter core spec, manual pairing code):
+
+        digit  0     chunk1 = (vid_pid_present << 2) | discriminator[11:10]
+        digits 1-5   chunk2 = (discriminator[9:8]  << 14) | passcode[13:0]
+        digits 6-9   chunk3 = passcode[26:14]
+        digit  10    Verhoeff check digit
+
+    so the SHORT (4-bit) discriminator is the TOP FOUR bits of the 12-bit
+    discriminator: (chunk1 & 0x3) << 2 | (chunk2 >> 14) & 0x3.
+
+    Discovery filters candidates by this value; the PASSCODE is the actual
+    secret. A device advertising a different discriminator is therefore filtered
+    out and reported as "not found" even while it sits in pairing mode — the
+    failure this exists to explain. QR payloads (MT:…) carry the FULL 12-bit
+    discriminator, so we only decode the numeric form here.
+
+    Verified against the operator's real 2026-07-13 code 25803812418 →
+    short discriminator 11, passcode 20341430 (independently hand-decoded from
+    the matter.js logs, MSG-1017). Returns None on anything unparseable; never
+    raises.
+    """
+    try:
+        raw = (code or "").strip()
+        # A QR payload is NOT a manual code. It also contains digits, so a naive
+        # digit-strip would happily "decode" it into nonsense — reject explicitly.
+        if raw.upper().startswith("MT:"):
+            return None
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        # Manual codes are exactly 11 digits (or 21 with VID/PID appended); the
+        # discriminator bits live in the same leading chunks either way.
+        if len(digits) not in (11, 21):
+            return None
+        chunk1 = int(digits[0])
+        chunk2 = int(digits[1:6])
+        return ((chunk1 & 0x3) << 2) | ((chunk2 >> 14) & 0x3)
+    except Exception:
+        return None
+
+
+async def _discovery_mismatch_hint(code: str) -> Optional[str]:
+    """
+    After a failed commission, run ONE discovery and report what is ACTUALLY on
+    the network — specifically whether a device is in pairing mode but
+    advertising a discriminator that does not match the code.
+
+    Returns a human sentence, or None when there is nothing useful to add.
+    Never raises: this is a diagnostic garnish on an error path.
+    """
+    try:
+        from services.matter_client import get_matter_client
+        client = get_matter_client()
+        if not client.is_connected and not await client.connect():
+            return None
+        found = await asyncio.wait_for(client._send_command("discover"), timeout=20)
+        found = found if isinstance(found, list) else []
+        # Only devices actually in commissioning mode are pairable.
+        open_devs = [d for d in found if d.get("commissioning_mode")]
+        if not open_devs:
+            return ("Probe: NO device is currently advertising commissioning mode on "
+                    "the LAN — the device is not in pairing mode (or not on the network).")
+
+        want = _short_discriminator_from_manual_code(code)
+        lines = []
+        for d in open_devs:
+            long_d = d.get("long_discriminator")
+            short_d = (int(long_d) >> 8) & 0x0F if long_d is not None else None
+            ip = next((a for a in (d.get("addresses") or [])
+                       if "." in a and ":" not in a), "?")
+            lines.append(f"{ip} advertising discriminator {long_d} (short {short_d})")
+            # THE actionable case: something IS pairing-ready, but not this code.
+            if want is not None and short_d is not None and short_d != want:
+                return (f"Probe: a device IS in pairing mode at {ip}, advertising "
+                        f"discriminator {long_d} (short {short_d}) — but your code "
+                        f"targets short discriminator {want}. They do not match, so "
+                        f"discovery filtered it out. This code is not for that device "
+                        f"(or the device's discriminator changed — power-cycle it, and "
+                        f"if it still differs, factory-reset it so its printed code "
+                        f"matches again).")
+        return "Probe: commissionable device(s) seen — " + "; ".join(lines) + "."
+    except Exception as e:  # noqa: BLE001 — diagnostics must never mask the real error
+        logger.debug(f"discovery-mismatch probe failed (non-fatal): {e}")
+        return None
 
 
 @app.post("/api/matter/discover-mdns", tags=["matter"])

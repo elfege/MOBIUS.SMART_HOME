@@ -725,10 +725,18 @@ class DeviceCommander:
                         # admin.send_command expects (device_id, command, argument)
                         # where argument is a single value. args is a list;
                         # if non-empty, use the first element.
+                        #
+                        # DO NOT str() A MAP (2026-07-13). setColor's argument is
+                        # a COLOR MAP ({hue,saturation,level}); str()-ing it here
+                        # produced a Python repr ("{'hue': 66, ...}") that Hubitat
+                        # cannot bind to a Map parameter, so RGB never worked over
+                        # the admin path. Dicts now pass through intact and
+                        # _build_runmethod_args emits them as a JSON_OBJECT arg.
                         arg = args[0] if args else None
-                        arg_str = str(arg) if arg is not None else None
+                        if arg is not None and not isinstance(arg, dict):
+                            arg = str(arg)
                         send_ok = admin.send_command(
-                            int(effective_device_id), command, arg_str,
+                            int(effective_device_id), command, arg,
                         )
                         if send_ok:
                             logger.info(

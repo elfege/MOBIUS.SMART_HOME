@@ -673,6 +673,16 @@ app.include_router(matter_feedback_router)
 from apps.tiles_api.routes import router as panel_router  # noqa: E402
 app.include_router(panel_router)
 
+# MATTER HUB->HUB COPY (2026-07-13, operator-directed; implemented by the
+# assistant seat per MSG-1002/1006, landed by Architect): copy — NEVER transfer
+# — every eligible Matter device from one hub's fabric onto another's, via
+# multi-admin ECM. Strictly sequential end-to-end (a Hubitat pairs ONE device
+# at a time), whole run inside the global matter_pairing_lock, every transition
+# audited to dshub.matter_hub_ports (migration 015). Routes:
+# /api/matter/port-devices{,/status,/preview}.
+from services.matter_hub_port.router import router as matter_hub_port_router  # noqa: E402
+app.include_router(matter_hub_port_router)
+
 # Certificate-installation routes (/install-cert, /api/cert/status). Serves the
 # shared MOBIUS local CA so users trust HTTPS once instead of clicking through
 # the browser warning each load. Ported from NVR; see services/cert_routes.py.

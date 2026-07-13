@@ -1,41 +1,39 @@
 # MOBIUS.SMART_HOME
 
-A self-hosted smart-home automation platform that migrates Hubitat Groovy apps
-to a Python web stack — moving the brains off the hub and onto a real database,
-without giving up local-only operation.
+A self-hosted, local-first home-automation platform: a real automation engine
+(Python + Postgres) that controls devices over **whatever speaks to them** —
+Matter (natively, as its own controller), Hubitat hubs (as radio gateways),
+and plain IP (TVs, speakers). It began as a migration of Hubitat Groovy apps
+to a Python web stack; it is **no longer Hubitat-bound, and not meant to stay
+that way**.
 
-> **Status:** active development. Single-operator deployment today (the author's
-> home). Public source release under BSL-1.1 (see [License](#license)). The
-> installation workflow is being reworked — see [Installation](#installation).
-
-## Currently shipped apps
-
-| App                        | Released in | App version | Status   | Notes |
-|----------------------------|-------------|-------------|----------|-------|
-| Advanced Motion Lighting   | v3.3.11     | 2.0.0       | Shipped  | Python port of the Hubitat Groovy app [Advanced Motion Lighting Management V2][aml-groovy] (same author): motion-driven control, memoization of user overrides, mode-specific timeouts/dim levels, illuminance gating, pause/resume. |
-| Fan Automation             | v3.3.11     | 1.0.0       | Shipped  | Temp/humidity-driven exhaust/ceiling-fan control with manual fan-level override switches and a post-override humidity-suppress window. |
-| Screen Time Planner        | v4.8.0      | 2.0.0       | Shipped  | TV allowed only inside daily time windows (per-day, cross-midnight aware). Turning it on outside a window is cut in real time; optional delayed cut of a secondary power switch, plus wake-on-power suppression for TVs that boot on mains restore. |
-| Samsung FastAPI router     | v3.3.11     | —           | Shipped (single-TV) | Standalone FastAPI router + Jinja2 page mounted under `/samsung-tv`: Wake-on-LAN, WebSocket remote, token-paired SmartView. **Currently single-tenant** — one process-wide client, supports exactly one TV. IP/MAC/token come from env vars (`SAMSUNG_TV_IP` / `SAMSUNG_TV_MAC` / `SAMSUNG_TV_TOKEN`) and can be retargeted live via `POST /api/samsung-tv/configure`. Multi-TV support is a planned refactor (either promote to a real app type or registry-keyed routing). |
-
-Hubitat Safety Monitor (HSM) and a handful of hub-native pieces intentionally
-stay on the hub.
-
-The **Released in** column is the platform tag in which the app first appeared
-(see [Releases](https://github.com/elfege/MOBIUS.SMART_HOME/releases)). The
-**App version** column is the app's own internal `VERSION` constant — bumped
-independently of platform versions when the app itself changes.
-
-[aml-groovy]: <!-- TODO: replace with the public Hubitat Groovy repo URL for Advanced Motion Lighting Management V2 -->
+> **Status:** active development, beta. Single-operator deployment today (the
+> author's home). Public source release under BSL-1.1 (see
+> [License](#license)). The installation workflow is being reworked — see
+> [Installation](#installation).
 
 ## Why
 
 Hubitat's strengths are its radios and its local-first ethos. Its weaknesses
 are everything around them: the Maker API adds round-trip latency and overloads
 the hub under fan-out, app state lives in Groovy globals, and a firmware
-update can silently change a contract. This project keeps the hub as a radio
-gateway and moves the automation engine — state, scheduling, multi-hub
-coordination, observability — to a stack that can actually be queried, tested,
-versioned, and reasoned about.
+update can silently change a contract. This project moves the automation
+engine — state, scheduling, multi-hub coordination, observability — to a stack
+that can actually be queried, tested, versioned, and reasoned about.
+
+The hub, meanwhile, is being demoted from platform to peripheral, in stages:
+
+1. **Done — brains off the hub.** Automations, state, and scheduling run here;
+   hubs execute commands (admin API primary, Maker API opt-in fallback).
+2. **Done — Matter without the hub.** MOBIUS runs its own Matter controller
+   and holds its own admin fabric on each device: direct protocol control,
+   hub not in the loop.
+3. **Done — IP devices without any hub.** Samsung TVs (multi-TV,
+   WebSocket/WoL), Sonos speakers (local UPnP TTS, cloud-free); Hisense TV
+   support in progress.
+4. **Planned — native radios.** Dedicated Zigbee / Z-Wave / Thread interfaces
+   (e.g. SLZB-06M, Zooz ZST39 LR, OpenThread border router) so the remaining
+   hub-radio dependency becomes optional hardware, not an architecture.
 
 ## What it does today
 
@@ -43,6 +41,16 @@ versioned, and reasoned about.
   own devices and settings. "Advanced Lights — Office" and "Advanced Lights —
   Bedroom" are two independent instances of the same app type; pause one, the
   other keeps running.
+- **Matter, controlled directly.** MOBIUS runs its own Matter controller
+  (`matterjs-server`, on the matter.js SDK) and holds an admin fabric on each
+  device, so it drives Matter devices **directly over the Matter protocol** —
+  Hubitat is only a fallback command path. Devices are discovered two ways,
+  deduplicated by MAC → serial → name: from the selected Hubitat hub(s)
+  (multi-hub, admin API) and directly over mDNS (`_matterc._udp`, no hub).
+  Bulk commissioning is strictly sequential (one pairing window at a time) with
+  a live CHIP-level log stream. Matter-over-Thread devices route through a hub
+  with a built-in Thread border router (Hubitat C-8 / C-8 Pro) until native
+  Thread lands.
 - **Multi-hub.** Devices are classified to the hub that owns them (LAN/mesh-
   aware), with one hub flagged primary. Same-label duplicates across hubs are
   resolved by primary-hub precedence + Hubitat's `linkedDevice` mirror flag.
@@ -57,16 +65,15 @@ versioned, and reasoned about.
   schemas — `dshub` (substrate / hub roster / device cache), `dsapp`
   (automation: instances, subscriptions, memoization), `dscore` (system
   settings, health, audit) — exposed through a single `api` view schema for
-  PostgREST.
-- **Matter, controlled directly.** MOBIUS runs its own Matter controller
-  (`matterjs-server`, on the matter.js SDK) and holds an admin fabric on each
-  device, so it drives Matter devices **directly over the Matter protocol** —
-  Hubitat is only a fallback command path. Devices are discovered two ways,
-  deduplicated by MAC → serial → name: from the selected Hubitat hub(s)
-  (multi-hub, admin API) and directly over mDNS (`_matterc._udp`, no hub).
-  Bulk commissioning is strictly sequential (one pairing window at a time) with
-  a live CHIP-level log stream. Matter-over-Thread devices route through a hub
-  with a built-in Thread border router (Hubitat C-8 / C-8 Pro).
+  PostgREST, and built from **versioned migrations** (buildable from scratch).
+- **IP-device drivers, no hub involved.** Samsung TVs: multi-TV, DB-backed
+  per-instance controllers (Wake-on-LAN, WebSocket remote, per-model
+  power-state handling back to 2014 H-series quirks). Sonos: local UPnP
+  announcements/TTS, no cloud. Hisense (ADB-based) in progress.
+- **Tile dashboard (absorbed from MOBIUS.TILES).** The former standalone
+  real-time tile dashboard is being folded in as a React Native frontend
+  (`frontend/tiles`) backed by `apps/tiles_api` — one platform, one database,
+  no second stack. The old `MOBIUS.TILES` repos are no longer maintained.
 - **Contract-drift watcher.** Polls Hubitat's platform version on a schedule
   and runs a canary against the admin API; surfaces deltas as soon as a hub
   firmware update changes a wire format.
@@ -77,15 +84,22 @@ versioned, and reasoned about.
 
 ## Currently shipped apps
 
-| Type                       | Status   | Notes                                                         |
-|----------------------------|----------|---------------------------------------------------------------|
-| Advanced Motion Lighting   | Shipped  | Full-parity port of the Groovy app: motion-driven control, memoization of user overrides, mode-specific timeouts/dim levels, illuminance gating, pause/resume. |
-| Fan Automation             | Shipped  | Temp/humidity-driven exhaust/ceiling-fan control.             |
-| Screen Time Planner        | Shipped  | TV allowed only inside daily time windows (per-day, cross-midnight aware). Turning it on outside a window is cut in real time; optional delayed cut of a secondary power switch, plus wake-on-power suppression for TVs that boot on mains restore. |
-| Samsung TV (driver)        | Shipped  | Standalone driver/controller, not a multi-instance app type.  |
+| App                      | Status      | Notes |
+|--------------------------|-------------|-------|
+| Advanced Motion Lighting | Shipped     | Python port of the Hubitat Groovy app [Advanced Motion Lighting Management V2][aml-groovy] (same author): motion-driven control, memoization of user overrides, mode-specific timeouts/dim levels, illuminance gating, pause/resume. |
+| Fan Automation           | Shipped (v2)| Light-driven fan control with a humidity anti-noise state machine (high → quiet → ramp) for extraction without the roar. |
+| Screen Time Planner      | Shipped     | TV allowed only inside daily time windows (per-day, cross-midnight aware). Turning it on outside a window is cut in real time; optional delayed cut of a secondary power switch, plus wake-on-power suppression for TVs that boot on mains restore. |
+| Power Management         | Shipped     | Average-watts threshold cutoffs for breaker-overload protection (pool pumps, EV chargers, dryers); trip state survives restarts. |
+| Rules                    | Shipped     | Declarative case-based button/event automations (schema + interpreter) — replaced the author's Hubitat Mode Manager / Rule Machine instances. |
+| Sonos Alarm              | Shipped     | Scheduled TTS/mp3 announcements on Sonos speakers over local UPnP — no cloud. |
+| Humidifier               | Shipped     | Maintain a room's humidity: plug ON when the air is dry and the room occupied, OFF at target / room empty / window open. Port of the author's decade-stable Groovy app. |
+| Samsung TV (driver)      | Shipped     | Multi-TV: DB-backed per-instance full remote controllers; WoL power-on; per-generation protocol fallbacks. |
+| Hisense TV (driver)      | In progress | ADB-based control, mirrors the Samsung driver pattern. |
 
 Hubitat Safety Monitor (HSM) and a handful of hub-native pieces intentionally
 stay on the hub.
+
+[aml-groovy]: <!-- TODO: replace with the public Hubitat Groovy repo URL for Advanced Motion Lighting Management V2 -->
 
 ## Architecture (one screenful)
 
@@ -106,9 +120,11 @@ stay on the hub.
         │                │
         ▼                ▼
    ┌──────────────────────────┐         ┌───────────────────────┐
-   │ Jinja2 + ES6 modules UI  │         │ matter-server         │
-   │ behind nginx HTTPS       │         │ (matterjs, matter.js) │
-   └──────────────────────────┘         └───────────────────────┘
+   │ Jinja2 + ES6 UI          │         │ matter-server         │
+   │ (+ React Native frontend │         │ (matterjs, matter.js) │
+   │  in progress)            │         │ MOBIUS's admin fabric │
+   │ behind nginx             │         └───────────────────────┘
+   └──────────────────────────┘
 ```
 
 ### Services (Docker Compose)
@@ -128,8 +144,12 @@ stay on the hub.
 .
 ├── app.py                            # FastAPI entry point
 ├── apps/                             # app types (advanced_motion_lighting,
-│                                     #            fan_automation, screen_time_planner,
-│                                     #            samsung_tv)
+│                                     #   fan_automation, screen_time_planner,
+│                                     #   power_management, rules, sonos,
+│                                     #   humidifier, samsung_tv, hisense_tv,
+│                                     #   tiles_api)
+├── frontend/                         # React Native (Expo): tiles dashboard +
+│                                     #   admin app (in progress)
 ├── services/                         # transport + infra
 │   ├── hubitat_admin_client.py       #   primary transport (web-UI admin API)
 │   ├── hubitat_eventsocket_client.py #   live event ingress
@@ -139,7 +159,7 @@ stay on the hub.
 │   ├── matter_client.py / matter_discovery.py
 │   ├── device_cache* / instance_manager / reconcile_poll / mode_poller / ...
 ├── models/                           # Pydantic
-├── psql/                             # init + migrations (dshub/dsapp/dscore + api views)
+├── psql/                             # versioned migrations (dshub/dsapp/dscore + api views)
 ├── templates/                        # Jinja2
 ├── static/                           # ES6 modules + jQuery + Chart.js
 ├── nginx/                            # reverse-proxy config (certs auto-generated)
@@ -154,9 +174,9 @@ stay on the hub.
 > to change.
 
 In short, today's flow is `./start.sh` (or `./deploy.sh` for a rebuild) on a
-Docker host that can reach Hubitat on the LAN. The scripts source AWS Secrets
-Manager for credentials — that dependency is what's being decoupled. A full
-how-to lands when the new flow is in place.
+Docker host that can reach your devices on the LAN. The scripts source AWS
+Secrets Manager for credentials — that dependency is what's being decoupled. A
+full how-to lands when the new flow is in place.
 
 ## License
 

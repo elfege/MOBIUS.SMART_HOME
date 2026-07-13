@@ -6,6 +6,12 @@
     "orientation": "default",
     "platforms": ["web", "ios", "android"],
     "userInterfaceStyle": "dark",
+    "ios": {
+      "bundleIdentifier": "com.elfegesystems.mobius.tiles"
+    },
+    "android": {
+      "package": "com.elfegesystems.mobius.tiles"
+    },
     "experiments": {
       "baseUrl": "/static/panel"
     },

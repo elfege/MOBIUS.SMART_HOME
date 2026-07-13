@@ -1,0 +1,17 @@
+{
+  "expo": {
+    "name": "MOBIUS Admin",
+    "slug": "mobius-admin",
+    "version": "0.1.0",
+    "orientation": "default",
+    "platforms": ["web", "ios", "android"],
+    "userInterfaceStyle": "dark",
+    "experiments": {
+      "baseUrl": "/static/admin"
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    }
+  }
+}

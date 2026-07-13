@@ -45,6 +45,18 @@ export default function App() {
   const [tokenInput, setTokenInput] = useState('');
 
   const load = useCallback(async () => {
+    // Wall-tablet zero-touch: with no stored token, try the trusted-LAN
+    // bootstrap first so a tablet auto-enrolls and shows devices without anyone
+    // pasting a token. Off-LAN (403) falls back to the manual paste screen.
+    if (!getToken()) {
+      try {
+        const b = await api.bootstrap();
+        setToken(b.token);
+      } catch {
+        setStatus('unauthorized');
+        return;
+      }
+    }
     try {
       const r = await api.roster();
       setRoster(r.sections, r.tiles);

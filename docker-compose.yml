@@ -181,13 +181,24 @@ services:
     healthcheck:
       # Explicit urllib timeout so the probe cannot inherit the long urllib
       # default — if the event loop is hung, the connect()/recv() must fail
-      # within the Docker `timeout` envelope (5s), not after a kernel-level
+      # within the Docker `timeout` envelope, not after a kernel-level
       # SO_RCVTIMEO of minutes.
-      test: ["CMD", "python3", "-c", "import urllib.request,socket; socket.setdefaulttimeout(4); urllib.request.urlopen('http://localhost:5000/api/health', timeout=4)"]
+      #
+      # LOOSENED 2026-07-13: the old 4s probe / 5s timeout / 2 retries meant just
+      # TWO consecutive misses (~30s) flipped the container UNHEALTHY, and the
+      # autoheal sidecar then RESTARTED it with no human involved. A brief
+      # event-loop stall (a slow Hubitat call, a heavy sync query) was enough to
+      # trip it — the root cause of the operator's "intempestive restarts" that
+      # nobody triggered. Now 5 consecutive misses (~75s) are required and each
+      # probe waits longer, so a transient stall no longer restarts his home.
+      # (Same hysteresis medicine <HOST>-proxy + anamnesis applied to their
+      # own health probing.) The real fix — moving blocking work off the event
+      # loop so /api/health always answers — remains a separate task.
+      test: ["CMD", "python3", "-c", "import urllib.request,socket; socket.setdefaulttimeout(8); urllib.request.urlopen('http://localhost:5000/api/health', timeout=8)"]
       interval: 15s
-      timeout: 5s
-      retries: 2
-      start_period: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
 
   # ---------------------------------------------------------------------------
   # PostgreSQL - Database for instances, subscriptions, device cache

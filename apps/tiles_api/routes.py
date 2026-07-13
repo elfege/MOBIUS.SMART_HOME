@@ -100,6 +100,43 @@ async def revoke_enrolled_device(device_id: int, request: Request):
     return {"message": "revoked", "id": device_id}
 
 
+# --- LAN auto-bootstrap (wall tablets) --------------------------------------
+
+@router.post("/session/bootstrap")
+async def bootstrap_panel_session(request: Request):
+    """
+    Trusted-LAN auto-enrollment for wall tablets — the plan's "trusted-subnet
+    auto-login". A browser on the trusted LAN that holds NO token gets its own
+    panel token minted automatically, so a wall tablet shows the operator's
+    devices with ZERO manual enrollment (he never pastes a token).
+
+    This is DEFAULT-DENY-preserving, not a hole:
+      * The LAN is the gate for ISSUANCE here (nginx-set, non-spoofable client
+        IP). Off-LAN requests are refused — a token is never handed out where the
+        LAN second factor cannot apply.
+      * Every issued token is a normal enrolled `panel` principal: scoped
+        (read+command), require_lan=true (so the token ALSO needs the LAN factor
+        on every later call), and individually REVOCABLE. This is the
+        enrolled-device model, auto-triggered on the LAN — not a shared secret.
+
+    Each call mints a NEW token; the client stores it and only bootstraps once
+    per device, so this is one revocable token per tablet.
+    """
+    ip = client_ip(request)
+    if not is_trusted_lan(ip):
+        logger.warning(f"panel bootstrap: DENIED off-LAN request from {ip}")
+        raise HTTPException(status_code=403, detail="Not permitted.")
+    raw = generate_token()
+    name = f"lan-walkup {ip or '?'} {raw[:4]}"
+    row = db.create_device(
+        name=name, kind=KIND_PANEL,
+        token_hash=hash_token(raw), token_prefix=token_prefix(raw),
+        scopes=[SCOPE_PANEL_READ, SCOPE_PANEL_COMMAND], require_lan=True)
+    logger.info(f"panel bootstrap: minted LAN panel token for {ip} (id={row['id']})")
+    return {"token": raw, "id": row["id"],
+            "scopes": [SCOPE_PANEL_READ, SCOPE_PANEL_COMMAND]}
+
+
 # --- panel surface (enrolled devices) ---------------------------------------
 
 @router.get("/whoami")

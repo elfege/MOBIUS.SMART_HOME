@@ -25,6 +25,12 @@ export class PanelApi {
     );
   }
 
+  /** Trusted-LAN auto-enrollment: mint + return this tablet's own panel token
+   *  (the wall-tablet zero-touch path). Throws (403) off-LAN. */
+  bootstrap(): Promise<{ token: string; id: number; scopes: string[] }> {
+    return this.t.post('/api/panel/session/bootstrap');
+  }
+
   /** Confirm this enrolled panel's identity + scopes (used to validate a token). */
   whoami(): Promise<{ id: number; name: string; kind: string; scopes: string[] }> {
     return this.t.get('/api/panel/whoami');

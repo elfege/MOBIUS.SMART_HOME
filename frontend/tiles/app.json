@@ -1,0 +1,17 @@
+{
+  "expo": {
+    "name": "MOBIUS Tiles",
+    "slug": "mobius-tiles",
+    "version": "0.1.0",
+    "orientation": "default",
+    "platforms": ["web", "ios", "android"],
+    "userInterfaceStyle": "dark",
+    "experiments": {
+      "baseUrl": "/static/panel"
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    }
+  }
+}

@@ -65,18 +65,24 @@ export class Transport {
   }
 
   post<T>(path: string, body?: unknown): Promise<T> {
-    return this.request<T>(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    return this.request<T>(path, this.jsonInit('POST', body));
   }
 
   put<T>(path: string, body?: unknown): Promise<T> {
-    return this.request<T>(path, {
-      method: 'PUT',
+    return this.request<T>(path, this.jsonInit('PUT', body));
+  }
+
+  /** Build a JSON request init, OMITTING `body` entirely when there is none.
+   *  Under exactOptionalPropertyTypes we must not set `body: undefined` — the
+   *  key has to be absent, not present-and-undefined. */
+  private jsonInit(method: string, body?: unknown): RequestInit {
+    const init: RequestInit = {
+      method,
       headers: { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    };
+    if (body !== undefined) {
+      init.body = JSON.stringify(body);
+    }
+    return init;
   }
 }

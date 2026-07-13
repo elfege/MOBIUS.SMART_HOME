@@ -160,9 +160,45 @@
         .log-warning { color: #f0c674; }
         .log-info { color: #b5bd68; }
         .log-traceback { color: #cc6666; font-style: italic; }
+
+        /* ---- Dev-restart banner ----
+         * Shown ONLY when a dev armed nginx/html/dev-restart.json (and it has
+         * not expired). Tells the operator this outage is an INTENTIONAL dev
+         * restart, not a breakage — the fix for the 2026-07-13 12:04 incident
+         * where a restart looked like a broken app. Dark red + white text (high
+         * luminance contrast) + a thick bright border + a ▲ badge: visibility
+         * carried by luminance and shape, not hue alone (CVD-safe accessibility). */
+        #dev-banner {
+            display: none;
+            width: 100%;
+            max-width: 720px;
+            background: #8B0000;
+            color: #ffffff;
+            border: 3px solid #ff6b6b;
+            border-radius: 10px;
+            padding: 1rem 1.25rem;
+            margin-bottom: 1.5rem;
+            text-align: center;
+            font-size: 1.05rem;
+            font-weight: 700;
+            line-height: 1.4;
+            box-shadow: 0 0 0 3px rgba(139, 0, 0, 0.45);
+        }
+        #dev-banner .dev-badge {
+            display: block;
+            font-size: 0.72rem;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            opacity: 0.92;
+            margin-bottom: 0.4rem;
+        }
     </style>
 </head>
 <body>
+    <div id="dev-banner" role="alert">
+        <span class="dev-badge">&#9650; Developer restart in progress</span>
+        <span id="dev-banner-msg"></span>
+    </div>
     <div class="header">
         <h1>MOBIUS.HOME</h1>
         <div class="spinner"></div>
@@ -278,9 +314,44 @@
         }
 
         /**
+         * Dev-restart banner: if a dev armed nginx/html/dev-restart.json and it
+         * has not expired, show the dark-red banner explaining this outage is an
+         * INTENTIONAL dev restart, not a failure. Served statically by nginx, so
+         * it works while the app is down (the very outage it explains). Re-checked
+         * each cycle so it appears if armed after load and AUTO-HIDES once the
+         * flag's `until` passes (operator asked it auto-resolve after a few min).
+         */
+        async function checkDevBanner() {
+            var banner = document.getElementById('dev-banner');
+            try {
+                var resp = await fetch('/static/dev-restart.json', {
+                    cache: 'no-store',
+                    signal: AbortSignal.timeout(2500)
+                });
+                if (!resp.ok) { banner.style.display = 'none'; return; }
+                var flag = await resp.json();
+                var active = flag && flag.active === true;
+                if (active && flag.until) {
+                    var untilMs = Date.parse(flag.until);
+                    if (isFinite(untilMs) && Date.now() >= untilMs) active = false; // expired
+                }
+                if (active) {
+                    document.getElementById('dev-banner-msg').textContent =
+                        flag.message || 'App restarting due to ongoing development.';
+                    banner.style.display = 'block';
+                } else {
+                    banner.style.display = 'none';
+                }
+            } catch (e) {
+                banner.style.display = 'none'; // flag unreachable -> no banner
+            }
+        }
+
+        /**
          * Health check: try reaching the backend, show terminal on first failure.
          */
         async function checkHealth() {
+            checkDevBanner();
             attempts++;
             statusEl.textContent = 'Attempt ' + attempts + '...';
             try {
@@ -312,6 +383,7 @@
             setTimeout(countdown, 1000);
         }
 
+        checkDevBanner();
         countdown();
     </script>
 </body>

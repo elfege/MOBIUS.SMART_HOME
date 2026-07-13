@@ -1,0 +1,7 @@
+# RN / Expo build + dependency artifacts — never committed.
+node_modules/
+dist/
+web-build/
+.expo/
+.expo-shared/
+*.log

@@ -17,7 +17,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.dispatcher
-    container_name: webhook-dispatcher
+    container_name: ${CONTAINER_PREFIX:-}webhook-dispatcher
     ports:
       - "${WEBHOOK_PORT:-5050}:5050"
     environment:
@@ -53,7 +53,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: smarthome-app
+    container_name: ${CONTAINER_PREFIX:-}smarthome-app
     # --reload DROPPED (2026-07-11, operator directive): this is the live home.
     # uvicorn --reload's WatchFiles restarted the app on ANY file save (agent
     # edits, the parallel instances' edits) → a ~1-2s 502 each time → the nginx
@@ -73,6 +73,12 @@ services:
       # inert/fail-closed, no capture. Set with:
       #   update_aws_secret SMARTHOME MATTER_CODE_ENC_KEY "$(openssl rand -hex 32)"
       MATTER_CODE_ENC_KEY: ${MATTER_CODE_ENC_KEY:-}
+
+      # Hubitat eventsocket intake kill-switch. Default true (prod). The ETT
+      # test stack (.env.test) sets false so a SECOND app instance never
+      # consumes live hub events — one of the layered guards that keep the test
+      # stack from ever acting on the real house (see docs: ETT).
+      EVENTSOCKET_ENABLED: ${EVENTSOCKET_ENABLED:-true}
 
       # RELOAD SEMANTICS (updated 2026-07-11, --reload removed): there is NO
       # Python hot-reload anymore. PYTHON changes — app.py AND the directory
@@ -205,7 +211,7 @@ services:
   # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
-    container_name: smarthome-postgres
+    container_name: ${CONTAINER_PREFIX:-}smarthome-postgres
     ports:
       - "${POSTGRES_EXTERNAL_PORT:-5433}:${POSTGRES_INTERNAL_PORT:-5432}"
     environment:
@@ -237,7 +243,7 @@ services:
   # ---------------------------------------------------------------------------
   postgrest:
     image: postgrest/postgrest:v12.0.2
-    container_name: smarthome-postgrest
+    container_name: ${CONTAINER_PREFIX:-}smarthome-postgrest
     ports:
       - "${POSTGREST_EXTERNAL_PORT:-3002}:${POSTGREST_INTERNAL_PORT:-3001}"
     environment:
@@ -263,7 +269,7 @@ services:
   # ---------------------------------------------------------------------------
   nginx:
     image: nginx:1.27-alpine
-    container_name: smarthome-nginx
+    container_name: ${CONTAINER_PREFIX:-}smarthome-nginx
     ports:
       - "${NGINX_HTTP_PORT:-8082}:80"
       - "${NGINX_HTTPS_PORT:-8445}:443"
@@ -296,7 +302,7 @@ services:
     # services/matter_client.py connected and round-tripped server_info/get_nodes.
     # Plan: docs/plans/migrate_matter_controller_from_archived_python_matter_server_to_maintained_matterjs_server_drop_in.md
     image: ghcr.io/matter-js/matterjs-server:stable
-    container_name: smarthome-matter-server
+    container_name: ${CONTAINER_PREFIX:-}smarthome-matter-server
     restart: unless-stopped
     network_mode: host          # required for mDNS operational discovery
     # matter.js image runs as uid 1000 and cannot chown /data itself; running
@@ -345,7 +351,7 @@ services:
   # ---------------------------------------------------------------------------
   autoheal:
     image: willfarrell/autoheal:1.2.0
-    container_name: smarthome-autoheal
+    container_name: ${CONTAINER_PREFIX:-}smarthome-autoheal
     restart: always
     environment:
       AUTOHEAL_CONTAINER_LABEL: "autoheal"   # restart containers tagged autoheal=true

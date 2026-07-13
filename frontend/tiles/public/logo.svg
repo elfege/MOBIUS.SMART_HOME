@@ -1,0 +1,14 @@
+<!-- HubTiles Logo - Simple 2x2 Grid -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <!-- Top-left tile - Blue -->
+  <rect x="5" y="5" width="40" height="40" rx="4" fill="#4A9FD8"/>
+  
+  <!-- Top-right tile - Blue -->
+  <rect x="55" y="5" width="40" height="40" rx="4" fill="#4A9FD8"/>
+  
+  <!-- Bottom-left tile - Blue -->
+  <rect x="5" y="55" width="40" height="40" rx="4" fill="#4A9FD8"/>
+  
+  <!-- Bottom-right tile - Orange accent -->
+  <rect x="55" y="55" width="40" height="40" rx="4" fill="#E89B3C"/>
+</svg>

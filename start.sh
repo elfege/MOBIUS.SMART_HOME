@@ -43,6 +43,40 @@ SCRIPT_R_PATH=$(realpath "${BASH_SOURCE[0]}")
 SCRIPT_DIR="${SCRIPT_R_PATH%${SCRIPT_NAME}}"
 builtin cd "$SCRIPT_DIR" &>/dev/null || true
 
+# ─────────────────────────────────────────────────────────────────────────────
+# --test : bring up the ETT TEST STACK and return (canonical ETT; NVR ref impl).
+#
+# SAME compose file as prod, but: project name `smarthome_test` (own volumes ->
+# fresh empty DB), .env.test (dummy tokens, unroutable hub IPs, +1000 ports,
+# EVENTSOCKET_ENABLED=false, container prefix), and ONLY the four core services
+# (smart-home postgres postgrest nginx) — no matter-server, no autoheal, no
+# webhook-dispatcher. Layered so the test stack can NEVER act on the live house.
+# No AWS pull: .env.test is self-sufficient (nothing in it is secret).
+# ─────────────────────────────────────────────────────────────────────────────
+if [[ "${1:-}" == "--test" ]]; then
+	set -uo pipefail
+	if [[ ! -f .env.test ]]; then
+		echo "ERROR: .env.test not found at $(pwd).env.test" >&2
+		exit 1
+	fi
+	echo "Bringing up smarthome_test stack (same compose file, .env.test overrides,"
+	echo "container prefix smarthome_test_, ports +1000, four core services only)..."
+	docker compose -p smarthome_test --env-file .env.test up -d --wait \
+		smart-home postgres postgrest nginx
+	# Migrations: psql/02-apply-migrations.sh only runs at postgres VOLUME
+	# CREATION; a REUSED test volume would silently miss newer migrations, so
+	# reconcile through the one runner on every --test start (idempotent).
+	bash scripts/apply_db_migrations.sh smarthome_test_smarthome-postgres \
+		smarthome_api smarthome || true
+	echo ""
+	docker compose -p smarthome_test --env-file .env.test ps \
+		--format "table {{.Service}}\t{{.Status}}\t{{.Ports}}"
+	echo ""
+	echo "Test app:   http://localhost:6001   (nginx: http 9082 / https 9445)"
+	echo "Run tests:  ./test.sh    Stop: ./stop.sh --test"
+	exit 0
+fi
+
 # Color + logger helpers: home copy preferred, in-repo copy as fallback, tolerated absent.
 . ~/.env.colors 2>/dev/null || . "${SCRIPT_DIR}.env.colors" 2>/dev/null || true
 . ~/logger.sh --no-exec &>/dev/null || . "${SCRIPT_DIR}logger.sh" --no-exec &>/dev/null || true

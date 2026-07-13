@@ -24,6 +24,7 @@ import {
 import { colors, space } from '../../shared/tokens';
 import { AdminApi } from '../core/admin-api';
 import { instanceState, type InstanceRow } from '../core/admin-types';
+import { useNav } from '../core/nav';
 import { useAdminStore } from '../core/store';
 import { InstanceCard } from '../components/InstanceCard';
 
@@ -75,6 +76,12 @@ export function InstancesScreen() {
 
   const onPause = useCallback((row: InstanceRow) => void act(row, 'pause'), [act]);
   const onResume = useCallback((row: InstanceRow) => void act(row, 'resume'), [act]);
+
+  const openInstance = useNav((s) => s.openInstance);
+  const onOpen = useCallback(
+    (row: InstanceRow) => openInstance(row.id),
+    [openInstance],
+  );
 
   // Group instance ids by app type, preserving server (created_at desc) order.
   const byType: Record<number, number[]> = {};
@@ -146,6 +153,7 @@ export function InstancesScreen() {
                         busy={busy[id] === true}
                         onPause={onPause}
                         onResume={onResume}
+                        onOpen={onOpen}
                       />
                     ) : null;
                   })}

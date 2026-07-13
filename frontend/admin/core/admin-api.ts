@@ -29,6 +29,22 @@ export class AdminApi {
     return this.t.get<AppType[]>('/api/app-types');
   }
 
+  /** One instance, fresh from the server (used by save verification). */
+  instance(instanceId: number): Promise<InstanceRow> {
+    return this.t.get<InstanceRow>(`/api/instances/${instanceId}`);
+  }
+
+  /** Update an instance's settings. The server MERGES the given keys into the
+   *  existing settings JSONB (instance_manager.update_instance), kills the
+   *  running instance first and restarts it from the new DB state — so send
+   *  only the CHANGED keys. */
+  update(
+    instanceId: number,
+    settings: Record<string, unknown>,
+  ): Promise<{ message: string }> {
+    return this.t.put(`/api/instances/${instanceId}`, { settings });
+  }
+
   /** Pause an instance. duration_seconds=0 means INDEFINITE (universal pause
    *  contract). The backend converts seconds -> ceil minutes internally. */
   pause(instanceId: number, durationSeconds = 0): Promise<{ message: string }> {

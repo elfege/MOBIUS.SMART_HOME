@@ -1,7 +1,8 @@
 /**
  * admin/components/InstanceCard.tsx — one automation instance.
  *
- * Presentation + a single action for the proto: pause/resume. Errors are
+ * Presentation + two interactions: tap the card body to open the instance's
+ * settings editor (onOpen), and a pause/resume button. Errors are
  * surfaced honestly — `error_count` with the last error text, in danger red
  * PLUS the "⚠"-free textual prefix "errors:" (never hue alone, and never the
  * banned warning triangle, which renders yellow-orange — CVD canon PIN.1).
@@ -20,16 +21,18 @@ interface Props {
   busy: boolean;
   onPause: (row: InstanceRow) => void;
   onResume: (row: InstanceRow) => void;
+  /** Tap anywhere on the card body -> open the instance's settings editor. */
+  onOpen: (row: InstanceRow) => void;
 }
 
-export function InstanceCard({ row, busy, onPause, onResume }: Props) {
+export function InstanceCard({ row, busy, onPause, onResume, onOpen }: Props) {
   const state = instanceState(row);
   const canAct = state !== 'disabled';
   const actionLabel = state === 'paused' ? 'Resume' : 'Pause';
   const onPress = () => (state === 'paused' ? onResume(row) : onPause(row));
 
   return (
-    <View style={styles.card}>
+    <Pressable style={styles.card} onPress={() => onOpen(row)}>
       <View style={styles.rowTop}>
         <Text style={styles.label} numberOfLines={1}>
           {row.label}
@@ -59,7 +62,7 @@ export function InstanceCard({ row, busy, onPause, onResume }: Props) {
           <Text style={styles.btnText}>{busy ? '…' : actionLabel}</Text>
         </Pressable>
       ) : null}
-    </View>
+    </Pressable>
   );
 }
 

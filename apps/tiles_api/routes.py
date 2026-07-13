@@ -16,13 +16,14 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from apps.tiles_api import db
+from apps.tiles_api import db, resolver
 from apps.tiles_api.auth import (KIND_PANEL, KIND_SERVICE, SCOPE_PANEL_COMMAND,
                                  SCOPE_PANEL_READ, ALL_SCOPES, Principal,
                                  client_ip, generate_token, hash_token,
                                  is_trusted_lan, require_scope, token_prefix)
-from apps.tiles_api.models import (DeviceCommandRequest, EnrollDeviceRequest,
-                                   EnrollDeviceResponse, PreferenceRequest)
+from apps.tiles_api.models import (AffinityRequest, DeviceCommandRequest,
+                                   EnrollDeviceRequest, EnrollDeviceResponse,
+                                   PreferenceRequest)
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +75,17 @@ async def enroll_device(body: EnrollDeviceRequest, request: Request):
                                 token=raw, created_at=row.get("created_at"))
 
 
-@router.get("/devices")
+@router.get("/enrollments")
 async def list_enrolled_devices(request: Request):
-    """Enrolled principals (admin view). Never returns token material — only the
-    non-secret prefix, plus last-seen for attribution."""
+    """
+    Enrolled principals (admin view). Never returns token material — only the
+    non-secret prefix, plus last-seen for attribution.
+
+    NOTE the path: this is `/api/panel/enrollments`, NOT `/api/panel/devices`.
+    `/api/panel/devices` is the RENDERED DEVICE ROSTER (get_panel_devices) — a
+    different resource. Keeping them on distinct paths avoids the GET-method
+    collision that would otherwise let the admin list shadow the roster.
+    """
     _admin_guard(request)
     return {"devices": db.list_devices()}
 
@@ -99,6 +107,48 @@ async def whoami(principal: Principal = Depends(require_scope(SCOPE_PANEL_READ))
     """Lets an enrolled panel confirm its identity + granted scopes."""
     return {"id": principal.id, "name": principal.name, "kind": principal.kind,
             "scopes": principal.scopes}
+
+
+@router.get("/devices")
+async def get_panel_devices(profile: str = "default",
+                            principal: Principal = Depends(require_scope(SCOPE_PANEL_READ))):
+    """
+    The resolved panel roster: ordered sections + a flat list of tiles, each
+    already carrying its tile renderer, section, and primary value.
+
+    ALL grouping/tile-type logic is resolved SERVER-SIDE from the panel_* tables
+    (migration 014) — the client renders verbatim and never carries its own
+    capability/room chain, so the web panel and the native app cannot drift
+    (operator directive 2026-07-13). Reads are cheap (whole small tables) and
+    resolution is pure; no per-device DB round-trips.
+    """
+    resolved = resolver.resolve_panel(
+        devices=db.list_present_devices(),
+        sections=db.list_sections(profile),
+        tile_types=db.list_tile_types(),
+        rules=db.list_section_rules(),
+        affinities_by_device=db.affinities_by_device(profile),
+    )
+    resolved["profile"] = profile
+    return resolved
+
+
+@router.put("/devices/{device_id}/affinity")
+async def put_device_affinity(device_id: int, body: AffinityRequest,
+                              principal: Principal = Depends(require_scope(SCOPE_PANEL_COMMAND))):
+    """
+    Pin/override one device on the panel (section, tile renderer, label, hide,
+    favorite) — the DATA that replaces TILES' hard-coded grouping. Requires
+    command scope: reorganizing the panel is a configuration write, not a read.
+    """
+    db.set_affinity(
+        body.profile, device_id,
+        section_id=body.section_id, tile_type=body.tile_type,
+        custom_label=body.custom_label, sort_order=body.sort_order,
+        is_hidden=body.is_hidden, is_favorite=body.is_favorite)
+    logger.info(f"panel: '{principal.name}' set affinity for device {device_id} "
+                f"(profile={body.profile})")
+    return {"message": "saved", "profile": body.profile, "device_id": device_id}
 
 
 @router.get("/preferences")
@@ -128,16 +178,39 @@ async def panel_device_command(device_id: str, body: DeviceCommandRequest,
     AND (for panel principals) the trusted-LAN second factor, and every call is
     attributed to a named principal in the log.
 
-    Delegates to the SHARED command path (services/) — no forked control logic
-    lives in this package (fanatic-modularization ruling).
+    DELEGATES to the SHARED command path (services/device_commander) — no forked
+    control logic lives in this package (fanatic-modularization ruling). By
+    delegating, the panel inherits, for free:
+      * the Matter-first-then-Hubitat fallback the operator asked for. That
+        fallback is Matter-ONLY by construction: DeviceCommander resolves the
+        device to a Matter node and, for anything that is not Matter-controllable
+        by us (or whose Matter send/verify fails), returns None -> the Hubitat
+        path runs. A non-Matter device never touches the Matter branch.
+      * retry + state verification, and consistent memoization updates.
+    We pass the canonical device id straight through, exactly as the admin route
+    /api/devices/{id}/command does — same id space, one command path.
     """
+    from services.device_commander import get_device_commander
+
+    args = None
+    if body.value is not None:
+        # DeviceCommander wants a positional arg LIST (e.g. setLevel -> [75]).
+        args = body.value if isinstance(body.value, list) else [body.value]
+
     logger.info(f"panel: '{principal.name}' -> device {device_id} "
                 f"command={body.command} value={body.value!r}")
-    # NOTE: wired to the shared command service in P2, together with the device
-    # roster endpoint. Kept explicit rather than silently no-op'ing so the auth
-    # contract is testable now and the control path cannot be smuggled in
-    # unauthenticated later.
-    raise HTTPException(
-        status_code=501,
-        detail="Panel command path lands in P2 (delegates to the shared command "
-               "service). Auth contract is live and enforced.")
+    try:
+        commander = get_device_commander()
+        result = await commander.send_command(
+            device_id=device_id, command=body.command, args=args, verify=True)
+    except Exception as e:  # noqa: BLE001 — surface as 500, never leak a stack
+        logger.error(f"panel command failed: device={device_id} "
+                     f"cmd={body.command}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if result.success:
+        return {"message": "Command sent", "verified": result.verified,
+                "status": result.status.value, "actual_state": result.actual_state,
+                "elapsed_ms": round(result.elapsed_ms, 1)}
+    raise HTTPException(status_code=502,
+                        detail=f"Command failed: {result.error}")

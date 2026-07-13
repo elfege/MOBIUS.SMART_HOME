@@ -1,12 +1,16 @@
 """
 Persistence for the panel surface: `dsapp.panel_devices` + `dsapp.panel_preferences`.
 
-SERVER-SIDE ONLY. Neither table gets an `api.*` view — `panel_devices` holds
-credential material (token hashes) and must never be a PostgREST resource, and
-preferences are reached through our own authenticated FastAPI routes, not by a
-client talking to the database directly.
+SERVER-SIDE ONLY. None of these tables gets an `api.*` view — `panel_devices`
+holds credential material (token hashes) and must never be a PostgREST resource,
+and everything else is reached through our own authenticated FastAPI routes, not
+by a client talking to the database directly.
 
-Tables are created idempotently by app.py's run_db_migrations() at boot.
+Tables are created by the VERSIONED migrations (canonical SQL.1), not by app.py:
+`panel_devices` / `panel_preferences` in migration 010, and the panel-roster
+tables (`panel_sections`, `panel_tile_types`, `panel_section_rules`,
+`panel_device_affinities`) in migration 014. app.py's run_db_migrations() is a
+documented NO-OP — the schema-as-code DDL was removed 2026-07-13.
 """
 
 import logging
@@ -151,5 +155,131 @@ def set_preference(profile: str, category: str, value: Any) -> None:
                    ON CONFLICT (profile, category)
                    DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()""",
                 (profile, category, json.dumps(value)))
+    finally:
+        conn.close()
+
+
+# --- panel roster resolution inputs (migration 014) -------------------------
+# These reads feed resolver.resolve_panel(). Everything the panel groups by is
+# DATA here — no capability/room logic lives in the client (operator directive
+# 2026-07-13: "everything registered in tables especially affinities").
+
+def list_present_devices() -> List[Dict[str, Any]]:
+    """Live device roster from the canonical table — is_present only (a device
+    pruned from its hub must not appear on a wall panel). attributes is ALREADY a
+    flat JSONB map here (e.g. {"switch":"on","level":"72"}), so no client-side
+    Maker-list flattening is needed."""
+    conn = _conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, label, name, device_type, protocol,
+                          capabilities, attributes
+                     FROM dshub.devices
+                    WHERE is_present = true
+                    ORDER BY label""")
+            return [{"id": r[0], "label": r[1], "name": r[2], "device_type": r[3],
+                     "protocol": r[4], "capabilities": r[5], "attributes": r[6]}
+                    for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def list_sections(profile: str = "default") -> List[Dict[str, Any]]:
+    """Panel sections for a profile, ordered."""
+    conn = _conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, slug, name, icon, sort_order, is_hidden
+                     FROM dsapp.panel_sections
+                    WHERE profile = %s
+                    ORDER BY sort_order, name""", (profile,))
+            return [{"id": r[0], "slug": r[1], "name": r[2], "icon": r[3],
+                     "sort_order": r[4], "is_hidden": r[5]} for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def list_tile_types() -> List[Dict[str, Any]]:
+    """Capability -> tile renderer map (lowest priority wins among a device's
+    capabilities)."""
+    conn = _conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT capability, tile_type, priority, primary_attribute,
+                          is_actionable, is_enabled
+                     FROM dsapp.panel_tile_types
+                    WHERE is_enabled = true
+                    ORDER BY priority""")
+            return [{"capability": r[0], "tile_type": r[1], "priority": r[2],
+                     "primary_attribute": r[3], "is_actionable": r[4],
+                     "is_enabled": r[5]} for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def list_section_rules() -> List[Dict[str, Any]]:
+    """Auto-sectionizer rules (name_keyword | device_type | capability)."""
+    conn = _conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT section_slug, match_kind, pattern, priority, is_enabled
+                     FROM dsapp.panel_section_rules
+                    WHERE is_enabled = true
+                    ORDER BY priority""")
+            return [{"section_slug": r[0], "match_kind": r[1], "pattern": r[2],
+                     "priority": r[3], "is_enabled": r[4]} for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def affinities_by_device(profile: str = "default") -> Dict[int, Dict[str, Any]]:
+    """Explicit per-device placements/overrides, keyed by device_id for O(1)
+    lookup during resolution. Absence of a key means 'auto'."""
+    conn = _conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT device_id, section_id, tile_type, custom_label,
+                          sort_order, is_hidden, is_favorite
+                     FROM dsapp.panel_device_affinities
+                    WHERE profile = %s""", (profile,))
+            return {r[0]: {"device_id": r[0], "section_id": r[1], "tile_type": r[2],
+                           "custom_label": r[3], "sort_order": r[4],
+                           "is_hidden": r[5], "is_favorite": r[6]}
+                    for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def set_affinity(profile: str, device_id: int, *, section_id: Optional[int] = None,
+                 tile_type: Optional[str] = None, custom_label: Optional[str] = None,
+                 sort_order: Optional[int] = None, is_hidden: Optional[bool] = None,
+                 is_favorite: Optional[bool] = None) -> None:
+    """Upsert a device's affinity (explicit placement / override). Only the
+    fields the caller passes are written; the rest keep their stored value, so a
+    'pin to Kitchen' call does not clobber an existing 'is_favorite'."""
+    conn = _conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO dsapp.panel_device_affinities
+                     (profile, device_id, section_id, tile_type, custom_label,
+                      sort_order, is_hidden, is_favorite, updated_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,
+                           COALESCE(%s, false), COALESCE(%s, false), NOW())
+                   ON CONFLICT (profile, device_id) DO UPDATE SET
+                       section_id   = COALESCE(EXCLUDED.section_id,   dsapp.panel_device_affinities.section_id),
+                       tile_type    = COALESCE(EXCLUDED.tile_type,    dsapp.panel_device_affinities.tile_type),
+                       custom_label = COALESCE(EXCLUDED.custom_label, dsapp.panel_device_affinities.custom_label),
+                       sort_order   = COALESCE(EXCLUDED.sort_order,   dsapp.panel_device_affinities.sort_order),
+                       is_hidden    = COALESCE(%s, dsapp.panel_device_affinities.is_hidden),
+                       is_favorite  = COALESCE(%s, dsapp.panel_device_affinities.is_favorite),
+                       updated_at   = NOW()""",
+                (profile, device_id, section_id, tile_type, custom_label,
+                 sort_order, is_hidden, is_favorite, is_hidden, is_favorite))
     finally:
         conn.close()

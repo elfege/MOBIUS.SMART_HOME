@@ -53,3 +53,28 @@ class DeviceCommandRequest(BaseModel):
     lock is NOT the same right as reading the roster."""
     command: str = Field(..., min_length=1, max_length=60)
     value: Optional[Any] = None
+
+
+class AffinityRequest(BaseModel):
+    """Explicit per-device placement / override for a panel profile.
+
+    Everything the panel groups by is DATA (operator directive: "everything
+    registered in tables especially affinities"). This is how the operator pins
+    a device to a section, forces a tile renderer, renames it on the panel, hides
+    it, or stars it onto the home grid — without a code change. Only the fields
+    present are written; omitted fields keep their stored value.
+    """
+    profile: str = Field(default="default", max_length=60)
+    section_id: Optional[int] = Field(
+        default=None, description="Pin to this section (NULL = auto-sectionize).")
+    tile_type: Optional[str] = Field(
+        default=None, max_length=60,
+        description="Force this tile renderer (NULL = resolve from capabilities).")
+    custom_label: Optional[str] = Field(
+        default=None, max_length=120, description="Panel display name override.")
+    sort_order: Optional[int] = Field(
+        default=None, description="Position within the section.")
+    is_hidden: Optional[bool] = Field(
+        default=None, description="Hide from the panel entirely.")
+    is_favorite: Optional[bool] = Field(
+        default=None, description="Also surface on the home 'Favorites' grid.")

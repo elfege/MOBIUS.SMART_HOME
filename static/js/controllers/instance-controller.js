@@ -2137,12 +2137,72 @@ export class InstanceWizardController {
             utils.notify('Automation updated successfully!');
             window.location.href = '/';
         } catch (error) {
-            // Save failed — re-arm the guard so the instance restarts on page leave
+            // A DROPPED/ABORTED connection AFTER the PUT already committed lands
+            // in this catch exactly like a real failure: fetch() rejects (Safari
+            // renders it as "Load failed") even though the write returned 200.
+            // Declaring "save failed" then is a DATA-INTEGRITY LIE — the operator
+            // is told his data was lost when it was saved. That is precisely the
+            // 2026-07-13 12:04 incident: PUT /api/instances/13 committed, the app
+            // was restarted 11s later, his phone's in-flight fetch aborted, and
+            // the UI reported "Failed to update" over a save that had succeeded.
+            //
+            // So distinguish a connection/network error from a real SERVER
+            // rejection (api.request throws an "HTTP 4xx/5xx" Error for those),
+            // and for the connection case RE-FETCH and verify whether the write
+            // actually landed before declaring failure.
+            const looksNetwork = error.name === 'TypeError'
+                || /load failed|failed to fetch|networkerror|aborted|connection/i
+                    .test(error.message || '');
+            if (looksNetwork && await this._verifySavePersisted(payload)) {
+                utils.notify('Automation saved. (The connection dropped while '
+                    + 'saving, but your changes were confirmed on the server.)');
+                window.location.href = '/';
+                return;
+            }
+            // Genuine failure (or we could not confirm): re-arm the guard so the
+            // instance restarts on page leave, and report honestly.
             this._instanceStopped = true;
             if (this._beforeUnloadHandler) {
                 window.addEventListener('beforeunload', this._beforeUnloadHandler);
             }
             utils.notify(`Failed to update automation: ${error.message}`, 'error');
         }
+    }
+
+    /**
+     * Verify whether a save actually persisted, by RE-FETCHING the instance and
+     * checking the server now reflects the values we sent.
+     *
+     * Used ONLY on a dropped-connection error (see save()): the dangerous case
+     * is a write that committed 200 while the response was lost in flight, which
+     * must NOT be reported as a failure. Returns true only if the stored label
+     * AND every setting we sent are now reflected on the server (subset match
+     * tolerates backend-added keys; JSON compare handles nested values/types).
+     * Returns false if it clearly did not land, or if we cannot reach the
+     * backend to confirm — never lie in either direction; under-claiming
+     * ("couldn't confirm, so reporting failure") is safer than a false "saved".
+     *
+     * @param {{label?: string, settings?: object}} payload - what save() sent
+     * @returns {Promise<boolean>} true iff the write is confirmed persisted
+     */
+    async _verifySavePersisted(payload) {
+        let current;
+        try {
+            current = await api.get(`/instances/${this.instanceId}`);
+        } catch (e) {
+            return false; // backend unreachable -> cannot confirm -> honest failure
+        }
+        if (!current) return false;
+        if (payload.label && String(current.label) !== String(payload.label)) {
+            return false; // stored label differs from what we sent -> not persisted
+        }
+        const sent = payload.settings || {};
+        const stored = current.settings || {};
+        for (const key of Object.keys(sent)) {
+            if (JSON.stringify(stored[key]) !== JSON.stringify(sent[key])) {
+                return false; // a value we sent is not reflected -> not persisted
+            }
+        }
+        return true;
     }
 }

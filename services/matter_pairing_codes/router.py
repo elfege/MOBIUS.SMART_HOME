@@ -28,6 +28,7 @@ from services.matter_pairing_codes import sources
 from services.matter_pairing_codes.manual_code import InvalidPairingCode
 from services.matter_pairing_codes.resolver import resolve
 from services.matter_pairing_codes.sources import UnreachableCode
+from services.matter_pairing_lock import PairingLockBusy
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,10 @@ async def get_pairing_code(body: PairingCodeBody):
         result = await resolve(device, body.label_code, body.window_seconds)
     except InvalidPairingCode as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except PairingLockBusy as e:
+        # Another Matter pairing is in flight. Opening a window now would storm
+        # the radio — the same 409 contract every other pairing path uses.
+        raise HTTPException(status_code=409, detail=str(e))
     except UnreachableCode as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:  # noqa: BLE001

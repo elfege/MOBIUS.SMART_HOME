@@ -48,6 +48,42 @@ logger = logging.getLogger(__name__)
 DEFAULT_WINDOW_S = 300
 
 
+async def _hold_pairing_lock_for_window(holder: str, detail: str,
+                                        window_s: int) -> None:
+    """Take the GLOBAL Matter-pairing mutex for the LIFETIME OF A WINDOW.
+
+    OPENING A PAIRING WINDOW IS A PAIRING PATH. The operator's invariant (a
+    Matter radio handles ONE pairing at a time, fleet-wide — plan §4) is violated
+    just as hard by two open windows as by two concurrent commissions: a hub
+    holding a window for device D while Commission All opens one for device E is
+    the storm the mutex exists to prevent.
+
+    WHY NOT the `matter_pairing_lock` context manager: it releases when the block
+    exits — but the window we opened stays open for `window_s` AFTER this call
+    returns. So we acquire with ttl_s = window_s and deliberately DO NOT release;
+    the lock self-expires exactly when the window does. Releasing early would
+    reopen the storm we just closed.
+
+    Raises PairingLockBusy (-> HTTP 409, naming the holder) when another pairing
+    is in flight.
+
+    NOTE: this reaches into matter_pairing_lock._try_acquire_sync because the
+    module exposes no public acquire-without-release. Flagged to the module's
+    owner for promotion to a public `acquire_for_window()`.
+    """
+    import asyncio
+
+    from services.matter_pairing_lock import PairingLockBusy, _try_acquire_sync
+
+    got = await asyncio.to_thread(_try_acquire_sync, holder, detail, int(window_s))
+    if not got.get("acquired"):
+        raise PairingLockBusy(
+            f"Matter pairing is already in progress "
+            f"({got.get('holder')}: {got.get('holder_detail') or '—'}) — "
+            f"opening another pairing window now would storm the radio. "
+            f"It frees up at {got.get('expires_at') or 'its timeout'}.")
+
+
 class CodeResult(NamedTuple):
     """A working pairing code plus the provenance the UI must show.
 
@@ -76,9 +112,15 @@ async def from_our_fabric(node_id: int,
 
     matter-server command: open_commissioning_window {node_id, timeout}
                         -> {manualCode, qrCode}   (verified in-image 2026-07-13)
-    Raises whatever the client raises (caller maps it to HTTP).
+
+    GATED: holds the global pairing mutex for the window's lifetime — opening a
+    window IS a pairing path (see _hold_pairing_lock_for_window). Raises
+    PairingLockBusy (-> 409) if another pairing is in flight.
     """
     from services.matter_client import get_matter_client
+
+    await _hold_pairing_lock_for_window(
+        "get_code_our_fabric", f"window open on node {node_id}", window_s)
 
     client = get_matter_client()
     if not client.is_connected:
@@ -114,11 +156,32 @@ async def from_our_fabric(node_id: int,
 # ---------------------------------------------------------------------------
 # B. A Hubitat fabric — the hub opens the window for its own device.
 # ---------------------------------------------------------------------------
-def from_hubitat(hub_ip: str, hub_node_id: int, hub_name: str = "") -> CodeResult:
+async def from_hubitat(hub_ip: str, hub_node_id: int,
+                       hub_name: str = "",
+                       window_s: int = DEFAULT_WINDOW_S) -> CodeResult:
     """Open a pairing window on the Hubitat hub that administers the device.
 
-    Synchronous `requests` (callers thread it — single-worker event-loop rule).
+    GATED: holds the global pairing mutex for the window's lifetime — a hub
+    holding an open window is exactly the "source-busy" state the operator's
+    one-device-at-a-time invariant forbids overlapping (plan §4). Raises
+    PairingLockBusy (-> 409) if another pairing is in flight.
+
+    The hub call itself is blocking `requests`, so it runs in a thread (the
+    single-worker event-loop rule).
     """
+    import asyncio
+
+    await _hold_pairing_lock_for_window(
+        "get_code_hubitat",
+        f"window open on {hub_name or hub_ip} node {hub_node_id}", window_s)
+
+    return await asyncio.to_thread(
+        _open_hubitat_window, hub_ip, hub_node_id, hub_name)
+
+
+def _open_hubitat_window(hub_ip: str, hub_node_id: int,
+                         hub_name: str = "") -> CodeResult:
+    """The blocking half of from_hubitat (runs in a thread; lock already held)."""
     resp = requests.get(
         f"http://{hub_ip}/hub/matter/openPairingWindow",
         params={"node": hub_node_id},

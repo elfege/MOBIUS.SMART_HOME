@@ -29,6 +29,7 @@ from typing import Any, Dict, Optional
 from services.matter_pairing_codes import sources
 from services.matter_pairing_codes.manual_code import InvalidPairingCode
 from services.matter_pairing_codes.sources import CodeResult, UnreachableCode
+from services.matter_pairing_lock import PairingLockBusy
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +66,15 @@ async def resolve(device: Dict[str, Any],
         logger.warning("vault lookup failed for %s: %s", name, e)
 
     # 2. Our own fabric: open a fresh window on a node we administer.
+    #    PairingLockBusy is NOT swallowed — "another pairing is in flight" is a
+    #    definitive answer (409), not a reason to try the next source: trying the
+    #    hub next would open the very second window the mutex just refused.
     our_node = device.get("our_node_id")
     if our_node:
         try:
             return await sources.from_our_fabric(int(our_node), window_s)
+        except PairingLockBusy:
+            raise
         except Exception as e:  # noqa: BLE001 — fall through to the hub
             logger.warning("our-fabric window failed for %s (node %s): %s",
                            name, our_node, e)
@@ -77,9 +83,10 @@ async def resolve(device: Dict[str, Any],
     hub_ip, hub_node = device.get("hub_ip"), device.get("hubitat_node_id")
     if hub_ip and hub_node:
         try:
-            return await asyncio.to_thread(
-                sources.from_hubitat, hub_ip, int(hub_node),
-                device.get("hub_name", ""))
+            return await sources.from_hubitat(
+                hub_ip, int(hub_node), device.get("hub_name", ""), window_s)
+        except PairingLockBusy:
+            raise
         except Exception as e:  # noqa: BLE001
             logger.warning("hubitat window failed for %s (%s node %s): %s",
                            name, hub_ip, hub_node, e)

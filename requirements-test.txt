@@ -1,0 +1,16 @@
+# Test-only dependencies (ETT canon). Kept SEPARATE from requirements.txt so the
+# runtime image never ships a test framework.
+#
+# Install into the project venv:
+#     venv/bin/pip install -r requirements-test.txt
+# Then:  ./test.sh
+#
+# Until 2026-07-13 this file did not exist and the venv had no pytest — which is
+# the mundane, concrete reason 33 test files had never once been executed
+# (pin 91). The suite was not broken; nothing could run it.
+pytest==7.4.3
+pytest-cov==4.1.0
+pytest-mock==3.12.0        # the `mocker` fixture — 11 tests require it
+responses==0.24.1          # conftest's mock_postgrest intercepts requests to postgrest
+psycopg2-binary==2.9.9     # integration tests talk to the test-stack DB
+requests==2.31.0

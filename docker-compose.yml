@@ -366,17 +366,39 @@ services:
 # Networks
 # =============================================================================
 networks:
+  # Like postgres_data, this is EXTERNAL + FIXED-NAME, so it is NOT scoped by the
+  # compose project: a second stack would join the LIVE network and its
+  # containers would resolve `postgres`/`smart-home` to the LIVE ones (service
+  # aliases collide). Parameterized for the same reason and with the same
+  # contract: prod keeps the historical name; .env.test points the test stack at
+  # its OWN network so the two stacks cannot see each other at all.
   smarthome-net:
     external: true
-    name: smarthome_smarthome-net
+    name: ${NETWORK_NAME:-smarthome_smarthome-net}
 
 # =============================================================================
 # Volumes
 # =============================================================================
 volumes:
+  # 🔴 THE LIVE DATABASE. This is an EXTERNAL, FIXED-NAME volume, which means it
+  # is NOT scoped by the compose project name: `docker compose -p anything` still
+  # mounts THIS volume. That is deliberate for prod (the data predates the repo
+  # rename and must never be re-created), but it makes the volume a LOADED GUN
+  # for any second stack.
+  #
+  # NEAR-MISS, 2026-07-13: the first `start.sh --test` bring-up mounted this very
+  # volume into the test stack — a SECOND postmaster on the operator's live data
+  # directory. The live DB survived (verified: no lock/PANIC/corruption, 0
+  # restarts, full-scan clean, dump taken) only because the test stack's dummy
+  # password got it rejected. Do not rely on that luck twice.
+  #
+  # THE GUARD: the name is now parameterized. Prod resolves to the historical
+  # name (default below, unchanged). The test stack sets POSTGRES_VOLUME_NAME in
+  # .env.test to its OWN volume, so it can never again touch live data — and it
+  # gets the fresh, empty database it was always supposed to have.
   postgres_data:
     external: true
-    name: 0_smart_home_postgres_data
+    name: ${POSTGRES_VOLUME_NAME:-0_smart_home_postgres_data}
   app_logs:
     driver: local
   matter_data:

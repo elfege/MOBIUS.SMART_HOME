@@ -376,6 +376,41 @@ smarthome_start__start_stack() {
 		safe_exit 1
 	fi
 	echo -e "${GREEN}✓ Containers are running${NC}"
+
+	smarthome_start__apply_migrations
+}
+
+# =============================================================================
+# DB MIGRATIONS — the LIVE-database path (canonical SQL.1, 2026-07-13)
+# =============================================================================
+# psql/02-apply-migrations.sh only runs when Postgres initializes an EMPTY data
+# directory. An already-initialized database (the normal case) would therefore
+# never see a new migration — so we apply them here, on every start, against the
+# running container.
+#
+# WHY THIS FUNCTION EXISTS: until 2026-07-13 there was NO runner anywhere. The
+# schema was created by ~93 DDL statements executed as PYTHON STRINGS inside
+# app.py at every boot (schema-as-code, unversioned — forbidden by SQL.1), while
+# the .sql files in psql/ were dead documentation that nothing ever executed.
+# app.py's loop also swallowed every exception as a mere warning, so a broken
+# migration could never fail loudly. Both are fixed: app.py carries zero DDL, and
+# failures below are REPORTED.
+#
+# Migrations are idempotent (IF NOT EXISTS / OR REPLACE / re-GRANT), so re-applying
+# the whole chain on every start is a cheap no-op. Verified 2026-07-13: the chain
+# (000 baseline -> 010 -> 011) builds a virgin database that matches live exactly.
+# =============================================================================
+smarthome_start__apply_migrations() {
+	local runner="${SCRIPT_DIR}scripts/apply_db_migrations.sh"
+	[[ -x "$runner" ]] || { echo -e "${RED}✗ missing $runner${NC}"; return 1; }
+
+	echo ""
+	echo "Applying DB migrations..."
+	"$runner" \
+		"${SMARTHOME_START__POSTGRES_CONTAINER:-smarthome-postgres}" \
+		"${POSTGRES_USER:-smarthome_api}" \
+		"${POSTGRES_DB:-smarthome}" \
+		"${SCRIPT_DIR}psql/migrations"
 }
 
 smarthome_start__health_check() {

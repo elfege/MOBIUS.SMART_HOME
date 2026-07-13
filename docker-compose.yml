@@ -203,7 +203,15 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./psql/init-db.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      # SCHEMA IS NOW VERSIONED (2026-07-13, canonical SQL.1). The old
+      # ./psql/init-db.sql mount is GONE: that file died after 3 tables on a fresh
+      # database (it referenced `devices` before creating it and never created the
+      # smarthome_anon role it GRANTed to 24 times) — see psql/archive/README.md.
+      # A fresh Postgres now builds itself from the verified migration chain:
+      #   000_baseline (pg_dump'd from the live DB) -> 010 (boot-DDL extracted from
+      #   app.py) -> 011 (seeds/backfills). Verified to reproduce live exactly.
+      - ./psql/migrations:/docker-entrypoint-initdb.d/migrations:ro
+      - ./psql/02-apply-migrations.sh:/docker-entrypoint-initdb.d/02-apply-migrations.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-smarthome_api} -d ${POSTGRES_DB:-smarthome}"]
       interval: 10s

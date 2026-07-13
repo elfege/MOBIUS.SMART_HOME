@@ -30,6 +30,8 @@ interface AdminState {
   /** Optimistically flip an instance's paused flag (before refresh confirms). */
   setPaused: (id: number, paused: boolean) => void;
   setBusy: (id: number, busy: boolean) => void;
+  /** Replace one instance row with fresh server truth (post-save refetch). */
+  setInstance: (row: InstanceRow) => void;
 }
 
 export const useAdminStore = create<AdminState>((set) => ({
@@ -70,4 +72,9 @@ export const useAdminStore = create<AdminState>((set) => ({
 
   setBusy: (id, busy) =>
     set((state) => ({ busy: { ...state.busy, [id]: busy } })),
+
+  setInstance: (row) =>
+    set((state) => ({
+      instances: { ...state.instances, [row.id]: row },
+    })),
 }));

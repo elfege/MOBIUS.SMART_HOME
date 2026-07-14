@@ -44,7 +44,10 @@
                     onclick="const n=document.querySelector('.main-nav');n.classList.toggle('open');this.setAttribute('aria-expanded',n.classList.contains('open'))">&#9776;</button>
             <nav class="main-nav"
                  onclick="if(event.target.closest('a')){this.classList.remove('open')}">
-                <a href="/" class="nav-link">Dashboard</a>
+                {# Cutover 2026-07-14: '/' serves the RN app now. The logo link
+                   above doubles as back-to-app; Dashboard stays in legacy. #}
+                <a href="/legacy" class="nav-link">Dashboard</a>
+                <a href="/" class="nav-link" title="Back to the new MOBIUS app">&#8598; New App</a>
                 <a href="#" class="nav-link" title="Reload the web app (full refresh)"
                    onclick="window.location.reload();return false;">&#8635; Reload</a>
                 <a href="#" id="nav-restart-app" class="nav-link"

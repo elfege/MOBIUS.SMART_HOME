@@ -4367,16 +4367,36 @@ async def set_mode(request: Request):
 # =============================================================================
 
 
+# =============================================================================
+# THE CUTOVER FRONT DOOR (2026-07-14, cutover plan P0/P2 — operator: "full RN
+# now; legacy jQuery behind /legacy").  GET / serves the React Native (Expo web)
+# admin bundle; every legacy Jinja surface lives under /legacy/* (router below)
+# and the old top-level paths 301 there. The canonical /legacy route strings
+# live in apps/legacy_web/router.py — NOT in the RN app, NOT in nginx.
+# =============================================================================
+from apps.legacy_web import build_legacy_router
+
+app.include_router(build_legacy_router(templates))
+
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def dashboard(request: Request):
-    """Main dashboard."""
-    return templates.TemplateResponse(request, "dashboard.html")
+async def rn_admin_home(request: Request):
+    """The RN admin app (Expo web export, committed at static/admin/). Assets
+    resolve through the /static mount; index.html itself is served no-cache so
+    a redeployed bundle is picked up on plain reload (the hashed JS filenames
+    do the long-term caching)."""
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        "static/admin/index.html",
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
 
 
-@app.get("/instance/new", response_class=HTMLResponse, include_in_schema=False)
-async def new_instance(request: Request):
-    """Instance creation wizard."""
-    return templates.TemplateResponse(request, "instance_wizard.html")
+@app.get("/instance/new", include_in_schema=False)
+async def new_instance():
+    """301 -> /legacy/instance/new (strangler-fig; body in apps/legacy_web)."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/legacy/instance/new", status_code=301)
 
 
 @app.get("/api/instances/{instance_id}/events", tags=["instances"])
@@ -4417,36 +4437,30 @@ async def stream_instance_events(instance_id: int):
         return []
 
 
-@app.get("/matter", response_class=HTMLResponse, include_in_schema=False)
-async def matter_page(request: Request):
-    """Matter device management page."""
-    return templates.TemplateResponse(request, "matter.html")
+# Old top-level legacy paths -> 301 to their /legacy twins (bookmarks and the
+# legacy templates' internal navbars keep working; the redirect translates).
+@app.get("/matter", include_in_schema=False)
+async def matter_page():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/legacy/matter", status_code=301)
 
 
 @app.get("/hubs", include_in_schema=False)
-async def hubs_page(request: Request):
-    """
-    DEPRECATED standalone hub page (was a DUPLICATE of Settings -> Hubs, with its
-    own copy of the hub-card template — the source of drift). Redirect to the one
-    canonical hub UI so there's no second page to keep in sync. templates/hubs.html
-    is now unused.
-    """
+async def hubs_page():
     from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/admin/settings", status_code=307)
+    return RedirectResponse(url="/legacy/admin/settings", status_code=301)
 
 
-@app.get("/sonos", response_class=HTMLResponse, include_in_schema=False)
-async def sonos_page(request: Request):
-    """Sonos driver — standalone speaker controller (Drivers section).
-    TTS announce, set/restore/lock volume, play mp3, stop. See services/sonos/."""
-    return templates.TemplateResponse(request, "sonos.html")
+@app.get("/sonos", include_in_schema=False)
+async def sonos_page():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/legacy/sonos", status_code=301)
 
 
-@app.get("/admin/settings", response_class=HTMLResponse, include_in_schema=False)
-async def admin_settings_page(request: Request):
-    """System settings page — edit rows in system_settings table.
-    Reached via the gear icon in the navbar."""
-    return templates.TemplateResponse(request, "admin_settings.html")
+@app.get("/admin/settings", include_in_schema=False)
+async def admin_settings_page():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/legacy/admin/settings", status_code=301)
 
 
 # =============================================================================
@@ -4976,12 +4990,11 @@ async def delete_hub(hub_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/instance/{instance_id}", response_class=HTMLResponse, include_in_schema=False)
-async def instance_detail(request: Request, instance_id: int):
-    """Instance detail/edit page."""
-    return templates.TemplateResponse(
-        request, "instance_detail.html", {"instance_id": instance_id}
-    )
+@app.get("/instance/{instance_id}", include_in_schema=False)
+async def instance_detail(instance_id: int):
+    """301 -> /legacy/instance/{id} (strangler-fig; body in apps/legacy_web)."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=f"/legacy/instance/{instance_id}", status_code=301)
 
 
 # =============================================================================

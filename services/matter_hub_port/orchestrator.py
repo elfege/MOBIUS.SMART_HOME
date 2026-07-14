@@ -197,6 +197,17 @@ async def run_port(source_hub: Dict[str, Any],
 
     try:
         for n, device in enumerate(work):
+            # CANCEL CHECK — between devices ONLY (operator UX contract,
+            # 2026-07-14): the in-flight device always completes or hits its
+            # ceiling first, because aborting mid-handshake leaves a device
+            # half-paired. request_cancel() sets the flag; we honor it at the
+            # only clean cancellation point there is.
+            if st.get("cancel_requested"):
+                st["cancelled"] = True
+                logger.info("hub-port copy CANCELLED by operator after "
+                            f"{len(st['results'])} device(s)")
+                break
+
             name = device["name"]
             mac = (device["mac"] or "").strip().lower()
             st["done"] = len(st["results"])
@@ -265,8 +276,47 @@ async def run_port(source_hub: Dict[str, Any],
             f"{source_hub['hub_name']} -> {target_hub['hub_name']}"
             + (f", {st['failed']} failed" if st['failed'] else "")
             + (f", {st['skipped']} skipped" if st['skipped'] else "")
-            + (" — ABORTED (consecutive failures)" if aborted else ""))
+            + (" — ABORTED (consecutive failures)" if aborted else "")
+            + (" — CANCELLED by operator (remaining devices untouched; "
+               "re-run to resume, already-copied devices are skipped)"
+               if st.get("cancelled") else ""))
         logger.info(f"hub-port copy finished: {st['message']}")
+
+        # RUN-END RECONCILE (design §3.6 — was missing; caught during the maiden
+        # production run 2026-07-14): the copies are real on the hubs the moment
+        # they verify, but hubitat_matter_devices (and the UI cards) lag until a
+        # discovery scan. Trigger one now so the operator sees the new sibling
+        # reality without pressing Scan Hub. Self-call to our own endpoint —
+        # the scan logic lives inline in app.py's route (the other lane's file),
+        # so an HTTP self-call is the decoupled path. Best-effort: a reconcile
+        # hiccup must never turn a successful run into a failure.
+        if st["ok"]:
+            def _reconcile():
+                import requests as req
+                req.post("http://127.0.0.1:5000/api/matter/discover", timeout=120)
+            try:
+                await asyncio.to_thread(_reconcile)
+                logger.info("hub-port copy: post-run discovery reconcile done")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"post-run discovery reconcile failed "
+                               f"(UI lags until next scan): {e}")
+
+
+def request_cancel() -> bool:
+    """Ask the running copy to stop at the next between-devices checkpoint.
+
+    Returns True when a run was live and the flag was set; False when nothing
+    is running (the router maps that to 409). The in-flight device ALWAYS
+    finishes (or times out) first — aborting mid-handshake would leave it
+    half-paired; the checkpoint in run_port is the only clean stop.
+    Cancellation loses nothing: re-running the same source→target resumes,
+    because already-copied devices skip as already_on_target."""
+    if not _run_state.get("running"):
+        return False
+    _run_state["cancel_requested"] = True
+    _run_state["current"] = ((_run_state.get("current") or "")
+                             + "  (cancelling after this device…)")
+    return True
 
 
 def init_run_state(source_hub: Dict[str, Any], target_hub: Dict[str, Any]) -> str:
@@ -279,6 +329,7 @@ def init_run_state(source_hub: Dict[str, Any], target_hub: Dict[str, Any]) -> st
     _run_state.clear()
     _run_state.update({
         "running": True, "run_id": run_id, "aborted": False,
+        "cancel_requested": False, "cancelled": False,
         "source_hub": source_hub["hub_name"], "target_hub": target_hub["hub_name"],
         "total": 0, "done": 0, "ok": 0, "failed": 0, "skipped": 0,
         "results": [], "current": "starting (preview scan)…", "message": None,

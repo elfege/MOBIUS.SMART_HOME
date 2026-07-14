@@ -111,6 +111,22 @@ async def port_devices_start(body: PortDevicesBody):
             "source_hub": source_hub["hub_name"], "target_hub": target_hub["hub_name"]}
 
 
+@router.post("/api/matter/port-devices/cancel")
+async def port_devices_cancel():
+    """Cancel the in-flight copy run at the next clean checkpoint (operator UX
+    contract 2026-07-14: the run modal gates until done or CANCEL).
+
+    The current device always completes (or hits its ceiling) first — stopping
+    mid-handshake would leave it half-paired. Cancellation is loss-free: a
+    re-run of the same source→target resumes, since already-copied devices skip
+    as already_on_target. 409 when no run is in progress."""
+    if not orchestrator.request_cancel():
+        raise HTTPException(status_code=409,
+                            detail="No copy run is in progress — nothing to cancel.")
+    return {"cancelling": True,
+            "detail": "Stopping after the in-flight device completes."}
+
+
 @router.get("/api/matter/port-devices/status")
 async def port_devices_status():
     """The live run state — per-device results, counters, circuit-breaker

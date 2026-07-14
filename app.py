@@ -2421,6 +2421,11 @@ async def matter_nodes():
                     or match.get('device_name')
                 )
                 node['_hubitat_device_id'] = match.get('maker_api_device_id')
+                # C (MSG-1035): native-Matter ownership — TRUE only when WE
+                # commissioned it directly (primary admin), FALSE when Hubitat-
+                # adopted. Sourced from the DB column (migration 016), so the UI's
+                # dormant .native-matter styling lights up the moment a row is true.
+                node['_is_native_matter'] = bool(match.get('is_native_matter'))
                 # Enrich for the Matter UI: hub link target + responsiveness
                 # signals (matter_discovery refreshes is_online/last_seen_at).
                 node['_hub_ip'] = match.get('hub_ip')
@@ -3369,20 +3374,47 @@ async def matter_hubitat_devices():
         if not resp.ok:
             return []
         rows = resp.json()
-        # Live hub-name + primary flag by hub_ip.
-        live, primary_ips = {}, set()
+        # Live hub-name + primary flag + DB id by hub_ip.
+        live, primary_ips, hub_id_by_ip = {}, set(), {}
         try:
             hc = req.get(f"{postgrest_url}/hub_config",
-                         params={"select": "hub_name,hub_ip,is_primary"}, timeout=5)
+                         params={"select": "id,hub_name,hub_ip,is_primary"}, timeout=5)
             if hc.ok:
                 for h in hc.json():
                     live[h["hub_ip"]] = h["hub_name"]
+                    hub_id_by_ip[h["hub_ip"]] = h.get("id")
                     if h.get("is_primary"):
                         primary_ips.add(h["hub_ip"])
         except Exception as e:
             logger.debug(f"hub-name live-enrich skipped: {e}")
+
+        # Canonical-device anchor map for the "mapped → db #N" chip (MSG-1035 A).
+        # Batched: ONE fetch of the present canonical registry keyed by the exact
+        # (hub_ip, hubitat_id) composite — the same anchor resolve_node_to_device
+        # uses — instead of an N-per-row resolve. A discovered Matter device is
+        # "mapped" iff its (hub_ip, hubitat_device_id) resolves to a present
+        # canonical devices row; else _canonical_id stays None and the UI chip
+        # stays dormant.
+        canon_by_anchor: Dict[tuple, Any] = {}
+        try:
+            dv = req.get(f"{postgrest_url}/devices",
+                         params={"select": "id,hub_ip,hubitat_id",
+                                 "is_present": "eq.true"}, timeout=5)
+            if dv.ok:
+                for d in dv.json():
+                    canon_by_anchor[(d.get("hub_ip"), str(d.get("hubitat_id")))] = d.get("id")
+        except Exception as e:
+            logger.debug(f"canonical-anchor enrich skipped: {e}")
+
         for r in rows:
             r["hub_name"] = live.get(r.get("hub_ip"), r.get("hub_name"))
+            # D: literal hub number (DB id) alongside the home_N display name.
+            r["hub_config_id"] = hub_id_by_ip.get(r.get("hub_ip"))
+            # A: psql device id WHEN MAPPED (None → chip dormant, nothing breaks).
+            r["_canonical_id"] = canon_by_anchor.get(
+                (r.get("hub_ip"), str(r.get("hubitat_device_id"))))
+            # C: native-Matter ownership flag (defaults False pre-migration/DB).
+            r.setdefault("is_native_matter", False)
 
         # Dedup by MAC. Group only rows that HAVE a mac; null-mac rows pass
         # through individually (keyed by unique_id so they can't merge).

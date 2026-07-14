@@ -828,18 +828,23 @@ class ScreenTimePlannerApp(BaseApp):
     @classmethod
     def get_device_categories(cls) -> List[Dict[str, Any]]:
         return [
+            # multiple=True (operator 2026-07-14): one planner instance may govern
+            # SEVERAL screens (e.g. living TV + bedroom TV) under one schedule.
+            # The app logic has always been list-native (every consumer iterates
+            # get_devices(...)), and existing selections are stored as lists
+            # (instance 13 = ["296"]), so single-device instances are unaffected.
             {
-                "key": "primary_switch", "label": "TV / Primary Switch",
+                "key": "primary_switch", "label": "TV / Primary Switch(es)",
                 "capability": "Switch",
-                "multiple": False, "required": True,
-                "description": "The TV switch — watched and cut when outside an allowed window.",
+                "multiple": True, "required": True,
+                "description": "The TV switch(es) — watched and cut when outside an allowed window.",
             },
             {
-                "key": "secondary_switch", "label": "Power Device (optional)",
+                "key": "secondary_switch", "label": "Power Device(s) (optional)",
                 "capability": "Switch",
-                "multiple": False, "required": False,
+                "multiple": True, "required": False,
                 "description": (
-                    "Optional master power to the TV — turned ON at a window's "
+                    "Optional master power to the TV(s) — turned ON at a window's "
                     "start to make the TV available, cut at the window's close."
                 ),
             },

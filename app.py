@@ -1240,6 +1240,14 @@ async def get_devices(capability: Optional[str] = Query(None)):
             # appearing in the hub pull (2026-06-19). Removed devices must
             # not stay selectable in the wizard.
             'is_present': 'eq.true',
+            # ONE row per physical device (operator 2026-07-14: "dedup is
+            # broken"). The classifier already elects a primary-hub winner per
+            # same-label group and flags the mirrors is_name_duplicate=true
+            # (LAN/ESP devices exist on all 3 hubs; Matter devices exist per
+            # admin hub after a hub->hub copy). Pickers must offer the WINNER
+            # only — commands route through it (sibling failover is the
+            # commander's job, not the user's). not.is.true keeps NULL rows.
+            'is_name_duplicate': 'not.is.true',
         }
         if capability:
             # PostgREST JSONB array-contains: cs.["value"] for JSONB array
@@ -1288,6 +1296,9 @@ async def get_devices_by_categories(categories: str = Query(...)):
                 # Hide hub-pruned devices (is_present=false), same as the
                 # per-capability /devices endpoint above. 2026-06-19.
                 'is_present': 'eq.true',
+                # And hide classifier-flagged same-label mirrors — one row per
+                # physical device, winner only (see /api/devices, 2026-07-14).
+                'is_name_duplicate': 'not.is.true',
             },
             timeout=5,
         )

@@ -200,11 +200,20 @@ services:
       # (Same hysteresis medicine <HOST>-proxy + anamnesis applied to their
       # own health probing.) The real fix — moving blocking work off the event
       # loop so /api/health always answers — remains a separate task.
+      #
+      # RE-LOOSENED 2026-07-14 (11:01:52 incident): 75s was STILL not enough.
+      # One STP save = a ~55s teardown/rebuild burst (double stop/start cycle +
+      # ~100 cron adds + enforcement sends with sync verify sleeps); PostgREST
+      # pool-wedge timeouts stack 5s sync stalls on the same loop. Three saves
+      # back-to-back starved /api/health >75s -> autoheal KILLED the app under
+      # the operator -> his next save died on a dead app ("Failed to fetch").
+      # 10 misses (~2.5min of sustained deafness) still catches a REAL hang but
+      # no longer executes the home for being busy.
       test: ["CMD", "python3", "-c", "import urllib.request,socket; socket.setdefaulttimeout(8); urllib.request.urlopen('http://localhost:5000/api/health', timeout=8)"]
       interval: 15s
       timeout: 10s
-      retries: 5
-      start_period: 40s
+      retries: 10
+      start_period: 60s
 
   # ---------------------------------------------------------------------------
   # PostgreSQL - Database for instances, subscriptions, device cache

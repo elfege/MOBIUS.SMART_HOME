@@ -1858,6 +1858,54 @@ $(document).ready(function () {
      * Shows: name, hub, online status, Maker API match, correction dropdown,
      * commission button.
      */
+    /**
+     * The always-visible header info chips for a discovered-device card
+     * (operator request 2026-07-13: "more info and linked items instead of just
+     * the Online + Node badges"). Surfaces, without expanding the card:
+     *   - status         Online / Offline (CVD-safe: shape + text, blue/red)
+     *   - hub            which hub administers it (home_1 …), linked to the hub
+     *   - hub device id  the device's id ON that hub, linked to its Hubitat page
+     *   - our node       our Matter fabric node id, when commissioned
+     *   - psql id        our local canonical device id — shown ONLY when the
+     *                    payload carries `_canonical_id` (a backend addition,
+     *                    Architect's lane). Forward-compatible: it appears the
+     *                    moment the field is populated, no further UI change.
+     *
+     * CVD: every chip carries a TEXT LABEL and a shape; colour is never the sole
+     * signal, and green is never used (operator is colour-blind).
+     */
+    function deviceHeaderChips(d, statusClass, statusLabel, isCommissioned) {
+        const chips = [];
+        // Status — carried by label + the .online/.offline class (blue/red).
+        chips.push(`<span class="hdr-chip status-badge ${statusClass}">${statusLabel}</span>`);
+
+        // Hub that administers the device (the "hub number"), linked to it.
+        if (d.hub_name || d.hub_ip) {
+            const hubLabel = escapeHtml(d.hub_name || d.hub_ip);
+            chips.push(d.hub_ip
+                ? `<a class="hdr-chip hdr-chip-link" href="http://${escapeHtml(d.hub_ip)}" target="_blank" rel="noopener" title="Open this Hubitat hub">hub: ${hubLabel} ↗</a>`
+                : `<span class="hdr-chip">hub: ${hubLabel}</span>`);
+        }
+
+        // The device's id ON the hub, linked to its Hubitat device page.
+        if (d.hubitat_device_id) {
+            chips.push(`<a class="hdr-chip hdr-chip-link" href="http://${escapeHtml(d.hub_ip)}/device/edit/${d.hubitat_device_id}" target="_blank" rel="noopener" title="Open this device on the Hubitat hub (id ${d.hubitat_device_id})">hub #${d.hubitat_device_id} ↗</a>`);
+        }
+
+        // Our Matter fabric node (when commissioned) — blue, not green.
+        if (isCommissioned && d.our_node_id != null) {
+            chips.push(`<span class="hdr-chip hdr-chip-node" title="In our Matter fabric as node ${d.our_node_id}">node ${d.our_node_id}</span>`);
+        }
+
+        // Our local PostgreSQL canonical id, when the payload provides it.
+        // (Backend field _canonical_id — pending, Architect's lane. Until it is
+        // added this chip is simply absent, so shipping the UI now is safe.)
+        if (d._canonical_id != null) {
+            chips.push(`<a class="hdr-chip hdr-chip-link" href="/?device=${d._canonical_id}" title="Our device record (PostgreSQL id ${d._canonical_id})">db #${d._canonical_id} ↗</a>`);
+        }
+        return chips.join('');
+    }
+
     function renderDiscoveredDevices() {
         const $container = $('#discovered-container');
 
@@ -1868,9 +1916,15 @@ $(document).ready(function () {
             return;
         }
 
+        // Sort by device name, case-insensitive (operator request 2026-07-13).
+        // A stable, locale-aware A→Z ordering; unnamed devices sink to the end.
+        const sorted = discoveredDevices.slice().sort((a, b) =>
+            (a.device_name || '￿').localeCompare(b.device_name || '￿',
+                undefined, { sensitivity: 'base', numeric: true }));
+
         let html = '<div class="device-cards-grid">';
 
-        for (const d of discoveredDevices) {
+        for (const d of sorted) {
             const online = d.is_online;
             const statusClass = online ? 'online' : 'offline';
             const statusLabel = online ? 'Online' : 'Offline';
@@ -1954,13 +2008,12 @@ $(document).ready(function () {
             // info live in the body, where the action row is free to WRAP
             // instead of crushing the name (the earlier ugly per-char wrap).
             html += `
-                <div class="device-card ${statusClass} ${isCommissioned ? 'commissioned' : ''} is-collapsed" data-uid="${uid}">
+                <div class="device-card ${statusClass} ${isCommissioned ? 'commissioned' : ''} ${d.is_native_matter ? 'native-matter' : ''} is-collapsed" data-uid="${uid}">
                     <button type="button" class="device-card-header" aria-expanded="false"
                             title="Click to expand / collapse">
                         <span class="device-card-chevron">&#9656;</span>
                         <strong class="device-card-name">${name}</strong>
-                        <span class="status-badge ${statusClass}">${statusLabel}</span>
-                        ${isCommissioned ? `<span class="badge badge-success" title="In our Matter fabric as node ${d.our_node_id}">Node ${d.our_node_id}</span>` : ''}
+                        ${deviceHeaderChips(d, statusClass, statusLabel, isCommissioned)}
                     </button>
                     <div class="device-card-body">
                         <div class="device-card-actions">

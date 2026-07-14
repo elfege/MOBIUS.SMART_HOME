@@ -302,8 +302,11 @@
 }
 
 .status-badge.online {
-    background: var(--color-state-green-bg);
-    color: var(--color-state-green-text);
+    /* Blue, NOT green — the operator is colour-blind and green is banned.
+       "Online" is still unambiguous: the text label carries it, and offline is
+       red, so status reads by label + luminance, never by hue alone. */
+    background: var(--color-state-blue-bg);
+    color: var(--color-state-blue-text);
 }
 
 .status-badge.offline {
@@ -477,6 +480,53 @@
    ones sit raised, reading as "pending". */
 .device-card:not(.commissioned) {
     background: var(--color-surface, #1c1f27);
+}
+
+/* Always-visible header info chips (operator request 2026-07-13: linked info on
+   every card without expanding). Small, wrap-friendly, CVD-safe — each chip is
+   a labelled pill; colour is never the sole signal and green is never used. */
+.device-card-header .hdr-chip {
+    display: inline-block;
+    padding: 0.1rem 0.45rem;
+    margin-left: 0.35rem;
+    border-radius: var(--radius-small, 4px);
+    font-size: 0.72rem;
+    font-weight: 600;
+    white-space: nowrap;
+    background: var(--color-surface, #1c1f27);
+    color: var(--color-text-muted, #9aa0aa);
+    border: 1px solid var(--color-border);
+}
+/* Linked chips read as actionable: blue text + underline on hover. */
+.device-card-header .hdr-chip-link {
+    color: var(--color-state-blue-text, #9ec2e6);
+    text-decoration: none;
+}
+.device-card-header .hdr-chip-link:hover {
+    text-decoration: underline;
+}
+/* Our-fabric node chip — blue (ours), never green. */
+.device-card-header .hdr-chip-node {
+    background: var(--color-state-blue-bg);
+    color: var(--color-state-blue-text);
+    border-color: var(--color-state-blue-border);
+}
+
+/* NATIVE-MATTER devices (operator request 2026-07-13): commissioned DIRECTLY
+   into our controller with a factory code/QR — we are the primary Matter admin,
+   not a fallback behind Hubitat. Distinct from the two other states:
+     - not commissioned  -> raised neutral surface (see above)
+     - Hubitat-adopted   -> base bg + blue LEFT-BORDER accent (.commissioned)
+     - native Matter      -> a blue-WASHED background + a brighter blue border,
+                            reading as "born here / ours outright".
+   CVD-safe: a luminance+neutral-blue fill plus a border, redundant with the
+   "native" chip the header can carry — never hue-alone, never green.
+   Forward-compatible: the .native-matter class is applied only when the payload
+   sets is_native_matter (a backend flag, Architect's lane). No such device
+   exists yet, so this is dormant styling that activates automatically. */
+.device-card.native-matter {
+    background: var(--color-state-blue-bg, #23303f);
+    border-left: 3px solid var(--color-state-blue-text, #9ec2e6);
 }
 
 /* Header = the full-width clickable accordion toggle (rendered as a <button>). */

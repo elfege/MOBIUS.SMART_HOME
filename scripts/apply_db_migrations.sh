@@ -68,14 +68,25 @@ for mig in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
     if [[ "${seen:-0}" -gt 0 ]]; then
         skip=$((skip+1)); continue
     fi
-    if docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U "$PGUSER" -d "$PGDB" -q < "$mig" >/dev/null 2>&1; then
+    # -1: each migration is ONE transaction — a failure leaves NOTHING behind.
+    # Without it, psql commits statement-by-statement, so a failed file was
+    # half-applied and every later attempt (or the error re-run below, now
+    # removed) collided with its own debris ("schema api already exists" while
+    # the REAL first error was dscore — CI run 1's misleading failure).
+    # Stderr is captured from the ONE attempt; the old path RE-EXECUTED the
+    # migration just to print the error — a double-apply that masked the true
+    # failure behind its own side effects.
+    # Success = EXIT CODE, never stderr-emptiness: NOTICEs ("schema exists,
+    # skipping") also land on stderr and must not fail a good migration.
+    err="$(docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -1 -U "$PGUSER" -d "$PGDB" -q < "$mig" 2>&1 >/dev/null)"; rc=$?
+    if [[ $rc -eq 0 ]]; then
         psql_q -c "INSERT INTO dscore.schema_migrations (filename) VALUES ('$name') ON CONFLICT DO NOTHING;" >/dev/null 2>&1
         echo "${GRN}  ✓ $name${NC}"; ok=$((ok+1))
     else
         # Loud. The old app.py path logged failures as warnings — that is precisely
         # how the schema drifted for months without anyone noticing.
         echo "${RED}  ✗ $name FAILED${NC}"
-        docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U "$PGUSER" -d "$PGDB" -q < "$mig" 2>&1 | grep -i error | head -3 | sed 's/^/      /'
+        printf '%s\n' "$err" | grep -i error | head -3 | sed 's/^/      /'
         bad=$((bad+1))
     fi
 done

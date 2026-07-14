@@ -683,6 +683,17 @@ app.include_router(panel_router)
 from services.matter_hub_port.router import router as matter_hub_port_router  # noqa: E402
 app.include_router(matter_hub_port_router)
 
+# GET CODE (2026-07-13, operator-requested; implemented by the assistant seat,
+# cbfb845/8c5e3c8, landed + wired by Architect). Retrieve or produce a pairing
+# code for ANY device — from the setup-code vault, our own fabric's ECM window,
+# the device's Hubitat ECM window, or by repairing a typed label code against the
+# advertised discriminator; an honest 409 when none applies (a Matter passcode is
+# a SPAKE2+ secret and cannot be conjured from an mDNS advertisement). Opening a
+# window IS a pairing path, so these take the global mutex too. Routes:
+# /api/matter/pairing-code{,/repair,/advertising}.
+from services.matter_pairing_codes.router import router as matter_pairing_code_router  # noqa: E402
+app.include_router(matter_pairing_code_router)
+
 # The ONE global Matter-pairing mutex (a Hubitat/Matter controller pairs a single
 # device at a time). Imported at module level because BOTH the bulk paths and the
 # single-commission endpoint take it — the single path was unguarded until

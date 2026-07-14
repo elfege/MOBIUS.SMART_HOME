@@ -55,6 +55,15 @@
     --color-state-red-text:   #d5a0a0;
     --color-state-red-border: #5a3838;
 
+    /* Dark-theme BLUE state (was only defined for the light theme in
+       variables.css, so blue badges rendered as light-theme colours on the dark
+       surface). Blue is the CVD-safe "online / linked / ours" accent — the
+       operator is colour-blind, so this REPLACES green for the online + node
+       badges. Matched luminance to the green/red pair above. */
+    --color-state-blue-bg:    #23303f;
+    --color-state-blue-text:  #9ec2e6;
+    --color-state-blue-border: #35506e;
+
     /* ---------- radii — kill the giant pills ---------- */
     --radius:       6px;
     --radius-sm:    4px;

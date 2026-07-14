@@ -36,12 +36,14 @@ export class PanelApi {
     return this.t.get('/api/panel/whoami');
   }
 
-  /** Send a device command (requires panel:command). value is optional
-   *  (e.g. setLevel -> 75); the backend wraps it into the commander's arg list. */
+  /** Send a device command (requires panel:command). value is optional:
+   *  a bare scalar (e.g. setLevel -> 75) OR a map (e.g. setColor ->
+   *  {hue,saturation,level}, Hubitat 0-100 scale). The backend wraps it into
+   *  the commander's arg list; the Matter client translates the map natively. */
   command(
     deviceId: number,
     command: string,
-    value?: string | number,
+    value?: string | number | Record<string, number>,
   ): Promise<{ message: string; verified: boolean; status: string }> {
     return this.t.post(`/api/panel/devices/${deviceId}/command`, {
       command,

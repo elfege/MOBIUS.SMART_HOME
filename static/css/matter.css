@@ -171,13 +171,24 @@
 
 .node-actions {
     display: flex;
+    /* WRAP is load-bearing: the cards can shrink to 280px (.nodes-grid
+       minmax), and four buttons — one being the long unbreakable word
+       "Decommission" — cannot fit on one row at that width. Without wrap the
+       row overflows the card's right edge (the bug you saw). With wrap it
+       becomes a clean 2x2 on narrow cards, 4-across on wide ones. */
+    flex-wrap: wrap;
     gap: 0.5rem;
     border-top: 1px solid var(--color-border);
     padding-top: 0.75rem;
 }
 
 .node-actions button {
-    flex: 1;
+    /* A real flex-basis (~one "Decommission" wide) + wrap, instead of `flex: 1`
+       (== 1 1 0). min-width:0 defeats the flexbox default min-width:auto, which
+       pins a flex item to its min-content (an unbreakable word) and is the
+       actual, INVISIBLE cause of the overflow. */
+    flex: 1 1 6rem;
+    min-width: 0;
 }
 
 .node-mapped {
@@ -291,8 +302,11 @@
 }
 
 .status-badge.online {
-    background: var(--color-state-green-bg);
-    color: var(--color-state-green-text);
+    /* Blue, NOT green — the operator is colour-blind and green is banned.
+       "Online" is still unambiguous: the text label carries it, and offline is
+       red, so status reads by label + luminance, never by hue alone. */
+    background: var(--color-state-blue-bg);
+    color: var(--color-state-blue-text);
 }
 
 .status-badge.offline {
@@ -454,6 +468,65 @@
 
 .device-card.online.commissioned {
     border-left: 3px solid var(--color-card-commissioned);
+}
+
+/* NOT-YET-COMMISSIONED devices get a distinct background (operator request
+   2026-07-13). CVD-SAFE by construction: this is a LUMINANCE shift to a lighter
+   neutral surface — NOT a hue — so a colour-blind viewer separates it by
+   brightness, and it is REDUNDANT with the cues already on the card (the
+   status badge text, and the blue left-border + "Node N" badge that ONLY
+   commissioned cards carry). Never hue-alone. Commissioned cards keep the
+   darker base background, reading as "settled in our fabric"; uncommissioned
+   ones sit raised, reading as "pending". */
+.device-card:not(.commissioned) {
+    background: var(--color-surface, #1c1f27);
+}
+
+/* Always-visible header info chips (operator request 2026-07-13: linked info on
+   every card without expanding). Small, wrap-friendly, CVD-safe — each chip is
+   a labelled pill; colour is never the sole signal and green is never used. */
+.device-card-header .hdr-chip {
+    display: inline-block;
+    padding: 0.1rem 0.45rem;
+    margin-left: 0.35rem;
+    border-radius: var(--radius-small, 4px);
+    font-size: 0.72rem;
+    font-weight: 600;
+    white-space: nowrap;
+    background: var(--color-surface, #1c1f27);
+    color: var(--color-text-muted, #9aa0aa);
+    border: 1px solid var(--color-border);
+}
+/* Linked chips read as actionable: blue text + underline on hover. */
+.device-card-header .hdr-chip-link {
+    color: var(--color-state-blue-text, #9ec2e6);
+    text-decoration: none;
+}
+.device-card-header .hdr-chip-link:hover {
+    text-decoration: underline;
+}
+/* Our-fabric node chip — blue (ours), never green. */
+.device-card-header .hdr-chip-node {
+    background: var(--color-state-blue-bg);
+    color: var(--color-state-blue-text);
+    border-color: var(--color-state-blue-border);
+}
+
+/* NATIVE-MATTER devices (operator request 2026-07-13): commissioned DIRECTLY
+   into our controller with a factory code/QR — we are the primary Matter admin,
+   not a fallback behind Hubitat. Distinct from the two other states:
+     - not commissioned  -> raised neutral surface (see above)
+     - Hubitat-adopted   -> base bg + blue LEFT-BORDER accent (.commissioned)
+     - native Matter      -> a blue-WASHED background + a brighter blue border,
+                            reading as "born here / ours outright".
+   CVD-safe: a luminance+neutral-blue fill plus a border, redundant with the
+   "native" chip the header can carry — never hue-alone, never green.
+   Forward-compatible: the .native-matter class is applied only when the payload
+   sets is_native_matter (a backend flag, Architect's lane). No such device
+   exists yet, so this is dormant styling that activates automatically. */
+.device-card.native-matter {
+    background: var(--color-state-blue-bg, #23303f);
+    border-left: 3px solid var(--color-state-blue-text, #9ec2e6);
 }
 
 /* Header = the full-width clickable accordion toggle (rendered as a <button>). */

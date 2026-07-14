@@ -27,12 +27,24 @@ function canToggle(t: Tile): boolean {
     && (t.tile_type === 'switch' || t.tile_type === 'dimmer' || t.tile_type === 'color');
 }
 
+/** Does this tile open the dimmer/RGB modal on long-press? */
+function isDimmable(t: Tile): boolean {
+  return t.tile_type === 'dimmer' || t.tile_type === 'color';
+}
+
 /** Short state line under the label. */
 function stateLine(t: Tile): string {
   const v = t.primary_value ?? '—';
   switch (t.tile_type) {
     case 'dimmer':
-      return v === 'on' ? `${t.attributes['level'] ?? '?'}%` : 'off';
+    case 'color': {
+      // Level% ONLY when the switch is on AND level>0 (the "bunk-bed rule":
+      // a bulb reporting level=98 while switch=off must read OFF, and
+      // switch=on + level=0 also reads OFF). Verbatim from the original.
+      const on = (t.primary_value ?? 'off').toLowerCase() === 'on';
+      const lvl = Number(t.attributes['level'] ?? 0);
+      return on && lvl > 0 ? `${lvl}%` : 'OFF';
+    }
     case 'thermostat':
       return `${t.attributes['temperature'] ?? v}°`;
     default:
@@ -43,9 +55,12 @@ function stateLine(t: Tile): string {
 export const DeviceTile = memo(function DeviceTile({
   tile,
   onToggle,
+  onOpen,
 }: {
   tile: Tile;
   onToggle: (t: Tile) => void;
+  /** Long-press handler — opens the dimmer/RGB modal for dimmable tiles. */
+  onOpen: (t: Tile) => void;
 }) {
   const active = isActive(tile);
   const body = (
@@ -67,7 +82,18 @@ export const DeviceTile = memo(function DeviceTile({
       </View>
     </View>
   );
-  return canToggle(tile) ? <Pressable onPress={() => onToggle(tile)}>{body}</Pressable> : body;
+  if (!canToggle(tile)) return body;
+  // Dimmable tiles: short-tap toggles, long-press opens the dimmer/RGB modal
+  // (500ms, matching the original). Non-dimmable switch tiles: tap only.
+  return (
+    <Pressable
+      onPress={() => onToggle(tile)}
+      onLongPress={isDimmable(tile) ? () => onOpen(tile) : undefined}
+      delayLongPress={500}
+    >
+      {body}
+    </Pressable>
+  );
 });
 
 const styles = StyleSheet.create({

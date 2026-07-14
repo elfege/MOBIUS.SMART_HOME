@@ -725,10 +725,18 @@ class DeviceCommander:
                         # admin.send_command expects (device_id, command, argument)
                         # where argument is a single value. args is a list;
                         # if non-empty, use the first element.
+                        #
+                        # DO NOT str() A MAP (2026-07-13). setColor's argument is
+                        # a COLOR MAP ({hue,saturation,level}); str()-ing it here
+                        # produced a Python repr ("{'hue': 66, ...}") that Hubitat
+                        # cannot bind to a Map parameter, so RGB never worked over
+                        # the admin path. Dicts now pass through intact and
+                        # _build_runmethod_args emits them as a JSON_OBJECT arg.
                         arg = args[0] if args else None
-                        arg_str = str(arg) if arg is not None else None
+                        if arg is not None and not isinstance(arg, dict):
+                            arg = str(arg)
                         send_ok = admin.send_command(
-                            int(effective_device_id), command, arg_str,
+                            int(effective_device_id), command, arg,
                         )
                         if send_ok:
                             logger.info(
@@ -1214,30 +1222,61 @@ class DeviceCommander:
         self, device_id, command: str, args: Optional[List],
     ) -> None:
         """
-        Best-effort: mirror a Matter-applied command into our device_cache so
-        downstream apps don't depend on the hub's (possibly zombie) bridge
+        Best-effort: mirror a Matter-applied command into BOTH state stores so
+        downstream readers don't depend on the hub's (possibly zombie) bridge
         emitting the event. Never raises.
+
+        Two stores, both required:
+          * device_cache — what apps/automations read.
+          * dshub.devices.attributes — the CANONICAL row the panel roster
+            (GET /api/panel/devices) and the dashboard read. Before 2026-07-13
+            only device_cache was updated, so a Matter-verified command left
+            the roster stale until a hub event happened to land: the operator
+            turned Light Desk off over Matter, the light went off, and the
+            panel snapped back to 'on' — locking him out of toggling. The
+            attribute merge below is exactly what the webhook_router does for
+            hub events, done at the moment WE are the source of truth.
         """
+        # (attribute, value) pairs this command implies — shared by both writes.
+        updates: List[tuple] = []
+        if command in ("on", "off"):
+            updates.append(("switch", command))
+        elif command == "setLevel" and args:
+            updates.append(("switch", "on"))
+            updates.append(("level", int(args[0])))
+        elif command == "setColorTemperature" and args:
+            updates.append(("colorTemperature", int(args[0])))
+        elif command == "setColor" and args and isinstance(args[0], dict):
+            if "hue" in args[0]:
+                updates.append(("hue", int(args[0]["hue"])))
+            if "saturation" in args[0]:
+                updates.append(("saturation", int(args[0]["saturation"])))
+        if not updates:
+            return
         try:
             from services.device_cache import get_default_cache
             cache = get_default_cache()
-            if command in ("on", "off"):
-                cache.update_device_attribute(device_id, "switch", command)
-            elif command == "setLevel" and args:
-                cache.update_device_attribute(device_id, "switch", "on")
-                cache.update_device_attribute(device_id, "level", int(args[0]))
-            elif command == "setColorTemperature" and args:
-                cache.update_device_attribute(
-                    device_id, "colorTemperature", int(args[0]))
-            elif command == "setColor" and args and isinstance(args[0], dict):
-                if "hue" in args[0]:
-                    cache.update_device_attribute(
-                        device_id, "hue", int(args[0]["hue"]))
-                if "saturation" in args[0]:
-                    cache.update_device_attribute(
-                        device_id, "saturation", int(args[0]["saturation"]))
+            for attr, val in updates:
+                cache.update_device_attribute(device_id, attr, val)
         except Exception:
             pass
+        try:
+            # Canonical row: single JSONB merge via PostgREST (device_id here is
+            # the canonical dshub.devices.id — the id space every caller passes).
+            import requests as _rq
+            pg = os.environ.get("POSTGREST_URL", "http://postgrest:3001")
+            merged = {attr: str(val) for attr, val in updates}
+            r = _rq.get(f"{pg}/devices",
+                        params={"id": f"eq.{device_id}", "select": "attributes"},
+                        timeout=3)
+            if r.status_code == 200 and r.json():
+                attrs = r.json()[0].get("attributes") or {}
+                attrs.update(merged)
+                _rq.patch(f"{pg}/devices",
+                          params={"id": f"eq.{device_id}"},
+                          json={"attributes": attrs}, timeout=3)
+        except Exception as e:
+            logger.debug(f"matter state push to devices.attributes failed: {e}")
 
 
 # =========================================================================

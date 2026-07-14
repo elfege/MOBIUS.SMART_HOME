@@ -43,6 +43,97 @@ SCRIPT_R_PATH=$(realpath "${BASH_SOURCE[0]}")
 SCRIPT_DIR="${SCRIPT_R_PATH%${SCRIPT_NAME}}"
 builtin cd "$SCRIPT_DIR" &>/dev/null || true
 
+# ─────────────────────────────────────────────────────────────────────────────
+# --test : bring up the ETT TEST STACK and return (canonical ETT; NVR ref impl).
+#
+# SAME compose file as prod, but: project name `smarthome_test` (own volumes ->
+# fresh empty DB), .env.test (dummy tokens, unroutable hub IPs, +1000 ports,
+# EVENTSOCKET_ENABLED=false, container prefix), and ONLY the four core services
+# (smart-home postgres postgrest nginx) — no matter-server, no autoheal, no
+# webhook-dispatcher. Layered so the test stack can NEVER act on the live house.
+# No AWS pull: .env.test is self-sufficient (nothing in it is secret).
+# ─────────────────────────────────────────────────────────────────────────────
+if [[ "${1:-}" == "--test" ]]; then
+	set -uo pipefail
+	if [[ ! -f .env.test ]]; then
+		echo "ERROR: .env.test not found at $(pwd).env.test" >&2
+		exit 1
+	fi
+	# ---------------------------------------------------------------------
+	# SAFETY ASSERTION — refuse to run if the test stack is pointed at ANY
+	# live resource. compose declares postgres_data + smarthome-net as
+	# EXTERNAL + FIXED-NAME (not project-scoped), so without the .env.test
+	# overrides a `-p smarthome_test` bring-up mounts the LIVE DATABASE and
+	# joins the LIVE NETWORK. That happened once (2026-07-13); a second
+	# postmaster ran on the operator's live data dir and survived only by
+	# luck. Never again: assert, then start.
+	# ---------------------------------------------------------------------
+	_vol="$(grep -E '^POSTGRES_VOLUME_NAME=' .env.test | cut -d= -f2)"
+	_net="$(grep -E '^NETWORK_NAME=' .env.test | cut -d= -f2)"
+	if [[ -z "$_vol" || -z "$_net" ]]; then
+		echo "ABORT: .env.test must set POSTGRES_VOLUME_NAME and NETWORK_NAME." >&2
+		echo "Without them the test stack mounts the LIVE database volume." >&2
+		exit 1
+	fi
+	if [[ "$_vol" == "0_smart_home_postgres_data" || "$_vol" != *test* ]]; then
+		echo "ABORT: POSTGRES_VOLUME_NAME='$_vol' is (or may be) the LIVE volume." >&2
+		exit 1
+	fi
+	if [[ "$_net" == "smarthome_smarthome-net" || "$_net" != *test* ]]; then
+		echo "ABORT: NETWORK_NAME='$_net' is (or may be) the LIVE network." >&2
+		exit 1
+	fi
+	# External volumes/networks are never auto-created by compose — make ours.
+	docker volume create "$_vol" >/dev/null 2>&1 || true
+	docker network create "$_net" >/dev/null 2>&1 || true
+	echo "Test stack isolation: volume=$_vol network=$_net (live stack untouchable)"
+
+	# ORDER MATTERS. Bring up ONLY postgres first, migrate it, then NEUTER the
+	# hub config, and only THEN start the app. Rationale (learned the hard way,
+	# 2026-07-13): the app reads its hubs from dshub.hub_config — NOT from env —
+	# and migration 011 legitimately seeds the REAL hub IPs (that seed is correct
+	# for prod). So a test app booted against a migrated DB reads the operator's
+	# REAL hub IPs, and because his hubs run with Login Security OFF, the dummy
+	# tokens in .env.test stop nothing: the first --test bring-up pulled 259
+	# real devices off <LAN_IP>/70/71. Env guards were never even consulted.
+	echo "Bringing up smarthome_test postgres..."
+	docker compose -p smarthome_test --env-file .env.test up -d --wait postgres
+
+	# Migrations: psql/02-apply-migrations.sh only runs at postgres VOLUME
+	# CREATION; a REUSED test volume would silently miss newer migrations, so
+	# reconcile through the one runner on every --test start (idempotent).
+	bash scripts/apply_db_migrations.sh smarthome_test_smarthome-postgres \
+		smarthome_api smarthome || true
+
+	# NEUTER THE HUBS — the guard that actually works, applied at the layer the
+	# app actually reads, BEFORE the app exists. Every hub is repointed at
+	# TEST-NET-1 (RFC 5737, unroutable by definition) and its token env-var
+	# reference is blanked, so the test stack cannot reach any real hub even if
+	# every other guard fails.
+	docker exec smarthome_test_smarthome-postgres psql -U smarthome_api -d smarthome -q -c \
+		"UPDATE dshub.hub_config SET hub_ip = '192.0.2.' || id, maker_api_token_env = 'TEST_NO_TOKEN';" \
+		>/dev/null 2>&1 || true
+	_real=$(docker exec smarthome_test_smarthome-postgres psql -U smarthome_api -d smarthome -tAc \
+		"SELECT count(*) FROM dshub.hub_config WHERE hub_ip LIKE '192.168.%';" 2>/dev/null || echo "?")
+	if [[ "$_real" != "0" ]]; then
+		echo "ABORT: test DB still lists REAL hub IPs (${_real} rows). Refusing to start the app." >&2
+		docker compose -p smarthome_test --env-file .env.test down >/dev/null 2>&1
+		exit 1
+	fi
+	echo "Hubs neutered in the test DB (0 real hub IPs remain) — safe to start the app."
+
+	echo "Bringing up the rest of the test stack..."
+	docker compose -p smarthome_test --env-file .env.test up -d --wait \
+		smart-home postgrest nginx
+	echo ""
+	docker compose -p smarthome_test --env-file .env.test ps \
+		--format "table {{.Service}}\t{{.Status}}\t{{.Ports}}"
+	echo ""
+	echo "Test app:   http://localhost:6001   (nginx: http 9082 / https 9445)"
+	echo "Run tests:  ./test.sh    Stop: ./stop.sh --test"
+	exit 0
+fi
+
 # Color + logger helpers: home copy preferred, in-repo copy as fallback, tolerated absent.
 . ~/.env.colors 2>/dev/null || . "${SCRIPT_DIR}.env.colors" 2>/dev/null || true
 . ~/logger.sh --no-exec &>/dev/null || . "${SCRIPT_DIR}logger.sh" --no-exec &>/dev/null || true

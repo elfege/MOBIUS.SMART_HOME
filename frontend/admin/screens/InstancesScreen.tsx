@@ -101,10 +101,15 @@ export function InstancesScreen() {
 
   const pausedCount = order.filter((id) => instances[id]?.is_paused).length;
 
+  const goHome = useNav((s) => s.goHome);
+
   return (
     <View style={styles.root}>
       <View style={styles.header}>
-        <Text style={styles.title}>MOBIUS Admin</Text>
+        <Pressable onPress={goHome} hitSlop={8}>
+          <Text style={styles.backLink}>‹ Home</Text>
+        </Pressable>
+        <Text style={styles.title}>Automations</Text>
         <Text style={styles.dim}>
           {order.length} automations · {pausedCount} paused
           {status === 'loading' ? ' · loading…' : ''}
@@ -171,6 +176,7 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg, paddingTop: 40 },
   header: { paddingHorizontal: space.lg, paddingBottom: space.md },
   title: { color: colors.text, fontSize: 26, fontWeight: '700', letterSpacing: 0.5 },
+  backLink: { color: colors.accent, fontSize: 14, fontWeight: '600', marginBottom: space.xs },
   dim: { color: colors.textFaint, fontSize: 13, marginTop: space.xs },
   scroll: { padding: space.lg, gap: space.lg },
   section: { marginBottom: space.lg },

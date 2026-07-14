@@ -64,7 +64,10 @@
                 <a href="/instance/new" class="nav-link btn-add">+ Automation</a>
                 <a href="/samsung-tv/manage" class="nav-link btn-add">+ Device</a>
                 <span class="nav-sep"></span>
-                <a href="https://mobius.tiles" class="nav-link nav-app">TILES</a>
+                {# TILES opens in a NEW TAB (operator 2026-07-13): the panel is a
+                   destination surface (wall-tablet UI), not an admin page — leaving
+                   the admin app to visit it would lose the operator's context. #}
+                <a href="https://mobius.tiles" target="_blank" rel="noopener" class="nav-link nav-app">TILES</a>
                 <a href="https://mobius.nvr" class="nav-link nav-app">NVR</a>
                 <span class="nav-sep"></span>
                 {# Location-mode selector — change the Hubitat location mode from

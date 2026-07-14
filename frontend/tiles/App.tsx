@@ -8,9 +8,9 @@
  * commander, Matter-first-then-Hubitat). Freshness by ~12s polling for the proto
  * (see shared/ws.ts for why WS live-updates are a coordinated follow-on).
  *
- * Auth for the proto: an enrolled panel Bearer token, pasted once and stored
- * (shared/auth). The zero-touch wall-tablet LAN bootstrap is a later backend
- * addition; a paste-once flow keeps the proto pure-frontend / zero-restart.
+ * Auth: zero-touch on the trusted LAN — with no stored token the app calls
+ * POST /api/panel/session/bootstrap and stores the minted token (shared/auth).
+ * Off-LAN (bootstrap 403) it falls back to a paste-once token screen.
  */
 import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect, useState } from 'react';
@@ -27,6 +27,8 @@ import { getToken, setToken } from '../shared/auth';
 import { colors, radius, space } from '../shared/tokens';
 import { TransportError } from '../shared/transport';
 import { DeviceTile } from './components/DeviceTile';
+import { DimmerModal } from './components/DimmerModal';
+import { LogoMark } from './components/LogoMark';
 import { PanelApi } from './core/panel-api';
 import type { Tile } from './core/panel-types';
 import { useTilesStore } from './core/store';
@@ -43,6 +45,8 @@ export default function App() {
   const setStatus = useTilesStore((s) => s.setStatus);
   const setPrimaryValue = useTilesStore((s) => s.setPrimaryValue);
   const [tokenInput, setTokenInput] = useState('');
+  // Which tile's dimmer/RGB modal is open (canonical id), or null.
+  const [openTileId, setOpenTileId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     // Wall-tablet zero-touch: with no stored token, try the trusted-LAN
@@ -104,12 +108,16 @@ export default function App() {
     (bySection[tile.section_slug] ??= []).push(id);
   }
   const onCount = order.filter((id) => (tiles[id]?.primary_value ?? '').toLowerCase() === 'on').length;
+  const openTile = openTileId != null ? tiles[openTileId] : undefined;
 
   if (status === 'unauthorized') {
     return (
       <View style={styles.center}>
         <StatusBar style="light" />
-        <Text style={styles.title}>MOBIUS</Text>
+        <View style={styles.brandRow}>
+          <LogoMark size={26} />
+          <Text style={styles.title}>MOBIUS.TILES</Text>
+        </View>
         <Text style={styles.dim}>Enter this panel&apos;s access token</Text>
         <TextInput
           style={styles.input}
@@ -132,7 +140,10 @@ export default function App() {
     <View style={styles.root}>
       <StatusBar style="light" />
       <View style={styles.header}>
-        <Text style={styles.title}>MOBIUS</Text>
+        <View style={styles.brandRow}>
+          <LogoMark size={26} />
+          <Text style={styles.title}>MOBIUS.TILES</Text>
+        </View>
         <Text style={styles.dim}>
           {order.length} devices · {onCount} on{status === 'loading' ? ' · loading…' : ''}
         </Text>
@@ -156,7 +167,12 @@ export default function App() {
                   {ids.map((id) => {
                     const tile = tiles[id];
                     return tile ? (
-                      <DeviceTile key={id} tile={tile} onToggle={onToggle} />
+                      <DeviceTile
+                        key={id}
+                        tile={tile}
+                        onToggle={onToggle}
+                        onOpen={(t) => setOpenTileId(t.id)}
+                      />
                     ) : null;
                   })}
                 </View>
@@ -165,6 +181,13 @@ export default function App() {
           })}
         </ScrollView>
       )}
+      {openTile ? (
+        <DimmerModal
+          tile={openTile}
+          visible
+          onClose={() => { setOpenTileId(null); void load(); }}
+        />
+      ) : null}
     </View>
   );
 }
@@ -172,6 +195,7 @@ export default function App() {
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg, paddingTop: 40 },
   header: { paddingHorizontal: space.lg, paddingBottom: space.md },
+  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   title: { color: colors.text, fontSize: 26, fontWeight: '700', letterSpacing: 0.5 },
   dim: { color: colors.textFaint, fontSize: 13, marginTop: space.xs },
   scroll: { padding: space.lg, gap: space.lg },

@@ -1,0 +1,392 @@
+"""
+matter_pairing_codes.sources — WHERE a working pairing code can come from.
+
+There are exactly FOUR ways to hold a code for a Matter device, and one very
+common situation where NONE of them apply. Encoding that honestly is the whole
+point of this module: the UI must never offer a button that cannot work.
+
+  A. OUR FABRIC (ecm_our_fabric) — we already administer the node in our own
+     matter-server, so we can command it to open a fresh commissioning window
+     (AdministratorCommissioning cluster / ECM). Returns a BRAND-NEW code, valid
+     for the window only. Requires no knowledge of the factory code.
+
+  B. HUBITAT FABRIC (ecm_hubitat) — a Hubitat hub administers it, so the hub can
+     open the window for us (GET /hub/matter/openPairingWindow?node=). Same call
+     the hub->hub COPY orchestrator and Commission All already use.
+
+  C. VAULT (vault_factory) — the device's FACTORY code, captured at commissioning
+     time and stored encrypted (services/matter_code_vault + dshub.
+     matter_device_codes). Only available for devices commissioned AFTER the
+     vault went live; a factory code cannot be recovered retroactively.
+
+  D. LABEL REPAIR (repaired_label) — the operator supplies the printed code and
+     the device is advertising a DIFFERENT discriminator than the label
+     (post-reboot drift). We keep the passcode and re-encode against reality
+     (manual_code.repair).
+
+  NONE OF THE ABOVE — a device we administer nowhere, with no vault entry and no
+  label in hand, is CRYPTOGRAPHICALLY UNREACHABLE. Its passcode is a SPAKE2+
+  secret that lives only in the device and on its label; mDNS advertises the
+  DISCRIMINATOR (which device) but never the PASSCODE (the key). No fabric means
+  no admin rights, which means no window can be opened. There is no derivation,
+  no generation, no brute force — that impossibility IS Matter's security model.
+  This module returns an explanatory UnreachableCode instead of pretending.
+"""
+
+import logging
+import os
+from typing import Any, Dict, List, NamedTuple, Optional
+
+import requests
+
+from services.matter_pairing_codes import manual_code
+
+logger = logging.getLogger(__name__)
+
+# The commissioning window a generated code stays valid for (§9 of the hub-port
+# plan settled 5 minutes for the two-hub round trip; same value here).
+DEFAULT_WINDOW_S = 300
+
+
+async def _hold_pairing_lock_for_window(holder: str, detail: str,
+                                        window_s: int) -> None:
+    """Take the GLOBAL Matter-pairing mutex for the LIFETIME OF A WINDOW.
+
+    OPENING A PAIRING WINDOW IS A PAIRING PATH. The operator's invariant (a
+    Matter radio handles ONE pairing at a time, fleet-wide — plan §4) is violated
+    just as hard by two open windows as by two concurrent commissions: a hub
+    holding a window for device D while Commission All opens one for device E is
+    the storm the mutex exists to prevent.
+
+    WHY NOT the `matter_pairing_lock` context manager: it releases when the block
+    exits — but the window we opened stays open for `window_s` AFTER this call
+    returns. So we acquire with ttl_s = window_s and deliberately DO NOT release;
+    the lock self-expires exactly when the window does. Releasing early would
+    reopen the storm we just closed.
+
+    Raises PairingLockBusy (-> HTTP 409, naming the holder) when another pairing
+    is in flight.
+
+    NOTE: this reaches into matter_pairing_lock._try_acquire_sync because the
+    module exposes no public acquire-without-release. Flagged to the module's
+    owner for promotion to a public `acquire_for_window()`.
+    """
+    import asyncio
+
+    from services.matter_pairing_lock import PairingLockBusy, _try_acquire_sync
+
+    got = await asyncio.to_thread(_try_acquire_sync, holder, detail, int(window_s))
+    if not got.get("acquired"):
+        raise PairingLockBusy(
+            f"Matter pairing is already in progress "
+            f"({got.get('holder')}: {got.get('holder_detail') or '—'}) — "
+            f"opening another pairing window now would storm the radio. "
+            f"It frees up at {got.get('expires_at') or 'its timeout'}.")
+
+
+class CodeResult(NamedTuple):
+    """A working pairing code plus the provenance the UI must show.
+
+    `manual` is always the 11-digit code; `qr` is the MT:… string when the
+    source produced one (our fabric does; Hubitat's window does not).
+    `expires_in_s` is None for a factory code (it never expires).
+    """
+    manual: str
+    qr: Optional[str]
+    source: str          # ecm_our_fabric | ecm_hubitat | vault_factory | repaired_label
+    detail: str          # human-readable provenance for the modal
+    expires_in_s: Optional[int]
+
+
+class UnreachableCode(RuntimeError):
+    """No code source applies (the case-D impossibility). The message is written
+    for the operator, not the log: it says WHY and what to do instead."""
+
+
+# ---------------------------------------------------------------------------
+# A. Our own fabric — open a fresh window on a node we administer.
+# ---------------------------------------------------------------------------
+async def from_our_fabric(node_id: int,
+                          window_s: int = DEFAULT_WINDOW_S) -> CodeResult:
+    """Ask our matter-server to open a commissioning window on one of OUR nodes.
+
+    matter-server command: open_commissioning_window {node_id, timeout}
+                        -> {manualCode, qrCode}   (verified in-image 2026-07-13)
+
+    GATED: holds the global pairing mutex for the window's lifetime — opening a
+    window IS a pairing path (see _hold_pairing_lock_for_window). Raises
+    PairingLockBusy (-> 409) if another pairing is in flight.
+    """
+    from services.matter_client import get_matter_client
+
+    await _hold_pairing_lock_for_window(
+        "get_code_our_fabric", f"window open on node {node_id}", window_s)
+
+    client = get_matter_client()
+    if not client.is_connected:
+        if not await client.connect():
+            raise RuntimeError("matter-server is unreachable")
+
+    resp = await client._send_command(  # noqa: SLF001 — the generic command path
+        "open_commissioning_window",
+        {"node_id": int(node_id), "timeout": int(window_s)},
+    )
+    # WIRE FORMAT (verified against the running matter-server, 2026-07-13):
+    #   {"setup_pin_code": 39699213,
+    #    "setup_manual_code": "10078124235",
+    #    "setup_qr_code": "MT:S0FT0QTM00TB684XV00"}
+    # NOT the camelCase {manualCode, qrCode} of the TypeScript type — the WS
+    # layer renames on the way out. The camelCase names are still accepted below
+    # in case a future server version emits them.
+    manual = (resp.get("setup_manual_code") or resp.get("manual_code")
+              or resp.get("manualCode"))
+    qr = (resp.get("setup_qr_code") or resp.get("qr_code") or resp.get("qrCode"))
+    if not manual:
+        raise RuntimeError(f"matter-server returned no code: {resp!r}")
+    return CodeResult(
+        manual=manual_code.normalize(manual),
+        qr=qr,
+        source="ecm_our_fabric",
+        detail=f"Fresh code generated by our controller for node {node_id} "
+               f"(valid {window_s // 60} min).",
+        expires_in_s=window_s,
+    )
+
+
+# ---------------------------------------------------------------------------
+# B. A Hubitat fabric — the hub opens the window for its own device.
+# ---------------------------------------------------------------------------
+async def from_hubitat(hub_ip: str, hub_node_id: int,
+                       hub_name: str = "",
+                       window_s: int = DEFAULT_WINDOW_S) -> CodeResult:
+    """Open a pairing window on the Hubitat hub that administers the device.
+
+    GATED: holds the global pairing mutex for the window's lifetime — a hub
+    holding an open window is exactly the "source-busy" state the operator's
+    one-device-at-a-time invariant forbids overlapping (plan §4). Raises
+    PairingLockBusy (-> 409) if another pairing is in flight.
+
+    The hub call itself is blocking `requests`, so it runs in a thread (the
+    single-worker event-loop rule).
+    """
+    import asyncio
+
+    await _hold_pairing_lock_for_window(
+        "get_code_hubitat",
+        f"window open on {hub_name or hub_ip} node {hub_node_id}", window_s)
+
+    return await asyncio.to_thread(
+        _open_hubitat_window, hub_ip, hub_node_id, hub_name)
+
+
+def _open_hubitat_window(hub_ip: str, hub_node_id: int,
+                         hub_name: str = "") -> CodeResult:
+    """The blocking half of from_hubitat (runs in a thread; lock already held)."""
+    resp = requests.get(
+        f"http://{hub_ip}/hub/matter/openPairingWindow",
+        params={"node": hub_node_id},
+        timeout=30,
+    )
+    if not resp.ok:
+        raise RuntimeError(
+            f"hub {hub_name or hub_ip} returned HTTP {resp.status_code} "
+            f"opening the pairing window")
+    try:
+        data = resp.json()
+    except ValueError:
+        data = resp.text.strip()
+    code = None
+    if isinstance(data, dict):
+        code = data.get("setupCode") or data.get("code") or data.get("pairingCode")
+    elif isinstance(data, str):
+        code = data
+    if not code:
+        raise RuntimeError(f"no setup code in the hub's response: {data!r}")
+    return CodeResult(
+        manual=manual_code.normalize(code),
+        qr=None,  # Hubitat's window returns the numeric code only
+        source="ecm_hubitat",
+        detail=f"Fresh code opened by {hub_name or hub_ip} (its own Matter "
+               f"fabric administers this device). Short-lived — use it now.",
+        expires_in_s=None,  # hub-controlled TTL, not reported by the endpoint
+    )
+
+
+# ---------------------------------------------------------------------------
+# C. The vault — the device's FACTORY code, if we captured it.
+# ---------------------------------------------------------------------------
+def from_vault(unique_id: Optional[str] = None,
+               mac: Optional[str] = None) -> Optional[CodeResult]:
+    """The stored factory code for this device, or None if we never captured it.
+
+    Returns None (not an exception) when absent — absence is the normal case for
+    everything commissioned before the vault went live, and the caller simply
+    moves on to the next source.
+    """
+    from services import matter_code_vault
+
+    if not matter_code_vault.is_available():
+        return None  # no key in the container -> the vault is inert
+
+    filters: List[str] = []
+    params: Dict[str, Any] = {}
+    if unique_id:
+        filters.append("unique_id = %(unique_id)s")
+        params["unique_id"] = unique_id
+    if mac:
+        filters.append("lower(mac) = lower(%(mac)s)")
+        params["mac"] = mac
+    if not filters:
+        return None
+
+    from services.matter_hub_port.db import connect  # same psycopg2 helper
+
+    conn = connect()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT code_ciphertext, nonce, device_name, is_factory_code
+                      FROM dshub.matter_device_codes
+                     WHERE {' OR '.join(filters)}
+                     ORDER BY is_factory_code DESC, updated_at DESC
+                     LIMIT 1""",
+                params)
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+
+    ciphertext, nonce, device_name, is_factory = row
+    plaintext = matter_code_vault.decrypt(bytes(ciphertext), bytes(nonce))
+    if not plaintext:
+        logger.warning("vault row found for %s but decryption failed "
+                       "(key rotated?)", unique_id or mac)
+        return None
+    return CodeResult(
+        manual=manual_code.normalize(plaintext),
+        qr=plaintext if plaintext.upper().startswith("MT:") else None,
+        source="vault_factory",
+        detail=f"The device's original FACTORY code, captured when it was first "
+               f"commissioned{' — ' + device_name if device_name else ''}. "
+               f"Never expires.",
+        expires_in_s=None,
+    ) if is_factory else CodeResult(
+        manual=manual_code.normalize(plaintext),
+        qr=None,
+        source="vault_factory",
+        detail="A stored (non-factory) code for this device.",
+        expires_in_s=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# D. Label repair — the operator has the printed code; the device drifted.
+# ---------------------------------------------------------------------------
+async def discover_commissionable() -> List[Dict[str, Any]]:
+    """Devices currently ADVERTISING as commissionable on the LAN.
+
+    Asks the MATTER-SERVER to browse mDNS (command:
+    discover_commissionable_nodes -> [{long_discriminator, addresses, vendor_id,
+    product_id, device_name, commissioning_mode, ...}], verified in-image
+    2026-07-13). Deliberately NOT avahi-browse: that binary does NOT EXIST in
+    the app container, so a subprocess call would silently return "nothing is
+    advertising" — the exact class of lying-empty-result this feature exists to
+    kill. The matter-server runs on the host network and owns the mDNS stack.
+
+    Each entry: {ip, discriminator, short_discriminator, vendor_id, product_id,
+    device_name}. Only devices with commissioning_mode != 0 (actually pairable)
+    are returned. Best-effort: [] when the matter-server is unreachable.
+    """
+    from services.matter_client import get_matter_client
+
+    try:
+        client = get_matter_client()
+        if not client.is_connected and not await client.connect():
+            logger.warning("matter-server unreachable — cannot browse mDNS")
+            return []
+        found = await client._send_command("discover_commissionable_nodes")  # noqa: SLF001
+    except Exception as e:  # noqa: BLE001 — discovery is advisory, never fatal
+        logger.warning("mDNS discovery via matter-server failed: %s", e)
+        return []
+
+    if not isinstance(found, list):
+        found = found.get("devices", []) if isinstance(found, dict) else []
+
+    out: List[Dict[str, Any]] = []
+    for dev in found:
+        if not isinstance(dev, dict):
+            continue
+        if not dev.get("commissioning_mode"):
+            continue  # 0 = not currently pairable
+        discriminator = dev.get("long_discriminator")
+        if discriminator is None:
+            continue
+        # Prefer an IPv4 address for the operator-facing message.
+        addresses = dev.get("addresses") or []
+        ips = [a.get("ip") if isinstance(a, dict) else str(a) for a in addresses]
+        ipv4 = next((ip for ip in ips if ip and "." in ip and "%" not in ip), None)
+        out.append({
+            "ip": ipv4 or (ips[0] if ips else dev.get("host_name", "?")),
+            "discriminator": int(discriminator),
+            "short_discriminator": manual_code.short_discriminator_of(int(discriminator)),
+            "vendor_id": dev.get("vendor_id"),
+            "product_id": dev.get("product_id"),
+            "device_name": dev.get("device_name"),
+        })
+    return out
+
+
+async def repair_label_code(label_code: str) -> CodeResult:
+    """Make an operator-supplied label code target the device that is ACTUALLY
+    advertising right now (the 2026-07-13 plug rescue, automated).
+
+    Raises InvalidPairingCode on a mistyped code, and UnreachableCode when no
+    commissionable device is advertising at all (nothing to repair against —
+    the device is not in pairing mode).
+    """
+    decoded = manual_code.decode(label_code)  # raises on typo -> honest error
+    advertising = await discover_commissionable()
+
+    if not advertising:
+        raise UnreachableCode(
+            "No device is advertising as commissionable on the network right "
+            "now, so there is nothing to pair with. Put the device into pairing "
+            "mode (factory-reset it if unsure) and try again.")
+
+    # Exact match already? Then the label code is correct as printed.
+    for dev in advertising:
+        if dev["short_discriminator"] == decoded.short_discriminator:
+            return CodeResult(
+                manual=manual_code.normalize(label_code),
+                qr=None,
+                source="repaired_label",
+                detail=f"Your label code already matches the device advertising "
+                       f"at {dev['ip']} (discriminator {dev['discriminator']}). "
+                       f"No repair needed.",
+                expires_in_s=None,
+            )
+
+    # Exactly one candidate -> repair against it. Several -> refuse to guess.
+    if len(advertising) > 1:
+        listing = ", ".join(f"{d['ip']} (D={d['discriminator']})" for d in advertising)
+        raise UnreachableCode(
+            f"{len(advertising)} devices are in pairing mode and none matches "
+            f"your code's discriminator ({decoded.short_discriminator}): "
+            f"{listing}. Power down the ones you are not pairing, then retry — "
+            f"guessing which one your code belongs to could pair the wrong device.")
+
+    dev = advertising[0]
+    fixed = manual_code.repair(label_code, dev["discriminator"])
+    return CodeResult(
+        manual=fixed,
+        qr=None,
+        source="repaired_label",
+        detail=(
+            f"Your label code targets discriminator {decoded.short_discriminator}, "
+            f"but the only device in pairing mode ({dev['ip']}) advertises "
+            f"{dev['discriminator']} (short {dev['short_discriminator']}) — its "
+            f"discriminator drifted, typically after an interrupted pairing. "
+            f"Same passcode, re-encoded to match reality."),
+        expires_in_s=None,
+    )

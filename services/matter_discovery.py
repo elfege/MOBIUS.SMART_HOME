@@ -342,7 +342,37 @@ class MatterDiscoveryService:
         have exceeded MAX_COMMISSION_ATTEMPTS or are still in backoff cooldown.
 
         Returns number successfully commissioned.
+
+        GATED (operator directive, 2026-07-13: "two pairing storms on one radio
+        must be STRICTLY gated"). This method currently has NO callers — the
+        background scan loop does not invoke it — but it opens pairing windows
+        and calls commission_with_code, so as written it was a BYPASS waiting to
+        be wired up: a background auto-commissioner could storm the radio while
+        the operator commissions by hand. Internal concurrency-of-1 is not enough;
+        the constraint is fleet-wide, across every feature. So it now takes the
+        SAME global mutex as every other pairing path (manual, single-auto,
+        Commission All, hub->hub copy) and gives up rather than contend.
         """
+        import requests as req
+        from services.matter_pairing_lock import PairingLockBusy, matter_pairing_lock
+
+        try:
+            async with matter_pairing_lock(
+                "discovery_auto_commission",
+                f"{len(devices)} device(s)",
+                ttl_s=1800,
+            ):
+                return await self._commission_devices_locked(devices)
+        except PairingLockBusy as e:
+            logger.warning(
+                f"discovery auto-commission SKIPPED — Matter pairing is already "
+                f"in progress elsewhere: {e}"
+            )
+            return 0
+
+    async def _commission_devices_locked(self, devices: list) -> int:
+        """The actual sequential commissioning loop. Caller MUST hold the global
+        Matter-pairing mutex (see _commission_devices)."""
         import requests as req
         from services.matter_client import get_matter_client
 

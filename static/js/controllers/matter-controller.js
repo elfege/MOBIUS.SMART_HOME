@@ -401,6 +401,9 @@ $(document).ready(function () {
                                 data-node-id="${nodeId}">Test ON</button>
                         <button class="btn btn-small btn-secondary btn-test-off"
                                 data-node-id="${nodeId}">Test OFF</button>
+                        <button class="btn btn-small btn-secondary btn-get-code"
+                                data-node-id="${nodeId}" data-device-name="${escapeHtml(name)}"
+                                title="Get a pairing code for this device — its stored factory code if we have one, otherwise a fresh code from a commissioning window we open on it">Get Code</button>
                         <button class="btn btn-small btn-danger btn-node-decommission"
                                 data-node-id="${nodeId}" data-node-name="${escapeHtml(name)}"
                                 title="Remove OUR fabric from this device (frees the slot; the device stays on Hubitat/other fabrics). DB is reconciled: the discovered row returns to 'uncommissioned' and its mapping is deleted.">Decommission</button>
@@ -990,14 +993,19 @@ $(document).ready(function () {
                   </div>
                   <div class="matter-debug-col matter-debug-logcol">
                     <div class="matter-debug-logbar">Live matter-client log
-                      <span class="dbg-mono" id="dbg-logstate"></span></div>
+                      <span class="dbg-mono" id="dbg-logstate"></span>
+                      <button class="btn btn-small btn-secondary" id="dbg-copylog" style="float:right;"
+                              title="Copy the whole log to the clipboard">Copy logs</button></div>
                     <pre class="matter-debug-log" id="dbg-log"></pre>
                   </div>
                 </div>
               </div>
             </div>`);
+        // Close ONLY via the explicit Close button — NOT on backdrop click.
+        // Operator directive 2026-07-13: clicking outside (to select/copy log
+        // text or paste a value) was dismissing the modal and losing its state.
         $('#matter-debug-overlay').on('click', function (e) {
-            if ($(e.target).is('#matter-debug-overlay') || $(e.target).is('.matter-debug-close')) closeMatterDebug();
+            if ($(e.target).is('.matter-debug-close')) closeMatterDebug();
         });
         $(document).on('keydown.matterDebug', function (e) { if (e.key === 'Escape') closeMatterDebug(); });
 
@@ -1428,9 +1436,220 @@ $(document).ready(function () {
     }
 
     function closeCommissionModal() {
+        stopQrScan();  // release the camera if a scan is in progress
         if (_commLogTimer) { clearInterval(_commLogTimer); _commLogTimer = null; }
         $(document).off('keydown.matterComm');
         $('#matter-commission-overlay').remove();
+    }
+
+    // =========================================================================
+    // QR scan — read the device label's MT:… code with this device's camera
+    // (operator request 2026-07-13). Uses the native BarcodeDetector where the
+    // browser has one (Chrome/Edge/Android); falls back to the vendored jsQR
+    // (static/js/vendor/jsQR.js, MIT, lazy-loaded on first use) elsewhere
+    // (Safari/iOS). The QR payload carries the FULL 12-bit discriminator —
+    // strictly more reliable than the 11-digit manual code's 4-bit short form.
+    // getUserMedia REQUIRES a secure context: https:// (or localhost) — on a
+    // plain http:// LAN URL the browser hides the camera API entirely.
+    // =========================================================================
+    /**
+     * Copy a log <pre>'s full text to the clipboard (operator request
+     * 2026-07-13: diagnose outside the modal without retyping). Prefers the
+     * async Clipboard API (needs a secure context); falls back to the
+     * selection + execCommand path for plain-http LAN URLs.
+     * @param {string} selector - the <pre> to copy (e.g. '#comm-log')
+     */
+    function copyLogText(selector) {
+        const text = $(selector).text();
+        if (!text) { showToast('Log is empty', 'info'); return; }
+        const ok = () => showToast('Log copied to clipboard', 'success');
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(ok,
+                () => showToast('Copy refused by the browser', 'error'));
+            return;
+        }
+        // http:// fallback: hidden textarea + execCommand.
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); ok(); }
+        catch (e) { showToast('Copy failed: ' + e, 'error'); }
+        document.body.removeChild(ta);
+    }
+
+    // Delegated handlers — the buttons live inside dynamically-built modals.
+    $(document).on('click', '#comm-copylog', function () { copyLogText('#comm-log'); });
+    $(document).on('click', '#dbg-copylog', function () { copyLogText('#dbg-log'); });
+
+    // =========================================================================
+    // GET CODE — a pairing code for any device (operator request 2026-07-13).
+    //
+    // ONE button, four honest sources, resolved server-side
+    // (services/matter_pairing_codes): the device's stored FACTORY code from the
+    // vault · a FRESH code from a commissioning window we open on our own fabric
+    // · a FRESH code from a window opened by the Hubitat hub that owns it · or,
+    // if the operator supplies the printed label code, that code REPAIRED to
+    // target the discriminator the device is really advertising.
+    //
+    // When none applies the backend answers 409 with the reason — a Matter
+    // passcode is a SPAKE2+ secret that cannot be derived from what a device
+    // broadcasts, so for a device we administer nowhere and never vaulted, no
+    // code can exist. We show that explanation rather than a button that fails.
+    // =========================================================================
+    const CODE_SOURCE_LABEL = {
+        vault_factory:  'Factory code (from the vault)',
+        ecm_our_fabric: 'Fresh code — window opened on our fabric',
+        ecm_hubitat:    'Fresh code — window opened by the Hubitat hub',
+        repaired_label: 'Your label code, repaired',
+    };
+
+    function showCodeModal(data, deviceName) {
+        $('#matter-code-overlay').remove();
+        const expires = data.expires_in_s
+            ? `<div class="dbg-mono" style="margin-top:6px;">Valid for ${Math.round(data.expires_in_s / 60)} minutes — use it now.</div>`
+            : '';
+        const qrRow = data.qr_code
+            ? `<div style="margin-top:12px;">
+                 <div class="matter-debug-logbar">QR payload
+                   <button class="btn btn-small btn-secondary" id="code-copy-qr" style="float:right;">Copy QR</button></div>
+                 <pre class="matter-debug-log" id="code-qr" style="max-height:70px;">${escapeHtml(data.qr_code)}</pre>
+               </div>`
+            : '';
+        $('body').append(`
+          <div id="matter-code-overlay" class="matter-debug-overlay">
+            <div class="matter-debug" style="max-width:560px;">
+              <div class="matter-debug-head">
+                <h3>Pairing code <span class="dbg-mono">${escapeHtml(deviceName || '')}</span></h3>
+                <button class="btn btn-small btn-secondary matter-code-close">Close</button>
+              </div>
+              <div class="comm-body">
+                <div class="comm-status success">${escapeHtml(CODE_SOURCE_LABEL[data.source] || data.source)}</div>
+                <div class="matter-debug-logbar">Manual code
+                  <button class="btn btn-small btn-secondary" id="code-copy-manual" style="float:right;">Copy code</button></div>
+                <pre class="matter-debug-log" id="code-manual"
+                     style="font-size:22px;letter-spacing:2px;max-height:60px;">${escapeHtml(data.manual_code)}</pre>
+                ${expires}
+                <p style="margin-top:10px;color:var(--text-dim,#c9c9d1);">${escapeHtml(data.detail || '')}</p>
+                ${qrRow}
+              </div>
+            </div>
+          </div>`);
+        // Close ONLY via the button (never on backdrop — same rule as the other modals).
+        $('#matter-code-overlay').on('click', function (e) {
+            if ($(e.target).is('.matter-code-close')) $('#matter-code-overlay').remove();
+        });
+        $('#code-copy-manual').on('click', function () { copyLogText('#code-manual'); });
+        $('#code-copy-qr').on('click', function () { copyLogText('#code-qr'); });
+    }
+
+    /**
+     * Ask the backend for a pairing code for one device.
+     * @param {object} body - {unique_id} or {our_node_id}, plus optional label_code
+     * @param {string} deviceName - for the modal header
+     */
+    function getPairingCode(body, deviceName) {
+        showToast('Getting a pairing code…', 'info');
+        $.ajax({
+            url: '/api/matter/pairing-code', method: 'POST',
+            contentType: 'application/json', data: JSON.stringify(body), timeout: 60000,
+        })
+        .done(function (data) { showCodeModal(data, deviceName); })
+        .fail(function (xhr) {
+            // 409 = no source applies. That is an ANSWER, not a crash: show the
+            // backend's explanation in full rather than a generic failure toast.
+            const detail = xhr.responseJSON?.detail
+                || `HTTP ${xhr.status}: could not get a code`;
+            showModal(xhr.status === 409 ? 'No pairing code can be produced'
+                                         : 'Could not get a pairing code',
+                      detail, 'error');
+        });
+    }
+
+    // Node cards (our fabric) and discovered-device cards (Hubitat fabric).
+    $(document).on('click', '.btn-get-code', function () {
+        const $b = $(this);
+        const uid = $b.data('unique-id');
+        const nodeId = $b.data('node-id');
+        const name = $b.data('device-name') || '';
+        getPairingCode(uid ? { unique_id: String(uid) }
+                           : { our_node_id: Number(nodeId) }, name);
+    });
+
+    let _qrStream = null;   // active camera MediaStream (null = not scanning)
+    let _qrTimer = null;    // decode-loop interval handle
+
+    function stopQrScan() {
+        if (_qrTimer) { clearInterval(_qrTimer); _qrTimer = null; }
+        if (_qrStream) { _qrStream.getTracks().forEach(t => t.stop()); _qrStream = null; }
+        $('#comm-qr-wrap').remove();
+        $('#comm-scan').prop('disabled', false).text('📷 Scan');
+    }
+
+    function qrHit(text) {
+        // Any decoded payload lands in the input (MT:… expected; the backend
+        // accepts both QR strings and numeric codes), then the camera stops.
+        $('#comm-code-input').val(String(text).trim());
+        showToast('QR code captured', 'success');
+        stopQrScan();
+    }
+
+    async function startQrScan() {
+        if (_qrStream) { stopQrScan(); return; }  // toggle off
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            showToast('Camera unavailable — open the app over https:// (secure context required)', 'error');
+            return;
+        }
+        $('#comm-scan').prop('disabled', true).text('starting…');
+        try {
+            _qrStream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: 'environment' }, audio: false,
+            });
+        } catch (e) {
+            $('#comm-scan').prop('disabled', false).text('📷 Scan');
+            showToast('Camera refused: ' + (e.name || e), 'error');
+            return;
+        }
+        $('#comm-qr-wrap').remove();
+        $('.comm-code-row').after(
+            '<div id="comm-qr-wrap" style="margin:8px 0;">' +
+            '<video id="comm-qr-video" playsinline muted autoplay ' +
+            'style="width:100%;max-height:260px;border-radius:8px;background:#000;object-fit:cover;"></video>' +
+            '</div>');
+        const video = document.getElementById('comm-qr-video');
+        video.srcObject = _qrStream;
+        await video.play().catch(() => {});
+        $('#comm-scan').prop('disabled', false).text('Stop scan');
+
+        if ('BarcodeDetector' in window) {
+            // Native path — hardware-accelerated where available.
+            const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+            _qrTimer = setInterval(async function () {
+                if (!_qrStream || video.readyState < 2) return;
+                try {
+                    const codes = await detector.detect(video);
+                    if (codes.length) qrHit(codes[0].rawValue);
+                } catch (e) { /* transient frame errors — keep scanning */ }
+            }, 300);
+        } else {
+            // Fallback path — lazy-load the vendored decoder, scan via canvas.
+            $.getScript('/static/js/vendor/jsQR.js').done(function () {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                _qrTimer = setInterval(function () {
+                    if (!_qrStream || video.readyState < 2) return;
+                    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+                    ctx.drawImage(video, 0, 0);
+                    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    const hit = window.jsQR(img.data, img.width, img.height);
+                    if (hit && hit.data) qrHit(hit.data);
+                }, 350);
+            }).fail(function () {
+                showToast('QR decoder failed to load', 'error');
+                stopQrScan();
+            });
+        }
     }
 
     /**
@@ -1452,6 +1671,10 @@ $(document).ready(function () {
             ? `<div class="comm-code-row">
                  <input type="text" id="comm-code-input" class="comm-code-input"
                         placeholder="Paste pairing code — MT:… QR string or numeric" value="${escapeHtml(opts.code || '')}">
+                 <button class="btn btn-small btn-secondary" id="comm-scan"
+                         title="Scan the device label's QR with this device's camera (needs https)">📷 Scan</button>
+                 <button class="btn btn-small btn-secondary" id="comm-fixcode"
+                         title="Commissioning says 'no device discovered' but the device IS in pairing mode? Its advertised discriminator has drifted from its label. This keeps the passcode and re-targets the code at what the device is actually broadcasting.">Fix code</button>
                  <button class="btn btn-small btn-primary" id="comm-start">Commission</button>
                </div>`
             : `<div class="comm-code-row"><button class="btn btn-small btn-primary" id="comm-start">Start commissioning</button></div>`;
@@ -1465,18 +1688,47 @@ $(document).ready(function () {
               <div class="comm-body">
                 ${codeRow}
                 <div id="comm-status" class="comm-status">Live matter-client log streaming — start when ready.</div>
-                <div class="matter-debug-logbar">Live matter-client log <span class="dbg-mono" id="comm-logstate"></span></div>
+                <div class="matter-debug-logbar">Live matter-client log <span class="dbg-mono" id="comm-logstate"></span>
+                  <button class="btn btn-small btn-secondary" id="comm-copylog" style="float:right;"
+                          title="Copy the whole log to the clipboard">Copy logs</button></div>
                 <pre class="matter-debug-log comm-log" id="comm-log"></pre>
               </div>
             </div>
           </div>`);
+        // Close ONLY via the explicit Close button — NOT on backdrop click.
+        // Operator directive 2026-07-13: clicking outside (to copy a pairing
+        // code or select log text) was killing the modal mid-commission and
+        // losing the code input + live log.
         $('#matter-commission-overlay').on('click', function (e) {
-            if ($(e.target).is('#matter-commission-overlay') || $(e.target).is('.matter-debug-close')) closeCommissionModal();
+            if ($(e.target).is('.matter-debug-close')) closeCommissionModal();
         });
         $(document).on('keydown.matterComm', function (e) { if (e.key === 'Escape') closeCommissionModal(); });
+        $('#comm-scan').on('click', startQrScan);
+        // "Fix code": re-target the typed/scanned code at the discriminator the
+        // device is ACTUALLY advertising (the 2026-07-13 plug rescue, automated).
+        // Rewrites the input in place and explains what changed.
+        $('#comm-fixcode').on('click', function () {
+            const code = $('#comm-code-input').val().trim();
+            if (!code) { showToast('Paste or scan a code first', 'error'); return; }
+            const $btn = $(this).prop('disabled', true).text('checking…');
+            $.ajax({ url: '/api/matter/pairing-code/repair', method: 'POST',
+                     contentType: 'application/json',
+                     data: JSON.stringify({ code: code }), timeout: 30000 })
+            .done(function (r) {
+                $('#comm-code-input').val(r.manual_code);
+                showModal(r.changed ? 'Code repaired' : 'Code is already correct',
+                          r.detail, r.changed ? 'success' : 'info');
+            })
+            .fail(function (xhr) {
+                showModal('Could not repair the code',
+                          xhr.responseJSON?.detail || `HTTP ${xhr.status}`, 'error');
+            })
+            .always(function () { $btn.prop('disabled', false).text('Fix code'); });
+        });
         $('#comm-start').on('click', function () {
             const code = opts.needsCode ? $('#comm-code-input').val().trim() : null;
             if (opts.needsCode && !code) { showToast('Paste a pairing code first', 'error'); return; }
+            stopQrScan();  // release the camera before the commission run
             runCommission(opts, code);
         });
         // Stream the log immediately, so pre-commission activity is visible too.
@@ -1606,6 +1858,54 @@ $(document).ready(function () {
      * Shows: name, hub, online status, Maker API match, correction dropdown,
      * commission button.
      */
+    /**
+     * The always-visible header info chips for a discovered-device card
+     * (operator request 2026-07-13: "more info and linked items instead of just
+     * the Online + Node badges"). Surfaces, without expanding the card:
+     *   - status         Online / Offline (CVD-safe: shape + text, blue/red)
+     *   - hub            which hub administers it (home_1 …), linked to the hub
+     *   - hub device id  the device's id ON that hub, linked to its Hubitat page
+     *   - our node       our Matter fabric node id, when commissioned
+     *   - psql id        our local canonical device id — shown ONLY when the
+     *                    payload carries `_canonical_id` (a backend addition,
+     *                    Architect's lane). Forward-compatible: it appears the
+     *                    moment the field is populated, no further UI change.
+     *
+     * CVD: every chip carries a TEXT LABEL and a shape; colour is never the sole
+     * signal, and green is never used (operator is colour-blind).
+     */
+    function deviceHeaderChips(d, statusClass, statusLabel, isCommissioned) {
+        const chips = [];
+        // Status — carried by label + the .online/.offline class (blue/red).
+        chips.push(`<span class="hdr-chip status-badge ${statusClass}">${statusLabel}</span>`);
+
+        // Hub that administers the device (the "hub number"), linked to it.
+        if (d.hub_name || d.hub_ip) {
+            const hubLabel = escapeHtml(d.hub_name || d.hub_ip);
+            chips.push(d.hub_ip
+                ? `<a class="hdr-chip hdr-chip-link" href="http://${escapeHtml(d.hub_ip)}" target="_blank" rel="noopener" title="Open this Hubitat hub">hub: ${hubLabel} ↗</a>`
+                : `<span class="hdr-chip">hub: ${hubLabel}</span>`);
+        }
+
+        // The device's id ON the hub, linked to its Hubitat device page.
+        if (d.hubitat_device_id) {
+            chips.push(`<a class="hdr-chip hdr-chip-link" href="http://${escapeHtml(d.hub_ip)}/device/edit/${d.hubitat_device_id}" target="_blank" rel="noopener" title="Open this device on the Hubitat hub (id ${d.hubitat_device_id})">hub #${d.hubitat_device_id} ↗</a>`);
+        }
+
+        // Our Matter fabric node (when commissioned) — blue, not green.
+        if (isCommissioned && d.our_node_id != null) {
+            chips.push(`<span class="hdr-chip hdr-chip-node" title="In our Matter fabric as node ${d.our_node_id}">node ${d.our_node_id}</span>`);
+        }
+
+        // Our local PostgreSQL canonical id, when the payload provides it.
+        // (Backend field _canonical_id — pending, Architect's lane. Until it is
+        // added this chip is simply absent, so shipping the UI now is safe.)
+        if (d._canonical_id != null) {
+            chips.push(`<a class="hdr-chip hdr-chip-link" href="/?device=${d._canonical_id}" title="Our device record (PostgreSQL id ${d._canonical_id})">db #${d._canonical_id} ↗</a>`);
+        }
+        return chips.join('');
+    }
+
     function renderDiscoveredDevices() {
         const $container = $('#discovered-container');
 
@@ -1616,9 +1916,15 @@ $(document).ready(function () {
             return;
         }
 
+        // Sort by device name, case-insensitive (operator request 2026-07-13).
+        // A stable, locale-aware A→Z ordering; unnamed devices sink to the end.
+        const sorted = discoveredDevices.slice().sort((a, b) =>
+            (a.device_name || '￿').localeCompare(b.device_name || '￿',
+                undefined, { sensitivity: 'base', numeric: true }));
+
         let html = '<div class="device-cards-grid">';
 
-        for (const d of discoveredDevices) {
+        for (const d of sorted) {
             const online = d.is_online;
             const statusClass = online ? 'online' : 'offline';
             const statusLabel = online ? 'Online' : 'Offline';
@@ -1669,6 +1975,9 @@ $(document).ready(function () {
             actionHtml += `<button class="btn btn-small btn-secondary btn-recommission-code"
                             data-uid="${uid}" data-name="${name}"
                             title="Recommission with a manual pairing/setup code — decommissions first if it's already a node, then re-pairs">Recommission (code)</button>`;
+            actionHtml += `<button class="btn btn-small btn-secondary btn-get-code"
+                            data-unique-id="${uid}" data-device-name="${name}"
+                            title="Get a pairing code for this device — its stored factory code if we have one, otherwise a fresh code from a window opened by the hub that owns it">Get Code</button>`;
             actionHtml += `<button class="btn btn-small btn-danger btn-remove-discovered"
                             data-uid="${uid}" data-name="${name}"
                             title="Remove: decommission from our fabric + soft-delete (row kept, a re-scan brings it back)">Remove</button>`;
@@ -1699,13 +2008,12 @@ $(document).ready(function () {
             // info live in the body, where the action row is free to WRAP
             // instead of crushing the name (the earlier ugly per-char wrap).
             html += `
-                <div class="device-card ${statusClass} ${isCommissioned ? 'commissioned' : ''} is-collapsed" data-uid="${uid}">
+                <div class="device-card ${statusClass} ${isCommissioned ? 'commissioned' : ''} ${d.is_native_matter ? 'native-matter' : ''} is-collapsed" data-uid="${uid}">
                     <button type="button" class="device-card-header" aria-expanded="false"
                             title="Click to expand / collapse">
                         <span class="device-card-chevron">&#9656;</span>
                         <strong class="device-card-name">${name}</strong>
-                        <span class="status-badge ${statusClass}">${statusLabel}</span>
-                        ${isCommissioned ? `<span class="badge badge-success" title="In our Matter fabric as node ${d.our_node_id}">Node ${d.our_node_id}</span>` : ''}
+                        ${deviceHeaderChips(d, statusClass, statusLabel, isCommissioned)}
                     </button>
                     <div class="device-card-body">
                         <div class="device-card-actions">

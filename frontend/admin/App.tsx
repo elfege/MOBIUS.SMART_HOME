@@ -8,6 +8,7 @@
 import { StatusBar } from 'expo-status-bar';
 
 import { useNav } from './core/nav';
+import { HomeScreen } from './screens/HomeScreen';
 import { InstanceDetailScreen } from './screens/InstanceDetailScreen';
 import { InstancesScreen } from './screens/InstancesScreen';
 
@@ -18,8 +19,10 @@ export default function App() {
       <StatusBar style="light" />
       {current.view === 'detail' ? (
         <InstanceDetailScreen instanceId={current.instanceId} />
-      ) : (
+      ) : current.view === 'list' ? (
         <InstancesScreen />
+      ) : (
+        <HomeScreen />
       )}
     </>
   );

@@ -245,7 +245,9 @@ class HubitatAdminClient:
         self,
         device_id: int,
         command: str,
-        argument: Optional[str] = None,
+        # A scalar (str/number) OR a MAP — setColor takes a color map
+        # ({hue,saturation,level}); see _build_runmethod_args.
+        argument: Optional[Any] = None,
     ) -> bool:
         """
         Issue a command via the admin API's runmethod endpoint.
@@ -482,17 +484,30 @@ class HubitatAdminClient:
             return False
 
     @staticmethod
-    def _build_runmethod_args(argument: Optional[str]) -> List[Dict[str, Any]]:
+    def _build_runmethod_args(argument: Any) -> List[Dict[str, Any]]:
         """
         Build the JSON `args` array for /device/runmethod.
 
         No argument → []. Single argument → one typed entry. Type is
         inferred the way the UI declares it: numeric values are NUMBER,
-        everything else STRING. Hubitat coerces within reason, but sending
-        the right type avoids parameter-binding surprises (e.g. setLevel).
+        a MAP (dict) is a JSON_OBJECT, everything else STRING. Hubitat coerces
+        within reason, but sending the right type avoids parameter-binding
+        surprises (e.g. setLevel).
+
+        MAP SUPPORT (2026-07-13): `setColor` takes a COLOR MAP argument
+        ({hue, saturation, level}), not a scalar. Before this, a dict reached
+        here already str()'d by the caller and went out as a STRING holding a
+        PYTHON REPR ("{'hue': 66, ...}" — single quotes, not even valid JSON),
+        which Hubitat cannot bind to a Map parameter. So RGB simply could not
+        work over the admin path. Dicts now travel as a JSON_OBJECT arg with the
+        map intact. (Matter-controlled bulbs were unaffected: the Matter client
+        translates the same map natively.)
         """
         if argument is None:
             return []
+        # A color map (or any Map-typed command argument) must keep its shape.
+        if isinstance(argument, dict):
+            return [{"type": "JSON_OBJECT", "value": argument}]
         s = str(argument)
         try:
             num = float(s)

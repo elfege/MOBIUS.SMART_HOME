@@ -401,6 +401,9 @@ $(document).ready(function () {
                                 data-node-id="${nodeId}">Test ON</button>
                         <button class="btn btn-small btn-secondary btn-test-off"
                                 data-node-id="${nodeId}">Test OFF</button>
+                        <button class="btn btn-small btn-secondary btn-get-code"
+                                data-node-id="${nodeId}" data-device-name="${escapeHtml(name)}"
+                                title="Get a pairing code for this device — its stored factory code if we have one, otherwise a fresh code from a commissioning window we open on it">Get Code</button>
                         <button class="btn btn-small btn-danger btn-node-decommission"
                                 data-node-id="${nodeId}" data-node-name="${escapeHtml(name)}"
                                 title="Remove OUR fabric from this device (frees the slot; the device stays on Hubitat/other fabrics). DB is reconciled: the discovered row returns to 'uncommissioned' and its mapping is deleted.">Decommission</button>
@@ -1480,6 +1483,100 @@ $(document).ready(function () {
     $(document).on('click', '#comm-copylog', function () { copyLogText('#comm-log'); });
     $(document).on('click', '#dbg-copylog', function () { copyLogText('#dbg-log'); });
 
+    // =========================================================================
+    // GET CODE — a pairing code for any device (operator request 2026-07-13).
+    //
+    // ONE button, four honest sources, resolved server-side
+    // (services/matter_pairing_codes): the device's stored FACTORY code from the
+    // vault · a FRESH code from a commissioning window we open on our own fabric
+    // · a FRESH code from a window opened by the Hubitat hub that owns it · or,
+    // if the operator supplies the printed label code, that code REPAIRED to
+    // target the discriminator the device is really advertising.
+    //
+    // When none applies the backend answers 409 with the reason — a Matter
+    // passcode is a SPAKE2+ secret that cannot be derived from what a device
+    // broadcasts, so for a device we administer nowhere and never vaulted, no
+    // code can exist. We show that explanation rather than a button that fails.
+    // =========================================================================
+    const CODE_SOURCE_LABEL = {
+        vault_factory:  'Factory code (from the vault)',
+        ecm_our_fabric: 'Fresh code — window opened on our fabric',
+        ecm_hubitat:    'Fresh code — window opened by the Hubitat hub',
+        repaired_label: 'Your label code, repaired',
+    };
+
+    function showCodeModal(data, deviceName) {
+        $('#matter-code-overlay').remove();
+        const expires = data.expires_in_s
+            ? `<div class="dbg-mono" style="margin-top:6px;">Valid for ${Math.round(data.expires_in_s / 60)} minutes — use it now.</div>`
+            : '';
+        const qrRow = data.qr_code
+            ? `<div style="margin-top:12px;">
+                 <div class="matter-debug-logbar">QR payload
+                   <button class="btn btn-small btn-secondary" id="code-copy-qr" style="float:right;">Copy QR</button></div>
+                 <pre class="matter-debug-log" id="code-qr" style="max-height:70px;">${escapeHtml(data.qr_code)}</pre>
+               </div>`
+            : '';
+        $('body').append(`
+          <div id="matter-code-overlay" class="matter-debug-overlay">
+            <div class="matter-debug" style="max-width:560px;">
+              <div class="matter-debug-head">
+                <h3>Pairing code <span class="dbg-mono">${escapeHtml(deviceName || '')}</span></h3>
+                <button class="btn btn-small btn-secondary matter-code-close">Close</button>
+              </div>
+              <div class="comm-body">
+                <div class="comm-status success">${escapeHtml(CODE_SOURCE_LABEL[data.source] || data.source)}</div>
+                <div class="matter-debug-logbar">Manual code
+                  <button class="btn btn-small btn-secondary" id="code-copy-manual" style="float:right;">Copy code</button></div>
+                <pre class="matter-debug-log" id="code-manual"
+                     style="font-size:22px;letter-spacing:2px;max-height:60px;">${escapeHtml(data.manual_code)}</pre>
+                ${expires}
+                <p style="margin-top:10px;color:var(--text-dim,#c9c9d1);">${escapeHtml(data.detail || '')}</p>
+                ${qrRow}
+              </div>
+            </div>
+          </div>`);
+        // Close ONLY via the button (never on backdrop — same rule as the other modals).
+        $('#matter-code-overlay').on('click', function (e) {
+            if ($(e.target).is('.matter-code-close')) $('#matter-code-overlay').remove();
+        });
+        $('#code-copy-manual').on('click', function () { copyLogText('#code-manual'); });
+        $('#code-copy-qr').on('click', function () { copyLogText('#code-qr'); });
+    }
+
+    /**
+     * Ask the backend for a pairing code for one device.
+     * @param {object} body - {unique_id} or {our_node_id}, plus optional label_code
+     * @param {string} deviceName - for the modal header
+     */
+    function getPairingCode(body, deviceName) {
+        showToast('Getting a pairing code…', 'info');
+        $.ajax({
+            url: '/api/matter/pairing-code', method: 'POST',
+            contentType: 'application/json', data: JSON.stringify(body), timeout: 60000,
+        })
+        .done(function (data) { showCodeModal(data, deviceName); })
+        .fail(function (xhr) {
+            // 409 = no source applies. That is an ANSWER, not a crash: show the
+            // backend's explanation in full rather than a generic failure toast.
+            const detail = xhr.responseJSON?.detail
+                || `HTTP ${xhr.status}: could not get a code`;
+            showModal(xhr.status === 409 ? 'No pairing code can be produced'
+                                         : 'Could not get a pairing code',
+                      detail, 'error');
+        });
+    }
+
+    // Node cards (our fabric) and discovered-device cards (Hubitat fabric).
+    $(document).on('click', '.btn-get-code', function () {
+        const $b = $(this);
+        const uid = $b.data('unique-id');
+        const nodeId = $b.data('node-id');
+        const name = $b.data('device-name') || '';
+        getPairingCode(uid ? { unique_id: String(uid) }
+                           : { our_node_id: Number(nodeId) }, name);
+    });
+
     let _qrStream = null;   // active camera MediaStream (null = not scanning)
     let _qrTimer = null;    // decode-loop interval handle
 
@@ -1576,6 +1673,8 @@ $(document).ready(function () {
                         placeholder="Paste pairing code — MT:… QR string or numeric" value="${escapeHtml(opts.code || '')}">
                  <button class="btn btn-small btn-secondary" id="comm-scan"
                          title="Scan the device label's QR with this device's camera (needs https)">📷 Scan</button>
+                 <button class="btn btn-small btn-secondary" id="comm-fixcode"
+                         title="Commissioning says 'no device discovered' but the device IS in pairing mode? Its advertised discriminator has drifted from its label. This keeps the passcode and re-targets the code at what the device is actually broadcasting.">Fix code</button>
                  <button class="btn btn-small btn-primary" id="comm-start">Commission</button>
                </div>`
             : `<div class="comm-code-row"><button class="btn btn-small btn-primary" id="comm-start">Start commissioning</button></div>`;
@@ -1605,6 +1704,27 @@ $(document).ready(function () {
         });
         $(document).on('keydown.matterComm', function (e) { if (e.key === 'Escape') closeCommissionModal(); });
         $('#comm-scan').on('click', startQrScan);
+        // "Fix code": re-target the typed/scanned code at the discriminator the
+        // device is ACTUALLY advertising (the 2026-07-13 plug rescue, automated).
+        // Rewrites the input in place and explains what changed.
+        $('#comm-fixcode').on('click', function () {
+            const code = $('#comm-code-input').val().trim();
+            if (!code) { showToast('Paste or scan a code first', 'error'); return; }
+            const $btn = $(this).prop('disabled', true).text('checking…');
+            $.ajax({ url: '/api/matter/pairing-code/repair', method: 'POST',
+                     contentType: 'application/json',
+                     data: JSON.stringify({ code: code }), timeout: 30000 })
+            .done(function (r) {
+                $('#comm-code-input').val(r.manual_code);
+                showModal(r.changed ? 'Code repaired' : 'Code is already correct',
+                          r.detail, r.changed ? 'success' : 'info');
+            })
+            .fail(function (xhr) {
+                showModal('Could not repair the code',
+                          xhr.responseJSON?.detail || `HTTP ${xhr.status}`, 'error');
+            })
+            .always(function () { $btn.prop('disabled', false).text('Fix code'); });
+        });
         $('#comm-start').on('click', function () {
             const code = opts.needsCode ? $('#comm-code-input').val().trim() : null;
             if (opts.needsCode && !code) { showToast('Paste a pairing code first', 'error'); return; }
@@ -1801,6 +1921,9 @@ $(document).ready(function () {
             actionHtml += `<button class="btn btn-small btn-secondary btn-recommission-code"
                             data-uid="${uid}" data-name="${name}"
                             title="Recommission with a manual pairing/setup code — decommissions first if it's already a node, then re-pairs">Recommission (code)</button>`;
+            actionHtml += `<button class="btn btn-small btn-secondary btn-get-code"
+                            data-unique-id="${uid}" data-device-name="${name}"
+                            title="Get a pairing code for this device — its stored factory code if we have one, otherwise a fresh code from a window opened by the hub that owns it">Get Code</button>`;
             actionHtml += `<button class="btn btn-small btn-danger btn-remove-discovered"
                             data-uid="${uid}" data-name="${name}"
                             title="Remove: decommission from our fabric + soft-delete (row kept, a re-scan brings it back)">Remove</button>`;

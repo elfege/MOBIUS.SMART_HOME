@@ -25,9 +25,10 @@
     /* =========================================================================
        Semantic Status Colors
        ========================================================================= */
-    --color-success: #22c55e;
-    --color-success-border: #bbf7d0;
-    --color-success-glow: rgba(34, 197, 94, 0.4);
+    /* Affirmative = BLUE, never green (pin 77 — operator bans green). */
+    --color-success: #3b82f6;
+    --color-success-border: #bfdbfe;
+    --color-success-glow: rgba(59, 130, 246, 0.4);
 
     --color-warning: #f59e0b;
 
@@ -43,10 +44,11 @@
        Used in E2E device tiles, dashboard status indicators, Matter badges
        ========================================================================= */
 
-    /* Green state (on / active / success / online) */
-    --color-state-green-bg: #dcfce7;
-    --color-state-green-text: #166534;
-    --color-state-green-border: #86efac;
+    /* "Green" state (on / active / success / online) — values are BLUE
+       (pin 77); the -green- names await a separate rename sweep. */
+    --color-state-green-bg: #dbeafe;
+    --color-state-green-text: #1e40af;
+    --color-state-green-border: #93c5fd;
 
     /* Slate state (off / inactive) */
     --color-state-slate-bg: #f1f5f9;
@@ -123,7 +125,7 @@
        ========================================================================= */
     --color-toast-text: #ffffff;
     --color-toast-shadow: rgba(0, 0, 0, 0.15);
-    --color-toast-success: #28a745;
+    --color-toast-success: #3b82f6;   /* was #28a745 green — banned (pin 77) */
     --color-toast-error: #dc3545;
     --color-toast-info: #0066cc;
 

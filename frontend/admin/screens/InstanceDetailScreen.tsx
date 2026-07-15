@@ -37,6 +37,8 @@ import { EnumField } from '../components/fields/EnumField';
 import { NumberField } from '../components/fields/NumberField';
 import { OpaqueField } from '../components/fields/OpaqueField';
 import { StringField } from '../components/fields/StringField';
+import { WeeklyWindowsField } from '../components/fields/WeeklyWindowsField';
+import { SonosTestButton } from '../components/SonosTestButton';
 import { StatusPill } from '../components/StatusPill';
 
 const api = new AdminApi('');
@@ -145,7 +147,16 @@ export function InstanceDetailScreen({ instanceId }: { instanceId: number }) {
       </Text>
 
       <ScrollView contentContainerStyle={styles.scroll}>
-        {fields.map((f) => renderField(f, edits, numText, onValue, onNumText))}
+        {fields
+          .filter((f) => isVisible(f, edits, fields))
+          .map((f) => (
+            <View key={f.key}>
+              {renderField(f, edits, numText, onValue, onNumText)}
+              {f.key === 'announceRoom' ? (
+                <SonosTestButton fields={fields} edits={edits} />
+              ) : null}
+            </View>
+          ))}
       </ScrollView>
 
       <View style={styles.footer}>
@@ -166,6 +177,22 @@ export function InstanceDetailScreen({ instanceId }: { instanceId: number }) {
       </View>
     </View>
   );
+}
+
+/** Schema-driven conditional visibility (`visibleWhen`): the controlling
+ *  key's EFFECTIVE value (pending edit first, then saved) must equal the
+ *  schema's `equals`. Lets a boolean gate its dependent fields live — e.g.
+ *  wake-on-power seconds behind its toggle (operator 2026-07-15). */
+function isVisible(
+  f: FieldSpec,
+  edits: Record<string, unknown>,
+  fields: FieldSpec[],
+): boolean {
+  if (!f.visibleWhen) return true;
+  const ctrl = fields.find((x) => x.key === f.visibleWhen!.key);
+  const effective =
+    f.visibleWhen.key in edits ? edits[f.visibleWhen.key] : ctrl?.value;
+  return effective === f.visibleWhen.equals;
 }
 
 /** Compare a pending edit against the field's current server-known value. */
@@ -224,6 +251,15 @@ function renderField(
           key={f.key}
           spec={f}
           value={String(effective ?? '')}
+          onChange={onValue}
+        />
+      );
+    case 'windows':
+      return (
+        <WeeklyWindowsField
+          key={f.key}
+          spec={f}
+          value={effective}
           onChange={onValue}
         />
       );

@@ -13,8 +13,10 @@ check plus an explicit admin scope, never behind a panel token.
 """
 
 import logging
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 
 from apps.tiles_api import db, resolver
 from apps.tiles_api.auth import (KIND_PANEL, KIND_SERVICE, SCOPE_PANEL_COMMAND,
@@ -251,3 +253,83 @@ async def panel_device_command(device_id: str, body: DeviceCommandRequest,
                 "elapsed_ms": round(result.elapsed_ms, 1)}
     raise HTTPException(status_code=502,
                         detail=f"Command failed: {result.error}")
+
+
+# --- auto-discovery sectionizer (design: automatic_room_discovery_... plan) ---
+# Preview-then-apply, never a silent rewrite. Dry-run needs only read scope;
+# APPLY mutates the panel layout -> command scope (the strongest panel scope).
+
+class AutoDiscoverRequest(BaseModel):
+    profile: str = "default"
+    min_shared: int = 2
+    use_compounds: bool = True
+    singularize: bool = True
+
+
+class AutoDiscoverApplyRequest(AutoDiscoverRequest):
+    proposal_token: str
+    # The review sheet's checkboxes: commit only these rooms (None = all).
+    # The live roster preview showed why this is essential: the literal
+    # shared-word rule finds real rooms (OFFICE, MINERVA, TERRACE) AND
+    # thing-rooms (WASHER, HUMIDITY LEVEL) — the operator picks.
+    include_slugs: Optional[List[str]] = None
+
+
+def _run_discovery(req: AutoDiscoverRequest) -> Dict[str, Any]:
+    """Shared by dry-run and apply: fetch inputs, run the pure module."""
+    from apps.tiles_api import db as panel_db
+    from apps.tiles_api import sectionizer_discovery as disco
+    from services.device_name_normalizer import _build_suffix_pattern
+
+    inputs = panel_db.discovery_inputs(req.profile)
+    stop = disco.build_stoplist(inputs["tile_type_words"], inputs["hub_names"])
+    pattern = _build_suffix_pattern(inputs["hub_names"])
+    return disco.discover(
+        inputs["devices"], inputs["sections"], stop,
+        suffix_pattern=pattern, min_shared=req.min_shared,
+        use_compounds=req.use_compounds, singularize=req.singularize)
+
+
+@router.post("/sections/auto-discover")
+async def auto_discover_sections(
+        body: AutoDiscoverRequest,
+        principal: Principal = Depends(require_scope(SCOPE_PANEL_READ))):
+    """DRY-RUN room discovery: derive rooms from shared device-name keywords.
+    Returns the full Proposal (rooms, assignments, unsorted, collisions, rules)
+    + a proposal_token. NO WRITES — apply is a separate, stronger-scoped call."""
+    try:
+        return _run_discovery(body)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"auto-discover dry-run failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sections/auto-discover/apply")
+async def auto_discover_apply(
+        body: AutoDiscoverApplyRequest,
+        principal: Principal = Depends(require_scope(SCOPE_PANEL_COMMAND))):
+    """COMMIT a previously previewed proposal. Recomputes discovery and matches
+    the proposal_token — if the roster or params changed since the preview the
+    tokens differ and this refuses (409) rather than committing something the
+    operator never saw. Replaces ONLY the origin='auto' layer; affinities and
+    operator-authored sections/rules are untouched by construction."""
+    from apps.tiles_api import db as panel_db
+    try:
+        proposal = _run_discovery(body)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"auto-discover apply recompute failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    if proposal["proposal_token"] != body.proposal_token:
+        raise HTTPException(
+            status_code=409,
+            detail="Roster or params changed since the preview — re-run the "
+                   "dry-run and review the fresh proposal.")
+    rooms, rules = proposal["rooms"], proposal["rules"]
+    if body.include_slugs is not None:
+        keep = set(body.include_slugs)
+        rooms = [r for r in rooms if r["slug"] in keep]
+        rules = [r for r in rules if r["section_slug"] in keep]
+    logger.info(f"panel: '{principal.name}' applying auto-discovery "
+                f"({len(rooms)}/{len(proposal['rooms'])} rooms, {len(rules)} rules)")
+    result = panel_db.apply_auto_layer(body.profile, rooms, rules)
+    return {"applied": result, "proposal_token": body.proposal_token}

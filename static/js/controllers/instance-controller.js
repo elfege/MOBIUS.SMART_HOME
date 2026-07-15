@@ -769,22 +769,21 @@ export class InstanceWizardController {
             keys: ['exclusionModes']
         },
         {
-            // Screen Time Planner — only appears for that app type, since
-            // group keys are filtered to those present in the schema.
-            id: 'screen_time',
-            title: 'Allowed Windows & Enforcement',
-            description: 'When the TV is allowed, and how it is cut outside those windows',
-            keys: ['weeklyWindows', 'awaitPrimaryOff', 'offConfirmTimeoutSeconds',
-                   'secondaryUnconditional', 'secondaryDelaySeconds',
-                   'suppressTvWakeOnPowerSeconds', 'timezone']
-        },
-        {
-            // Sonos alarm schedule (SONOS app type). timezone is claimed by the
-            // screen_time group for STP, so it only lands here for the alarm app.
+            // ONE Schedule card for both app types (operator 2026-07-14: the
+            // separate 'Allowed Windows & Enforcement' card is folded in here,
+            // its windows marked as enforcement windows). Keys are filtered to
+            // the schema, so SONOS renders alarmTime/days/timezone while STP
+            // renders weeklyWindows (enforcement) + enforcement knobs +
+            // timezone. The old two-card split double-rendered `timezone` for
+            // STP (duplicate DOM id -> the save bound to the first copy while
+            // the user edited the second).
             id: 'schedule',
             title: 'Schedule',
-            description: 'When the alarm fires',
-            keys: ['alarmTime', 'days', 'timezone']
+            description: 'Time windows (enforcement), alarm time, and timezone',
+            keys: ['alarmTime', 'days', 'weeklyWindows', 'awaitPrimaryOff',
+                   'offConfirmTimeoutSeconds', 'secondaryUnconditional',
+                   'secondaryDelaySeconds', 'suppressTvWakeOnPowerSeconds',
+                   'timezone']
         },
         {
             // Audio announcement (STP warnings + SONOS alarm). The speaker and
@@ -833,7 +832,12 @@ export class InstanceWizardController {
         // Render each defined group
         for (const group of InstanceWizardController.SETTINGS_GROUPS) {
             // Only include keys that exist in this schema
-            const groupKeys = group.keys.filter(k => k in properties);
+            // `!placed.has(k)` is a structural guard: a key listed in two
+            // groups renders ONCE (first group wins). Without it, `timezone`
+            // (listed in both the old STP card and Schedule) rendered twice —
+            // duplicate DOM ids, and the save silently bound to the first copy
+            // while the user edited the second (operator screenshot 2026-07-14).
+            const groupKeys = group.keys.filter(k => k in properties && !placed.has(k));
             if (groupKeys.length === 0) continue;
 
             groupKeys.forEach(k => placed.add(k));
@@ -1938,6 +1942,18 @@ export class InstanceWizardController {
     }
 
     renderSettingField(key, prop) {
+        // Schema-driven conditional visibility (visibleWhen: {key, equals}) —
+        // parity with the RN detail screen. Legacy is render-time only: the
+        // field appears/disappears on next render, not live-on-toggle (this
+        // surface is on the strangler-fig burndown; RN is the live editor).
+        if (prop.visibleWhen && prop.visibleWhen.key) {
+            const ctrl = prop.visibleWhen.key;
+            const cur = (this.settings && ctrl in this.settings)
+                ? this.settings[ctrl]
+                : (this.appTypeSchema?.settings_schema?.properties?.[ctrl]?.default);
+            if (cur !== prop.visibleWhen.equals) return '';
+        }
+
         const title = prop.title || key;
         const description = prop.description || '';
         const defaultVal = prop.default;

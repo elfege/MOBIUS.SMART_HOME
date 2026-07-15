@@ -931,7 +931,14 @@
 }
 .comm-status { font-size: .88rem; line-height: 1.5; padding: .4rem .5rem; border-radius: 5px; background: #181825; }
 .comm-status.loading { color: #cdd6f4; }
-.comm-status.success { color: #7ec27e; background: #16281c; }
+.comm-status.success { color: #89b4fa; background: #16202a; }  /* blue, was green (pin 77) */
+/* Shape+label reinforcement (PIN.1-5): the affirmative state must never be
+   hue-only. A ✓ glyph leads both success surfaces. */
+.comm-status.success::before,
+.commission-result.success::before { content: "\2713 "; font-weight: 700; }
+/* A lone colored dot is color-only signal — give CONNECTED a distinct SHAPE:
+   a ring (outline) in addition to the fill. */
+.status-dot.connected { outline: 2px solid var(--color-success); outline-offset: 2px; }
 .comm-status.error   { color: #e57373; background: #2a1616; }
 .comm-log { min-height: 42vh; max-height: 60vh; }
 /* [srv] = matter-server CHIP lines; muted so [cli] + errors still stand out. */

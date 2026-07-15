@@ -20,8 +20,11 @@ export function EnumField({ spec, value, onChange }: Props) {
     <View style={styles.block}>
       <Text style={styles.title}>{spec.title}</Text>
       <View style={styles.chips}>
-        {(spec.enumOptions ?? []).map((opt) => {
+        {(spec.enumOptions ?? []).map((opt, i) => {
           const selected = opt === value;
+          // Human label from schema enumNames when provided ("Ava (US, warm)"
+          // instead of "edge:en-US-AvaNeural") — the VALUE saved is still opt.
+          const label = spec.enumNames?.[i] ?? opt;
           return (
             <Pressable
               key={opt}
@@ -31,7 +34,7 @@ export function EnumField({ spec, value, onChange }: Props) {
               <Text
                 style={[styles.chipText, selected ? styles.chipTextSelected : null]}
               >
-                {opt}
+                {label}
               </Text>
             </Pressable>
           );

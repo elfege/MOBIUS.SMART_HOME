@@ -1942,6 +1942,18 @@ export class InstanceWizardController {
     }
 
     renderSettingField(key, prop) {
+        // Schema-driven conditional visibility (visibleWhen: {key, equals}) —
+        // parity with the RN detail screen. Legacy is render-time only: the
+        // field appears/disappears on next render, not live-on-toggle (this
+        // surface is on the strangler-fig burndown; RN is the live editor).
+        if (prop.visibleWhen && prop.visibleWhen.key) {
+            const ctrl = prop.visibleWhen.key;
+            const cur = (this.settings && ctrl in this.settings)
+                ? this.settings[ctrl]
+                : (this.appTypeSchema?.settings_schema?.properties?.[ctrl]?.default);
+            if (cur !== prop.visibleWhen.equals) return '';
+        }
+
         const title = prop.title || key;
         const description = prop.description || '';
         const defaultVal = prop.default;

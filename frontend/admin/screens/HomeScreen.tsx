@@ -16,7 +16,7 @@
  * alone, never green.
  */
 
-import { Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Image, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { colors, radius, space } from '../../shared/tokens';
 import { useNav } from '../core/nav';
@@ -56,9 +56,19 @@ export function HomeScreen() {
   return (
     <View style={styles.root}>
       <View style={styles.header}>
-        <Text style={styles.title}>
-          MOBIUS<Text style={styles.titleAccent}>.HOME</Text>
-        </Text>
+        <View style={styles.brandRow}>
+          {/* The canonical mobius brand mark (same file the legacy navbar and
+              the favicon use), like the tiles app pairs its LogoMark with the
+              wordmark (operator 2026-07-15). */}
+          <Image
+            source={{ uri: '/static/img/mobius.png' }}
+            style={styles.logo}
+            resizeMode="contain"
+          />
+          <Text style={styles.title}>
+            MOBIUS<Text style={styles.titleAccent}>.HOME</Text>
+          </Text>
+        </View>
         <Text style={styles.dim}>Home control · admin</Text>
       </View>
       <ScrollView contentContainerStyle={styles.scroll}>
@@ -72,6 +82,22 @@ export function HomeScreen() {
             </View>
             <Text style={styles.tileDesc}>
               Motion lighting, power management, screen time — all app instances
+            </Text>
+          </Pressable>
+
+          {/* The wall-panel tiles app (frontend/tiles, RN) — a sibling RN app,
+              not a legacy surface (operator 2026-07-15: "no access to tiles
+              from new RN interface"). Same-tab; back returns here. */}
+          <Pressable
+            style={[styles.tile, styles.tileNative]}
+            onPress={() => openLegacy('/static/panel/index.html')}
+          >
+            <View style={styles.tileTop}>
+              <Text style={styles.tileTitle}>Wall Panel</Text>
+              <Text style={styles.badgeNative}>native</Text>
+            </View>
+            <Text style={styles.tileDesc}>
+              MOBIUS.TILES — room-by-room device control panel
             </Text>
           </Pressable>
 
@@ -102,6 +128,8 @@ const styles = StyleSheet.create({
   // The ".HOME" accent — same high-luminance blue as the legacy navbar's
   // logo-dot; luminance-contrast carries it (CVD-safe), the hue just agrees.
   titleAccent: { color: colors.accent },
+  brandRow: { flexDirection: 'row', alignItems: 'center', gap: space.md },
+  logo: { width: 34, height: 34 },
   dim: { color: colors.textFaint, fontSize: 13, marginTop: space.xs },
   scroll: { padding: space.lg },
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: space.md },

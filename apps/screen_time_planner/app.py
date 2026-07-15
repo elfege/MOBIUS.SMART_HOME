@@ -279,9 +279,18 @@ class ScreenTimePlannerApp(BaseApp):
                     f"{self.label}: power device {sid} on not confirmed: {result.error}"
                 )
 
+    def _wake_suppress_secs(self) -> int:
+        """Effective wake-on-power suppression window in seconds — 0 (feature
+        off) unless the `suppressTvWakeOnPower` boolean is enabled (operator
+        2026-07-15: irrelevant for a dumb TV on a smart plug, so opt-in)."""
+        if not self.get_setting('suppressTvWakeOnPower', False):
+            return 0
+        return int(self.get_setting('suppressTvWakeOnPowerSeconds', 30) or 0)
+
     def _within_suppression(self) -> bool:
-        """True if we're within `suppressTvWakeOnPowerSeconds` of a power restore."""
-        secs = int(self.get_setting('suppressTvWakeOnPowerSeconds', 30) or 0)
+        """True if we're within the wake-suppression window of a power restore
+        (see _wake_suppress_secs — 0 when the feature is disabled)."""
+        secs = self._wake_suppress_secs()
         if secs <= 0:
             return False
         stamp = getattr(self._runtime, 'power_restored_at', None)
@@ -306,9 +315,9 @@ class ScreenTimePlannerApp(BaseApp):
         (`suppressTvWakeOnPowerSeconds` / 2). Belt-and-braces alongside the
         event-driven path in on_event: if the TV's wake report is laggy or the
         event is missed, this proactively reads the settled state and cuts it.
-        Off when the setting is 0.
+        Off when the feature toggle is off or the window is 0.
         """
-        secs = int(self.get_setting('suppressTvWakeOnPowerSeconds', 30) or 0)
+        secs = self._wake_suppress_secs()
         if secs <= 0:
             return
         try:
@@ -742,14 +751,29 @@ class ScreenTimePlannerApp(BaseApp):
                         "power device. 0 = immediately."
                     ),
                 },
+                # Boolean gate (operator 2026-07-15): wake-on-power suppression
+                # is irrelevant for a dumb TV on a smart plug — the whole
+                # feature must be opt-in, with the seconds field only shown
+                # (visibleWhen) and only honored when the toggle is on.
+                "suppressTvWakeOnPower": {
+                    "type": "boolean", "default": False,
+                    "title": "Suppress TV wake-on-power",
+                    "description": (
+                        "Enable only for TVs that power themselves on when mains "
+                        "power returns (smart TVs with wake-on-power). Leave off "
+                        "for a dumb TV behind a smart plug."
+                    ),
+                },
                 "suppressTvWakeOnPowerSeconds": {
                     "type": "integer", "minimum": 0, "maximum": 300, "default": 30,
                     "title": "Suppress TV wake-on-power (s)",
                     "description": (
-                        "Some TVs power themselves on when mains power returns. For "
-                        "this many seconds after a window opens (power restored), "
-                        "turn the TV back off. 0 disables."
+                        "For this many seconds after a window opens (power "
+                        "restored), turn the TV back off if it wakes on its own."
                     ),
+                    # UI hint (RN + legacy renderers): only show when the
+                    # gating boolean is on. Harmless extra key to JSON Schema.
+                    "visibleWhen": {"key": "suppressTvWakeOnPower", "equals": True},
                 },
                 "timezone": {
                     "type": "string", "default": "America/New_York",

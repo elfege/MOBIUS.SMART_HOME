@@ -166,9 +166,11 @@ def set_preference(profile: str, category: str, value: Any) -> None:
 
 def list_present_devices() -> List[Dict[str, Any]]:
     """Live device roster from the canonical table — is_present only (a device
-    pruned from its hub must not appear on a wall panel). attributes is ALREADY a
-    flat JSONB map here (e.g. {"switch":"on","level":"72"}), so no client-side
-    Maker-list flattening is needed."""
+    pruned from its hub must not appear on a wall panel), and ONE tile per
+    physical device: classifier-flagged same-label mirrors (is_name_duplicate)
+    are excluded, same policy as the wizard pickers (2026-07-14 dedup fix).
+    attributes is ALREADY a flat JSONB map here (e.g. {"switch":"on"}), so no
+    client-side Maker-list flattening is needed."""
     conn = _conn()
     try:
         with conn, conn.cursor() as cur:
@@ -177,6 +179,7 @@ def list_present_devices() -> List[Dict[str, Any]]:
                           capabilities, attributes
                      FROM dshub.devices
                     WHERE is_present = true
+                      AND is_name_duplicate IS NOT TRUE
                     ORDER BY label""")
             return [{"id": r[0], "label": r[1], "name": r[2], "device_type": r[3],
                      "protocol": r[4], "capabilities": r[5], "attributes": r[6]}
@@ -281,5 +284,116 @@ def set_affinity(profile: str, device_id: int, *, section_id: Optional[int] = No
                        updated_at   = NOW()""",
                 (profile, device_id, section_id, tile_type, custom_label,
                  sort_order, is_hidden, is_favorite, is_hidden, is_favorite))
+    finally:
+        conn.close()
+
+
+# --- auto-discovery sectionizer (migration 018 origin layer) -----------------
+
+def discovery_inputs(profile: str = "default") -> Dict[str, Any]:
+    """Everything the pure sectionizer needs, in one connection: the deduped
+    present roster (id+label), existing sections {slug: name}, the derived
+    stoplist ingredients (tile-type/capability words from panel_tile_types —
+    data-oriented, auto-tracks new capabilities) and hub names (a hub name must
+    never become a room)."""
+    conn = _conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, COALESCE(label, name) FROM dshub.devices
+                    WHERE is_present = true AND is_name_duplicate IS NOT TRUE""")
+            devices = [{"id": r[0], "label": r[1]} for r in cur.fetchall()]
+            cur.execute(
+                "SELECT slug, name FROM dsapp.panel_sections WHERE profile = %s",
+                (profile,))
+            sections = {r[0]: r[1] for r in cur.fetchall()}
+            cur.execute(
+                "SELECT DISTINCT lower(capability), lower(tile_type) FROM dsapp.panel_tile_types")
+            words = set()
+            for cap, tt in cur.fetchall():
+                words.add(cap)
+                words.add(tt)
+            # device_type words are THING words too ("WINDOW ESP", "SWITCH
+            # ESP", "Generic Matter Outlet") — deriving them here keeps the
+            # stoplist data-oriented and stops thing-rooms like WINDOW or
+            # OUTLET without a hand-curated blocklist.
+            cur.execute(
+                "SELECT DISTINCT lower(device_type) FROM dshub.devices WHERE is_present")
+            for (dt,) in cur.fetchall():
+                if dt:
+                    words.update(w for w in dt.replace('-', ' ').split() if w)
+            cur.execute("SELECT hub_name FROM dshub.hub_config")
+            hubs = [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
+    return {"devices": devices, "sections": sections,
+            "tile_type_words": sorted(words), "hub_names": hubs}
+
+
+def apply_auto_layer(profile: str, rooms: List[Dict[str, Any]],
+                     rules: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Commit a discovery proposal: EXPLICITLY replace the origin='auto' layer.
+
+    One transaction:
+      1. DELETE prior auto rules (RETURNING, logged — explicit removal, no
+         CASCADE anywhere, per the 2026-07-11 policy).
+      2. DELETE prior auto sections not reused by the new proposal (ditto).
+      3. Upsert proposal sections: new rooms INSERT as origin='auto' (sorted
+         after the seeded ones); reused rooms keep their row/origin but get the
+         UPPER display name (ratified decision #2: one casing system).
+      4. INSERT the new rules as origin='auto'.
+
+    Operator material — origin='operator' rows and ALL panel_device_affinities
+    — is never read for deletion here, by construction.
+    """
+    new_slugs = [r["slug"] for r in rooms]
+    conn = _conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM dsapp.panel_section_rules WHERE origin = 'auto' RETURNING section_slug, pattern, priority")
+            removed_rules = cur.fetchall()
+            cur.execute(
+                """DELETE FROM dsapp.panel_sections
+                    WHERE origin = 'auto' AND profile = %s
+                      AND NOT (slug = ANY(%s))
+                RETURNING slug""", (profile, new_slugs))
+            removed_sections = [r[0] for r in cur.fetchall()]
+            if removed_rules or removed_sections:
+                logger.info(
+                    "sectionizer apply: removed %d auto rule(s) %s and %d auto "
+                    "section(s) %s (explicit replace, no cascade)",
+                    len(removed_rules),
+                    [f"{r[0]}<-'{r[1]}'" for r in removed_rules],
+                    len(removed_sections), removed_sections)
+            cur.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) FROM dsapp.panel_sections WHERE profile = %s",
+                (profile,))
+            next_sort = (cur.fetchone()[0] or 0) + 10
+            created, reused = [], []
+            for room in rooms:
+                cur.execute(
+                    """INSERT INTO dsapp.panel_sections
+                           (profile, slug, name, sort_order, origin)
+                    VALUES (%s, %s, %s, %s, 'auto')
+                    ON CONFLICT (profile, slug)
+                    DO UPDATE SET name = EXCLUDED.name
+                    RETURNING (xmax = 0)""",
+                    (profile, room["slug"], room["name"], next_sort))
+                if cur.fetchone()[0]:
+                    created.append(room["slug"])
+                    next_sort += 10
+                else:
+                    reused.append(room["slug"])
+            for rule in rules:
+                cur.execute(
+                    """INSERT INTO dsapp.panel_section_rules
+                           (section_slug, match_kind, pattern, priority, origin)
+                    VALUES (%s, %s, %s, %s, 'auto')""",
+                    (rule["section_slug"], rule["match_kind"],
+                     rule["pattern"], rule["priority"]))
+        return {"sections_created": created, "sections_reused": reused,
+                "sections_removed": removed_sections,
+                "rules_written": len(rules), "rules_removed": len(removed_rules)}
     finally:
         conn.close()

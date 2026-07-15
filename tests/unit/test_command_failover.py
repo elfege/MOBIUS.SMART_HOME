@@ -178,3 +178,70 @@ class TestFailoverChain:
         assert ok is True
         # primary-first ordering: home_1 tried FIRST and won -> home_2 never touched
         assert calls_order == ["home_1"]
+
+
+class _DeafButAcceptingAdmin(_FakeAdmin):
+    """Send accepted, readback NEVER returns state — the .70 None-storm shape."""
+    def get_device(self, device_id):
+        return {"device": {"currentStates": {}}}
+
+
+class _ContradictingAdmin(_FakeAdmin):
+    """Send accepted, readback returns a REAL wrong value (device stayed on)."""
+    def get_device(self, device_id):
+        return {"device": {"currentStates": {"switch": {"value": "on"}}}}
+
+
+class TestTrichotomy:
+    """MSG-1155: VERIFIED / CONTRADICTED->failover / INDETERMINATE->stop.
+    A None readback must never cause another physical actuation."""
+
+    def _commander(self):
+        from services.device_commander import DeviceCommander
+        c = DeviceCommander.__new__(DeviceCommander)
+        c.verify_retries = 2
+        c.verify_delay = 0.0
+        c.operation_retries = 1
+        c.operation_delay = 0.0
+        c.command_timeout = 30.0
+        c._status_lock = __import__("threading").Lock()
+        c._device_status = {}
+        return c
+
+    def _run_chain(self, commander, rows, admin_cls):
+        import time
+        from services.device_commander import CommandResult
+        fakes = {}
+
+        def fake_get_client(ip, name):
+            return fakes.setdefault(name, admin_cls(name))
+
+        res = CommandResult(device_id="200", device_name="X", command="off", args=None)
+        with patch("services.command_failover.fetch_sibling_rows", return_value=rows), \
+             patch("services.device_to_hubs_classifier.get_device_by_canonical_id",
+                   return_value={"label": "X"}), \
+             patch("services.hubitat_admin_client.get_client", fake_get_client), \
+             patch.object(type(commander), "_update_cache_after_verify",
+                          lambda self, *a, **k: None):
+            ok = commander._failover_chain(
+                "200", "off", None, True,
+                {"attribute": "switch", "expected": "off"}, res,
+                exclude_hub_ip=None, device_name="X",
+                start_time=time.monotonic(), use_admin=True)
+        return ok, res, fakes
+
+    def test_indeterminate_sibling_stops_chain_no_third_actuation(self):
+        rows = [row(1, "10", "10.0.0.3", "home_3", hub_id=3),
+                row(2, "20", "10.0.0.4", "home_4", hub_id=4)]
+        ok, res, fakes = self._run_chain(self._commander(), rows, _DeafButAcceptingAdmin)
+        assert ok is True                      # chain STOPPED honestly
+        assert res.success is True and res.verified is False
+        assert "indeterminate" in (res.error or "")
+        assert set(fakes) == {"home_3"}        # second sibling NEVER actuated
+
+    def test_contradicted_sibling_moves_to_next(self):
+        rows = [row(1, "10", "10.0.0.3", "home_3", hub_id=3),
+                row(2, "20", "10.0.0.4", "home_4", hub_id=4)]
+        ok, res, fakes = self._run_chain(self._commander(), rows, _ContradictingAdmin)
+        assert ok is False                     # both contradicted -> honest failure
+        assert set(fakes) == {"home_3", "home_4"}  # chain DID walk on real wrong values

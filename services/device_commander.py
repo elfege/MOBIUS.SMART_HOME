@@ -901,7 +901,24 @@ class DeviceCommander:
             # never succeeded, or verification exhausted).
             failed_send = not result.success
             failed_verify = bool(verify and expected and not result.verified)
-            if (failed_send or failed_verify) and result.status != CommandStatus.TIMEOUT:
+            # TRICHOTOMY (Assistant-2's None-storm brief, MSG-1155): a None
+            # readback is INDETERMINATE, not proven failure — home_2's admin
+            # API answers sends fine but reads back slow/empty (measured
+            # 2.5s), so the device usually HAS actuated. Failing over on
+            # indeterminate would command a sibling copy of a device that
+            # already obeyed (double-actuation — the storm cousin). Only a
+            # CONTRADICTED readback (a real value that differs from expected)
+            # or a failed SEND may engage the chain; indeterminate is left to
+            # the reconcile poll to close.
+            contradicted = result.actual_state is not None
+            if failed_verify and not contradicted and not failed_send:
+                logger.info(
+                    f"{log_prefix} verification INDETERMINATE (no readback) — "
+                    f"NOT failing over (device likely actuated; reconcile "
+                    f"will close the loop)"
+                )
+            if (failed_send or (failed_verify and contradicted)) \
+                    and result.status != CommandStatus.TIMEOUT:
                 if self._failover_chain(
                     device_id, command, args, verify, expected, result,
                     exclude_hub_ip=self._hub_name_to_ip(hub_name),
@@ -1025,6 +1042,7 @@ class DeviceCommander:
 
             # Tight verify: up to 2 polls (not the full verify_retries — the
             # chain must fit several siblings inside one command timeout).
+            saw_value = False
             for _poll in range(min(2, self.verify_retries)):
                 time.sleep(self.verify_delay)
                 try:
@@ -1050,8 +1068,26 @@ class DeviceCommander:
                     logger.info(f"{tag} VERIFIED {expected['attribute']}={actual} "
                                 f"— FAILOVER WIN")
                     return True
+                if actual is not None:
+                    saw_value = True
                 result.actual_state = actual
-            logger.info(f"{tag} did not verify — next sibling")
+            if not saw_value:
+                # TRICHOTOMY (MSG-1155): send was ACCEPTED and readback is
+                # INDETERMINATE — the device likely actuated. Commanding yet
+                # another copy risks triple-actuation for zero information.
+                # Stop the chain honestly: accepted-but-unverified; the
+                # reconcile poll closes the loop.
+                result.success = True
+                result.error = ("failover sibling accepted the command but "
+                                "verification was indeterminate (no readback) "
+                                "— chain stopped, reconcile will confirm")
+                result.status = CommandStatus.IDLE
+                self._set_device_status(device_id, CommandStatus.IDLE)
+                logger.info(f"{tag} accepted, readback INDETERMINATE — chain "
+                            f"stopped (no further siblings actuated)")
+                return True
+            logger.info(f"{tag} CONTRADICTED "
+                        f"({expected['attribute']}={result.actual_state}) — next sibling")
         return False
 
     # =========================================================================

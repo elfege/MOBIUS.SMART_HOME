@@ -30,12 +30,14 @@ interface LegacySurface {
 }
 
 const LEGACY_SURFACES: LegacySurface[] = [
+  // Canonical map = apps/legacy_web/router.py (Architect, 2026-07-14). The
+  // earlier six-tile guess pointed at routes that never existed
+  // (/legacy/dashboard 404'd, /legacy/samsung-tv 404'd, /legacy/hubs was a
+  // redirect) — hubs and TVs both live INSIDE the settings page.
   { title: 'Matter', description: 'Devices, commissioning, hub→hub copy, Get Code', path: '/legacy/matter' },
-  { title: 'Dashboard', description: 'Device dashboard and event charts', path: '/legacy/dashboard' },
-  { title: 'Hubs', description: 'Hubitat hubs, health, eventsocket', path: '/legacy/hubs' },
-  { title: 'TVs', description: 'Samsung TV control and cutoffs', path: '/legacy/samsung-tv' },
+  { title: 'Dashboard', description: 'Device dashboard and event charts', path: '/legacy' },
   { title: 'Sonos', description: 'Speakers and grouping', path: '/legacy/sonos' },
-  { title: 'Settings', description: 'Admin settings and certificates', path: '/legacy/admin/settings' },
+  { title: 'Settings', description: 'System settings · hubs · TVs · certificates', path: '/legacy/admin/settings' },
 ];
 
 /** Open a legacy surface SAME-TAB on web (back button returns to the RN home);
@@ -54,7 +56,9 @@ export function HomeScreen() {
   return (
     <View style={styles.root}>
       <View style={styles.header}>
-        <Text style={styles.title}>MOBIUS</Text>
+        <Text style={styles.title}>
+          MOBIUS<Text style={styles.titleAccent}>.HOME</Text>
+        </Text>
         <Text style={styles.dim}>Home control · admin</Text>
       </View>
       <ScrollView contentContainerStyle={styles.scroll}>
@@ -95,6 +99,9 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg, paddingTop: 40 },
   header: { paddingHorizontal: space.lg, paddingBottom: space.md },
   title: { color: colors.text, fontSize: 28, fontWeight: '700', letterSpacing: 0.5 },
+  // The ".HOME" accent — same high-luminance blue as the legacy navbar's
+  // logo-dot; luminance-contrast carries it (CVD-safe), the hue just agrees.
+  titleAccent: { color: colors.accent },
   dim: { color: colors.textFaint, fontSize: 13, marginTop: space.xs },
   scroll: { padding: space.lg },
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: space.md },

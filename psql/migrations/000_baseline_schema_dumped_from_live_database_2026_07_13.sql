@@ -74,7 +74,12 @@ CREATE SCHEMA dsapp;
 -- Name: dscore; Type: SCHEMA; Schema: -; Owner: -
 --
 
-CREATE SCHEMA dscore;
+-- IF NOT EXISTS (edited 2026-07-14, the ONE tolerated deviation from the raw
+-- dump): the migration runner bootstraps the LEDGER (001 -> dscore schema +
+-- schema_migrations) BEFORE applying 000 on a virgin database, so the bare
+-- CREATE collided and aborted the whole baseline (caught by CI run 1, the
+-- virgin-schema job's very first execution).
+CREATE SCHEMA IF NOT EXISTS dscore;
 
 
 --

@@ -891,10 +891,47 @@ class DeviceCommander:
                         )
                         time.sleep(self.operation_delay)
 
-            # After all outer retries exhausted
+            # After all outer retries exhausted on the ROUTED hub: SIBLING
+            # FAILOVER CHAIN (ITEM2 ruling 2026-07-14). The same physical
+            # device often exists on other hubs (LAN drivers, multi-admin /
+            # copied Matter). Walk those copies SEQUENTIALLY — never racing;
+            # two hubs driving one actuator concurrently is a pairing-storm
+            # cousin — one tight attempt each, inside the overall timeout.
+            # Engages only when the routed hub demonstrably failed (send
+            # never succeeded, or verification exhausted).
+            failed_send = not result.success
+            failed_verify = bool(verify and expected and not result.verified)
+            # TRICHOTOMY (Assistant-2's None-storm brief, MSG-1155): a None
+            # readback is INDETERMINATE, not proven failure — home_2's admin
+            # API answers sends fine but reads back slow/empty (measured
+            # 2.5s), so the device usually HAS actuated. Failing over on
+            # indeterminate would command a sibling copy of a device that
+            # already obeyed (double-actuation — the storm cousin). Only a
+            # CONTRADICTED readback (a real value that differs from expected)
+            # or a failed SEND may engage the chain; indeterminate is left to
+            # the reconcile poll to close.
+            contradicted = result.actual_state is not None
+            if failed_verify and not contradicted and not failed_send:
+                logger.info(
+                    f"{log_prefix} verification INDETERMINATE (no readback) — "
+                    f"NOT failing over (device likely actuated; reconcile "
+                    f"will close the loop)"
+                )
+            if (failed_send or (failed_verify and contradicted)) \
+                    and result.status != CommandStatus.TIMEOUT:
+                if self._failover_chain(
+                    device_id, command, args, verify, expected, result,
+                    exclude_hub_ip=self._hub_name_to_ip(hub_name),
+                    device_name=device_name, start_time=start_time,
+                    use_admin=use_admin_for_commands,
+                ):
+                    # A sibling actuated (and verified, when asked): the
+                    # command SUCCEEDED for the operator. Close the breaker.
+                    self._record_verify_result(device_id, True)
+
             if not result.verified and verify and expected:
                 result.status = CommandStatus.FAILED
-                result.error = (
+                result.error = result.error or (
                     f"Verification failed after "
                     f"{self.operation_retries} operation attempts: "
                     f"expected {expected['attribute']}="
@@ -927,6 +964,131 @@ class DeviceCommander:
 
         logger.debug(f"{log_prefix} completed: {result}")
         return result
+
+    def _failover_chain(
+        self,
+        device_id: str,
+        command: str,
+        args: Optional[List],
+        verify: bool,
+        expected: Optional[Dict],
+        result: "CommandResult",
+        exclude_hub_ip: Optional[str],
+        device_name: str,
+        start_time: float,
+        use_admin: bool,
+    ) -> bool:
+        """Walk the device's sibling copies on OTHER hubs, sequentially, one
+        tight attempt each (1 send + up to 2 verify polls), inside the overall
+        command timeout. Mutates `result` in place on success and returns True.
+
+        Sequential by ruling (ITEM2, 2026-07-14): racing two hubs at one
+        actuator is forbidden. Runs in the commander's executor thread like
+        the rest of the sync pipeline, so its sleeps do not block the loop.
+        """
+        try:
+            from services.command_failover import fetch_sibling_rows, order_targets
+            from services.device_to_hubs_classifier import get_device_by_canonical_id
+
+            row = get_device_by_canonical_id(device_id)
+            label = (row or {}).get("label") or device_name
+            targets = order_targets(fetch_sibling_rows(device_id, label),
+                                    exclude_hub_ip=exclude_hub_ip)
+        except Exception as e:  # noqa: BLE001 — failover must never add a new failure mode
+            logger.debug(f"[Failover] target resolution failed for {device_id}: {e}")
+            return False
+        if not targets:
+            return False
+
+        logger.info(
+            f"[Failover] {_C}{device_name or device_id}{_R} routed hub failed — "
+            f"trying {len(targets)} sibling cop{'y' if len(targets) == 1 else 'ies'}: "
+            f"{[t['hub_name'] + '#' + t['hubitat_id'] for t in targets]}"
+        )
+        for n, t in enumerate(targets, 1):
+            if (time.monotonic() - start_time) >= self.command_timeout:
+                logger.warning(f"[Failover] {device_name}: overall timeout — chain stopped")
+                return False
+            tag = f"[Failover {n}/{len(targets)}] {_C}{device_name}{_R} @{t['hub_name']}#{t['hubitat_id']}"
+            try:
+                if use_admin:
+                    from services.hubitat_admin_client import (
+                        get_client, to_maker_shape,
+                    )
+                    admin = get_client(t["hub_ip"], t["hub_name"])
+                    arg = args[0] if args else None
+                    if arg is not None and not isinstance(arg, dict):
+                        arg = str(arg)
+                    send_ok = admin.send_command(int(t["hubitat_id"]), command, arg)
+                else:
+                    from services.hubitat_client import get_hub_client_by_ip
+                    client = get_hub_client_by_ip(t["hub_ip"])
+                    send_ok = bool(client) and client.send_command(
+                        t["hubitat_id"], command, args)
+            except Exception as e:  # noqa: BLE001 — this sibling failed; try the next
+                logger.info(f"{tag} send exception: {e}")
+                continue
+            if not send_ok:
+                logger.info(f"{tag} send refused")
+                continue
+
+            if not verify or not expected:
+                result.success = True
+                result.error = None
+                result.status = CommandStatus.IDLE
+                self._set_device_status(device_id, CommandStatus.IDLE)
+                logger.info(f"{tag} sent OK (no verification) — FAILOVER WIN")
+                return True
+
+            # Tight verify: up to 2 polls (not the full verify_retries — the
+            # chain must fit several siblings inside one command timeout).
+            saw_value = False
+            for _poll in range(min(2, self.verify_retries)):
+                time.sleep(self.verify_delay)
+                try:
+                    if use_admin:
+                        raw = admin.get_device(int(t["hubitat_id"]))
+                        data = to_maker_shape(raw)
+                    else:
+                        data = client.get_device(t["hubitat_id"])
+                    actual = extract_attribute(data, expected["attribute"]) if data else None
+                except Exception as e:  # noqa: BLE001 — poll failed; poll again or move on
+                    logger.debug(f"{tag} verify poll exception: {e}")
+                    continue
+                if actual == expected["expected"]:
+                    result.success = True
+                    result.verified = True
+                    result.actual_state = actual
+                    result.expected_state = expected["expected"]
+                    result.error = None
+                    result.status = CommandStatus.VERIFIED
+                    self._set_device_status(device_id, CommandStatus.VERIFIED)
+                    self._update_cache_after_verify(
+                        device_id, expected["attribute"], actual)
+                    logger.info(f"{tag} VERIFIED {expected['attribute']}={actual} "
+                                f"— FAILOVER WIN")
+                    return True
+                if actual is not None:
+                    saw_value = True
+                result.actual_state = actual
+            if not saw_value:
+                # TRICHOTOMY (MSG-1155): send was ACCEPTED and readback is
+                # INDETERMINATE — the device likely actuated. Commanding yet
+                # another copy risks triple-actuation for zero information.
+                # Stop the chain honestly: accepted-but-unverified; the
+                # reconcile poll closes the loop.
+                result.success = True
+                result.error = ("failover sibling accepted the command but "
+                                "verification was indeterminate (no readback) "
+                                "— chain stopped, reconcile will confirm")
+                result.status = CommandStatus.IDLE
+                self._set_device_status(device_id, CommandStatus.IDLE)
+                logger.info(f"{tag} accepted, readback INDETERMINATE — chain "
+                            f"stopped (no further siblings actuated)")
+                return True
+            logger.info(f"{tag} CONTRADICTED "
+                        f"({expected['attribute']}={result.actual_state}) — next sibling")
+        return False
 
     # =========================================================================
     # Status Management (thread-safe)

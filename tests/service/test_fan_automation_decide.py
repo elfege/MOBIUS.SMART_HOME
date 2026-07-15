@@ -1,24 +1,41 @@
 """
-FanAutomation._decide() resolves the final action+level for the fan based
-on a priority list of rules:
+FanAutomationApp._decide() — v2 contract (light-driven + humidity anti-noise).
+=============================================================================
 
-  1. exclusionMode → off
-  2. keep_off_switch on → off
-  3. humidity ≥ threshold (with hysteresis) → on @ humidityFanLevel
-  4. presence rule (runWhenHome / runWhenAway / runOnlyWhenHome)
-  5. motion (active → motionActiveLevel; inactive → motionInactiveLevel)
-  6. default → alwaysOnLevel
+Fan Automation was deliberately rewritten to v2 ("operator redesign
+2026-06-24", commit aa7e080 "rewrite fan_automation v2 — light-driven"). The
+old v1 rule list (exclusion mode / keep-off switch / presence / motion /
+alwaysOn default) was REMOVED wholesale — those settings, device categories
+and helpers no longer exist in apps/fan_automation/app.py. These tests were
+updated to pin the v2 contract as documented in that module's docstring.
 
-These tests pin down the priority order and each rule's branch logic.
+v2 model (see apps/fan_automation/app.py:1-29 and :130-221):
 
-Construction strategy: we instantiate FanAutomationApp directly with the
-minimum required instance_data, and override the runtime helpers
-(_get_current_mode, _read_switch_state, _max_humidity, _someone_home,
-_motion_active_within) to control the world state per test. _decide is a
-pure function over those inputs once we control them.
+  1. Light ON  -> fan = fanWhenLightOn (comfort level). Humidity is IGNORED
+     while the light is on; the humidity phase state is cleared.
+  2. Light OFF + humid (and a humidity_sensor selected) -> the humidity state
+     machine: HIGH (fanWhenHumid) -> QUIET (antiNoiseLevel) -> RAMP (steps
+     back up toward fanWhenHumid).
+  3. Light OFF + not humid -> keep running for `runAfterLightOff` (action
+     'hold' while the run-out timer is live), then apply fanWhenLightOff
+     (default 0 == off).
+
+Decision dict shape (apps/fan_automation/app.py:213-221):
+    {'action': 'on',  'level': N, 'reason': '...', 'expected': 'on:N'}
+    {'action': 'off', 'level': None, 'reason': '...', 'expected': 'off'}
+    {'action': 'hold', 'reason': '...'}                # no level / expected
+Note: v2 decisions carry NO 'rule' key (v1 did) — assert on 'reason'.
+
+Construction strategy: instantiate FanAutomationApp directly with a synthetic
+instance_data and a stub instance_manager (so _save_memoization is a no-op
+against the MagicMock — no DB). We override only the two world-sensing
+boundary helpers the decision reads — _light_is_on() and _is_humid()
+(plus _humidity_now() for the hysteresis tests) — and let the real decision
+logic run. Time-based phase transitions are made deterministic by seeding the
+memoized phase timestamp to the epoch (1.0), so the elapsed wall-clock is
+always far past any threshold.
 """
 
-from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -29,9 +46,9 @@ from apps.fan_automation.app import FanAutomationApp
 def _make_app(*, settings=None, devices=None, memo=None):
     """Build a FanAutomationApp with the bare minimum to call _decide.
 
-    We bypass the heavy mixin __init__ logic by injecting a synthetic
-    instance_data and a stub instance_manager. The runtime helpers we
-    override directly on the instance after construction.
+    Injects synthetic instance_data + a MagicMock instance_manager (which
+    absorbs _save_memoization → no database), then overrides the v2
+    world-sensing helpers so each test controls light/humidity state.
     """
     instance_data = {
         "id": 1,
@@ -43,298 +60,268 @@ def _make_app(*, settings=None, devices=None, memo=None):
     }
     instance_manager = MagicMock()
     app = FanAutomationApp(instance_data, instance_manager)
-    # Stub external IO that _decide may touch
-    app._get_current_mode = MagicMock(return_value=None)
-    app._read_switch_state = MagicMock(return_value="off")
-    app._max_humidity = MagicMock(return_value=None)
-    app._someone_home = MagicMock(return_value=False)
-    app._motion_active_within = MagicMock(return_value=False)
+    # Stub the world-sensing boundary that _decide() consults. Defaults:
+    # light off, not humid, no humidity reading. Real decision logic runs.
+    app._light_is_on = MagicMock(return_value=False)
+    app._is_humid = MagicMock(return_value=False)
+    app._humidity_now = MagicMock(return_value=None)
     return app
 
 
 @pytest.mark.service
-class TestRulePriority:
-    """Higher-priority rule wins even when lower-priority rule would trigger."""
+class TestPriority:
+    """v2 precedence: light-on beats humidity; humidity beats the run-out."""
 
-    def test_rule1_exclusion_mode_overrides_all(self):
+    def test_light_on_overrides_humidity(self):
+        # Light ON short-circuits (app.py:133-138): humidity is ignored even
+        # when the sensor reads humid — the fan sits at the comfort level.
         app = _make_app(
-            settings={
-                "exclusionModes": ["Sleeping"],
-                "humidityEnabled": True,
-                "humidityThreshold": 60,
-                "presenceEnabled": True,
-                "motionEnabled": True,
-                "alwaysOnLevel": 100,
-            },
-            devices={
-                "humidity_sensors": [1],
-                "presence_sensors": [2],
-                "motion_sensors": [3],
-            },
+            settings={"fanWhenLightOn": 30, "fanWhenHumid": 100},
+            devices={"light": [2], "humidity_sensor": [1], "fans": [10]},
         )
-        app._get_current_mode.return_value = "Sleeping"
-        app._max_humidity.return_value = 80  # would trigger humidity rule
-        app._someone_home.return_value = True
-        app._motion_active_within.return_value = True
+        app._light_is_on.return_value = True
+        app._is_humid.return_value = True  # would drive humidity if light were off
+
+        d = app._decide()
+        assert d["action"] == "on"
+        assert d["level"] == 30                  # fanWhenLightOn, NOT fanWhenHumid
+        assert "light on" in d["reason"]
+
+    def test_humidity_overrides_run_out_when_light_off(self):
+        # Light OFF + humid routes to the humidity machine (app.py:141-143),
+        # superseding the not-humid run-out 'hold' branch (app.py:146-161).
+        app = _make_app(
+            settings={"fanWhenHumid": 100},
+            devices={"light": [2], "humidity_sensor": [1], "fans": [10]},
+        )
+        app._is_humid.return_value = True
+
+        d = app._decide()
+        assert d["action"] == "on"               # not 'hold'
+        assert d["level"] == 100                  # fanWhenHumid (fresh HIGH phase)
+        assert "humidity high" in d["reason"]
+
+    def test_run_out_holds_before_applying_light_off_level(self):
+        # Light OFF + not humid, first evaluation: start the run-out timer and
+        # HOLD (keep the fan as-is) rather than immediately dropping to the
+        # off level (app.py:146-155). 'hold' here IS the documented intent.
+        app = _make_app(
+            settings={"runAfterLightOff": 60, "fanWhenLightOff": 0},
+            devices={"light": [2], "fans": [10]},
+        )
+        d = app._decide()
+        assert d["action"] == "hold"
+        assert "run-out" in d["reason"]
+
+
+@pytest.mark.service
+class TestLightDriven:
+    """The fan follows the light: comfort level on, run-out then off-level."""
+
+    def test_light_on_uses_comfort_level(self):
+        app = _make_app(
+            settings={"fanWhenLightOn": 40},
+            devices={"light": [2], "fans": [10]},
+        )
+        app._light_is_on.return_value = True
+
+        d = app._decide()
+        assert d["action"] == "on"
+        assert d["level"] == 40
+        assert d["expected"] == "on:40"
+        assert "light on" in d["reason"]
+
+    def test_light_on_zero_level_means_off(self):
+        # fanWhenLightOn == 0 collapses to an 'off' action (app.py:219-220).
+        app = _make_app(
+            settings={"fanWhenLightOn": 0},
+            devices={"light": [2], "fans": [10]},
+        )
+        app._light_is_on.return_value = True
 
         d = app._decide()
         assert d["action"] == "off"
-        assert "exclusionModes" in d["reason"]
+        assert d["level"] is None
+        assert "light on" in d["reason"]
 
-    def test_rule2_keep_off_switch_overrides_humidity(self):
+    def test_light_off_not_humid_first_eval_holds_for_runout(self):
         app = _make_app(
-            settings={
-                "humidityEnabled": True,
-                "humidityThreshold": 60,
-                "humidityFanLevel": 100,
-            },
-            devices={
-                "keep_off_switches": [99],
-                "humidity_sensors": [1],
-            },
+            settings={"runAfterLightOff": 90, "runAfterLightOffUnit": "Seconds"},
+            devices={"light": [2], "fans": [10]},
         )
-        # keep_off switch reports 'on'
-        app._read_switch_state = MagicMock(
-            side_effect=lambda did: "on" if did == 99 else "off"
-        )
-        app._max_humidity.return_value = 80
+        d = app._decide()
+        assert d["action"] == "hold"
+        assert "run-out" in d["reason"]
+        # The run-out deadline was armed (app.py:151-154).
+        assert app.get_memo("offdelay_until") is not None
 
+    def test_light_off_applies_off_level_after_run_out_elapsed(self):
+        # Run-out deadline already in the past -> apply fanWhenLightOff (0 =
+        # off) (app.py:156-161). Seed the deadline at the epoch so it is
+        # unambiguously elapsed regardless of wall-clock.
+        app = _make_app(
+            settings={"fanWhenLightOff": 0},
+            devices={"light": [2], "fans": [10]},
+            memo={"offdelay_until": 1.0, "switch_state": {}},
+        )
         d = app._decide()
         assert d["action"] == "off"
-        assert "keep_off" in d["reason"]
-
-    def test_rule3_humidity_overrides_presence_and_motion(self):
-        app = _make_app(
-            settings={
-                "humidityEnabled": True,
-                "humidityThreshold": 60,
-                "humidityFanLevel": 80,
-                "presenceEnabled": True,
-                "presenceMode": "runWhenHome",
-                "motionEnabled": True,
-            },
-            devices={
-                "humidity_sensors": [1],
-                "presence_sensors": [2],
-                "motion_sensors": [3],
-            },
-        )
-        app._max_humidity.return_value = 75
-        app._someone_home.return_value = False  # would force off via presence
-        app._motion_active_within.return_value = False
-
-        d = app._decide()
-        assert d["action"] == "on"
-        assert d["level"] == 80
-        assert d["rule"] == "humidity"
-
-    def test_rule5_motion_overrides_default(self):
-        app = _make_app(
-            settings={
-                "motionEnabled": True,
-                "motionActiveLevel": 30,
-                "motionInactiveLevel": 90,
-                "motionTimeoutSeconds": 300,
-                "alwaysOnLevel": 100,
-            },
-            devices={"motion_sensors": [3]},
-        )
-        app._motion_active_within.return_value = True
-
-        d = app._decide()
-        assert d["action"] == "on"
-        assert d["level"] == 30
-        assert d["rule"] == "motion"
-
-    def test_rule6_default_when_no_other_rules_apply(self):
-        app = _make_app(
-            settings={"alwaysOnLevel": 75},
-            devices={"fans": [10]},
-        )
-        d = app._decide()
-        assert d["action"] == "on"
-        assert d["level"] == 75
-        assert d["rule"] == "default"
+        assert "light off" in d["reason"]
 
 
 @pytest.mark.service
 class TestHumidityHysteresis:
-    """Once humidity engaged the fan, fan stays on until humidity drops below
-    threshold - hysteresis (default 5). Prevents oscillation at the boundary."""
+    """_is_humid() latches ON at >= threshold, OFF only below (threshold -
+    humidityOffset). Prevents oscillation at the boundary (app.py:386-401)."""
 
-    def test_engages_at_or_above_threshold(self):
+    @staticmethod
+    def _hyst_app(*, humidity, settings, memo=None):
+        """Build an app whose REAL _is_humid() runs against a fixed reading.
+
+        _make_app() blanket-mocks _is_humid; here we delete that instance-
+        level mock so the genuine class method (the code under test) executes,
+        and feed it a controlled _humidity_now().
+        """
         app = _make_app(
-            settings={
-                "humidityEnabled": True,
-                "humidityThreshold": 60,
-                "humidityHysteresis": 5,
-                "humidityFanLevel": 100,
-            },
-            devices={"humidity_sensors": [1]},
+            settings=settings,
+            devices={"humidity_sensor": [1]},
+            memo=memo,
         )
-        app._max_humidity.return_value = 60.0
+        del app._is_humid  # unmask the real FanAutomationApp._is_humid
+        app._humidity_now = MagicMock(return_value=humidity)
+        return app
 
-        d = app._decide()
-        assert d["action"] == "on"
-        assert d["rule"] == "humidity"
-
-    def test_stays_engaged_in_hysteresis_band(self):
-        # Engaged previously (memoized) → 58 still engaged (60 - 5 = 55)
-        app = _make_app(
-            settings={
-                "humidityEnabled": True,
-                "humidityThreshold": 60,
-                "humidityHysteresis": 5,
-                "humidityFanLevel": 100,
-            },
-            devices={"humidity_sensors": [1]},
-            memo={"rule_in_effect": "humidity"},
+    def test_latches_on_at_or_above_threshold(self):
+        app = self._hyst_app(
+            humidity=65.0,  # exactly at threshold
+            settings={"humidityThreshold": 65, "humidityOffset": 5},
         )
-        app._max_humidity.return_value = 58.0
+        assert app._is_humid() is True
+        assert app.get_memo("humid_latched") is True
 
-        d = app._decide()
-        assert d["action"] == "on"
-        assert d["rule"] == "humidity"
-
-    def test_disengages_below_hysteresis_band(self):
-        app = _make_app(
-            settings={
-                "humidityEnabled": True,
-                "humidityThreshold": 60,
-                "humidityHysteresis": 5,
-                "humidityFanLevel": 100,
-                "alwaysOnLevel": 50,
-            },
-            devices={"humidity_sensors": [1]},
-            memo={"rule_in_effect": "humidity"},
+    def test_stays_latched_within_offset_band(self):
+        # Already latched; 62 is below threshold(65) but at/above (65-5=60),
+        # so it stays engaged.
+        app = self._hyst_app(
+            humidity=62.0,
+            settings={"humidityThreshold": 65, "humidityOffset": 5},
+            memo={"humid_latched": True, "switch_state": {}},
         )
-        app._max_humidity.return_value = 54.0  # below 55
+        assert app._is_humid() is True
 
-        d = app._decide()
-        # Falls through humidity → no other rule enabled → default
-        assert d["rule"] == "default"
-        assert d["level"] == 50
-
-    def test_does_not_engage_below_threshold_when_never_was(self):
-        app = _make_app(
-            settings={
-                "humidityEnabled": True,
-                "humidityThreshold": 60,
-                "humidityHysteresis": 5,
-                "alwaysOnLevel": 50,
-            },
-            devices={"humidity_sensors": [1]},
-            memo={"rule_in_effect": "default"},  # not currently humidity
+    def test_unlatches_below_offset_band(self):
+        # Latched, but 59 < (65 - 5 = 60) -> drops out.
+        app = self._hyst_app(
+            humidity=59.0,
+            settings={"humidityThreshold": 65, "humidityOffset": 5},
+            memo={"humid_latched": True, "switch_state": {}},
         )
-        app._max_humidity.return_value = 58.0
+        assert app._is_humid() is False
 
-        d = app._decide()
-        assert d["rule"] == "default"
+    def test_does_not_latch_below_threshold_when_never_was(self):
+        # Not previously latched; 62 is under threshold(65) and inside the
+        # band, so with no prior latch it must NOT engage.
+        app = self._hyst_app(
+            humidity=62.0,
+            settings={"humidityThreshold": 65, "humidityOffset": 5},
+            memo={"humid_latched": False, "switch_state": {}},
+        )
+        assert app._is_humid() is False
 
 
 @pytest.mark.service
-class TestPresenceRule:
-    def test_run_when_home_off_when_away(self):
+class TestHumidityStateMachine:
+    """Light-off + humid drives HIGH -> QUIET -> RAMP (app.py:163-211).
+
+    Phase timestamps are seeded to 1.0 (the epoch) so the elapsed wall-clock
+    always exceeds any sustained/hold/interval threshold under test.
+    """
+
+    def _humid_app(self, *, settings, memo=None):
         app = _make_app(
-            settings={
-                "presenceEnabled": True,
-                "presenceMode": "runWhenHome",
-            },
-            devices={"presence_sensors": [1]},
+            settings=settings,
+            devices={"light": [2], "humidity_sensor": [1], "fans": [10]},
+            memo=memo,
         )
-        app._someone_home.return_value = False
+        app._is_humid.return_value = True  # light already off by default
+        return app
 
-        d = app._decide()
-        assert d["action"] == "off"
-
-    def test_run_when_away_off_when_someone_home(self):
-        app = _make_app(
-            settings={
-                "presenceEnabled": True,
-                "presenceMode": "runWhenAway",
-                "alwaysOnLevel": 50,
-            },
-            devices={"presence_sensors": [1]},
-        )
-        app._someone_home.return_value = True
-
-        d = app._decide()
-        assert d["action"] == "off"
-
-    def test_only_when_home_falls_through_to_default_when_someone_home(self):
-        # When mode = runOnlyWhenHome AND someone is home: presence rule
-        # doesn't force off, so we fall through to the next rule. With no
-        # motion enabled, we hit the default rule.
-        app = _make_app(
-            settings={
-                "presenceEnabled": True,
-                "presenceMode": "runOnlyWhenHome",
-                "alwaysOnLevel": 75,
-            },
-            devices={"presence_sensors": [1]},
-        )
-        app._someone_home.return_value = True
-
-        d = app._decide()
-        assert d["action"] == "on"
-        assert d["level"] == 75
-
-
-@pytest.mark.service
-class TestMotionRule:
-    def test_motion_active_uses_active_level(self):
-        app = _make_app(
-            settings={
-                "motionEnabled": True,
-                "motionActiveLevel": 25,
-                "motionInactiveLevel": 75,
-                "motionTimeoutSeconds": 300,
-            },
-            devices={"motion_sensors": [3]},
-        )
-        app._motion_active_within.return_value = True
-
-        d = app._decide()
-        assert d["action"] == "on"
-        assert d["level"] == 25
-        assert d["rule"] == "motion"
-
-    def test_motion_inactive_uses_inactive_level(self):
-        # Inverse semantic: full speed when nobody around
-        app = _make_app(
-            settings={
-                "motionEnabled": True,
-                "motionActiveLevel": 25,
-                "motionInactiveLevel": 100,
-                "motionTimeoutSeconds": 300,
-            },
-            devices={"motion_sensors": [3]},
-        )
-        app._motion_active_within.return_value = False
+    def test_fresh_humid_runs_high(self):
+        # No phase yet -> initialize to HIGH and run at fanWhenHumid.
+        app = self._humid_app(settings={"fanWhenHumid": 100})
 
         d = app._decide()
         assert d["action"] == "on"
         assert d["level"] == 100
-        assert d["rule"] == "motion"
+        assert "humidity high" in d["reason"]
+        assert app.get_memo("hum_phase") == "high"
 
-    def test_motion_disabled_falls_through_to_default(self):
-        app = _make_app(
-            settings={
-                "motionEnabled": False,
-                "alwaysOnLevel": 60,
-            },
-            devices={"motion_sensors": [3]},
+    def test_sustained_zero_stays_high_indefinitely(self):
+        # humiditySustainedMinutes == 0 means "run high until humidity clears"
+        # — never quiets, even though the seeded phase_start is ancient
+        # (app.py:178-186).
+        app = self._humid_app(
+            settings={"fanWhenHumid": 100, "humiditySustainedMinutes": 0},
+            memo={"hum_phase": "high", "phase_start": 1.0, "switch_state": {}},
         )
         d = app._decide()
-        assert d["rule"] == "default"
+        assert d["action"] == "on"
+        assert d["level"] == 100
+        assert "humidity high" in d["reason"]
 
-    def test_motion_enabled_but_no_sensors_falls_through(self):
-        app = _make_app(
+    def test_high_transitions_to_quiet_after_sustained(self):
+        # After humiditySustainedMinutes at HIGH -> drop to the quiet level.
+        app = self._humid_app(
             settings={
-                "motionEnabled": True,
-                "alwaysOnLevel": 60,
+                "fanWhenHumid": 100,
+                "humiditySustainedMinutes": 1,
+                "antiNoiseLevel": 25,
             },
-            devices={},  # no motion sensors selected
+            memo={"hum_phase": "high", "phase_start": 1.0, "switch_state": {}},
         )
         d = app._decide()
-        assert d["rule"] == "default"
+        assert d["action"] == "on"
+        assert d["level"] == 25                    # antiNoiseLevel
+        assert "humidity quiet" in d["reason"]
+        assert app.get_memo("hum_phase") == "quiet"
+
+    def test_quiet_transitions_to_ramp_after_hold(self):
+        # After the quiet hold elapses -> enter RAMP, starting at the quiet
+        # level (app.py:188-198).
+        app = self._humid_app(
+            settings={
+                "fanWhenHumid": 100,
+                "antiNoiseLevel": 25,
+                "antiNoiseHold": 1,
+                "antiNoiseHoldUnit": "Minutes",
+            },
+            memo={"hum_phase": "quiet", "phase_start": 1.0, "switch_state": {}},
+        )
+        d = app._decide()
+        assert d["action"] == "on"
+        assert d["level"] == 25
+        assert "humidity ramp start" in d["reason"]
+        assert app.get_memo("hum_phase") == "ramp"
+
+    def test_ramp_steps_up_toward_high(self):
+        # In RAMP, once the interval elapses, raise by rampStepPercent of
+        # fanWhenHumid, capped at fanWhenHumid (app.py:201-211).
+        # step = int(100 * 25 / 100) = 25 -> 25 + 25 = 50.
+        app = self._humid_app(
+            settings={
+                "fanWhenHumid": 100,
+                "antiNoiseLevel": 25,
+                "rampStepPercent": 25,
+                "rampIntervalMinutes": 1,
+            },
+            memo={
+                "hum_phase": "ramp",
+                "ramp_level": 25,
+                "last_ramp": 1.0,
+                "switch_state": {},
+            },
+        )
+        d = app._decide()
+        assert d["action"] == "on"
+        assert d["level"] == 50
+        assert "humidity ramp" in d["reason"]

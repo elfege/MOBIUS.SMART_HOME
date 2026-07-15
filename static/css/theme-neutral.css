@@ -35,9 +35,12 @@
     --color-accent:              #8b7d63;        /* warm slate, not orange */
 
     /* ---------- semantic (muted) ---------- */
-    --color-success:        #6a8a5a;             /* sage, not lime */
-    --color-success-border: #4d6845;
-    --color-success-glow:   rgba(106, 138, 90, 0.30);
+    /* Affirmative = BLUE, never green (pin 77, 2026-07-14): the operator is
+       colorblind and bans green outright — stricter than generic CVD-safety.
+       Shape/label reinforcement rides in matter.css (::before glyphs). */
+    --color-success:        #89b4fa;             /* high-luminance blue */
+    --color-success-border: #3a5270;
+    --color-success-glow:   rgba(137, 180, 250, 0.30);
 
     --color-warning:        #c79a5a;
     --color-danger:         #a85a5a;             /* brick, not fire-engine */
@@ -47,9 +50,11 @@
     --color-neutral:        #7a808c;
 
     /* ---------- state badges, also de-saturated ---------- */
-    --color-state-green-bg:   #243426;
-    --color-state-green-text: #a9c4a0;
-    --color-state-green-border: #3a5237;
+    /* Values are BLUE; the -green- names are a lying-legacy kept for now —
+       rename sweep queued separately (pin-77 spec §5). */
+    --color-state-green-bg:   #1e2a3a;
+    --color-state-green-text: #bcd0f5;
+    --color-state-green-border: #3a5270;
 
     --color-state-red-bg:     #3a2424;
     --color-state-red-text:   #d5a0a0;
@@ -185,7 +190,7 @@
 
 .wizard-steps .step.completed::after {
     content: ' ✓';
-    color: #6a8a5a;
+    color: var(--color-success);  /* blue — green banned (pin 77); glyph already carries the state */
     margin-left: 4px;
 }
 
@@ -461,7 +466,7 @@ body.colorblind {
     --color-primary-hover: #1F8DC8;
     --color-primary-alpha-15: rgba(0, 114, 178, 0.15);
     --color-primary-alpha-30: rgba(0, 114, 178, 0.30);
-    --color-success: #009E73;       /* Okabe-Ito bluish green */
+    --color-success: #7aa2f7;       /* was Okabe-Ito #009E73 — even 'bluish green' reads green to the operator; banned (pin 77) */
     --color-danger:  #D55E00;       /* Okabe-Ito vermilion (NOT pure red — distinguishable from blue under CVD) */
     --color-warning: #E69F00;       /* Okabe-Ito orange */
 }

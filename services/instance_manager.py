@@ -435,12 +435,40 @@ class InstanceManager:
 
         Args:
             instance_id: Instance ID
-            duration_minutes: Pause duration (None for indefinite)
+            duration_minutes: Pause duration. EXPLICIT 0 = indefinite.
+                None = caller expressed no duration -> the instance's OWN
+                configured default applies (universal pause contract:
+                settings.pauseDuration + pauseDurationUnit). A duration-less
+                pause used to mean indefinite, which broke every UI pause
+                button that sends no body: TAT (instance 13) sat paused
+                forever on 2026-07-15 while the operator expected his
+                configured 300-minute auto-resume.
             reason: Optional pause reason
 
         Returns:
             True if pause succeeded
         """
+        if duration_minutes is None:
+            try:
+                inst = self.get_instance(instance_id)
+                s = (inst or {}).get('settings') or {}
+                dur = float(s.get('pauseDuration') or 0)
+                unit = str(s.get('pauseDurationUnit') or 'Minutes').lower()
+                duration_minutes = (dur / 60.0) if unit.startswith('sec') else dur
+                if duration_minutes:
+                    self.logger.info(
+                        f"pause_instance({instance_id}): no duration given — "
+                        f"using the instance's configured default "
+                        f"({dur:g} {unit}) per the universal pause contract"
+                    )
+            except Exception as e:
+                # Degrade to the old indefinite behavior, loudly.
+                self.logger.warning(
+                    f"pause_instance({instance_id}): default-duration "
+                    f"resolution failed ({e}) — pausing indefinitely"
+                )
+                duration_minutes = 0
+
         update_data = {
             'is_paused': True,
             'pause_reason': reason

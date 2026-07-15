@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "MOBIUS Admin",
+    "name": "MOBIUS.HOME",
     "slug": "mobius-admin",
     "version": "0.1.0",
     "orientation": "default",
@@ -11,7 +11,8 @@
     },
     "web": {
       "bundler": "metro",
-      "output": "single"
+      "output": "single",
+      "favicon": "./public/favicon.png"
     }
   }
 }

@@ -1240,6 +1240,14 @@ async def get_devices(capability: Optional[str] = Query(None)):
             # appearing in the hub pull (2026-06-19). Removed devices must
             # not stay selectable in the wizard.
             'is_present': 'eq.true',
+            # ONE row per physical device (operator 2026-07-14: "dedup is
+            # broken"). The classifier already elects a primary-hub winner per
+            # same-label group and flags the mirrors is_name_duplicate=true
+            # (LAN/ESP devices exist on all 3 hubs; Matter devices exist per
+            # admin hub after a hub->hub copy). Pickers must offer the WINNER
+            # only — commands route through it (sibling failover is the
+            # commander's job, not the user's). not.is.true keeps NULL rows.
+            'is_name_duplicate': 'not.is.true',
         }
         if capability:
             # PostgREST JSONB array-contains: cs.["value"] for JSONB array
@@ -1288,6 +1296,9 @@ async def get_devices_by_categories(categories: str = Query(...)):
                 # Hide hub-pruned devices (is_present=false), same as the
                 # per-capability /devices endpoint above. 2026-06-19.
                 'is_present': 'eq.true',
+                # And hide classifier-flagged same-label mirrors — one row per
+                # physical device, winner only (see /api/devices, 2026-07-14).
+                'is_name_duplicate': 'not.is.true',
             },
             timeout=5,
         )
@@ -2421,6 +2432,11 @@ async def matter_nodes():
                     or match.get('device_name')
                 )
                 node['_hubitat_device_id'] = match.get('maker_api_device_id')
+                # C (MSG-1035): native-Matter ownership — TRUE only when WE
+                # commissioned it directly (primary admin), FALSE when Hubitat-
+                # adopted. Sourced from the DB column (migration 016), so the UI's
+                # dormant .native-matter styling lights up the moment a row is true.
+                node['_is_native_matter'] = bool(match.get('is_native_matter'))
                 # Enrich for the Matter UI: hub link target + responsiveness
                 # signals (matter_discovery refreshes is_online/last_seen_at).
                 node['_hub_ip'] = match.get('hub_ip')
@@ -3369,20 +3385,47 @@ async def matter_hubitat_devices():
         if not resp.ok:
             return []
         rows = resp.json()
-        # Live hub-name + primary flag by hub_ip.
-        live, primary_ips = {}, set()
+        # Live hub-name + primary flag + DB id by hub_ip.
+        live, primary_ips, hub_id_by_ip = {}, set(), {}
         try:
             hc = req.get(f"{postgrest_url}/hub_config",
-                         params={"select": "hub_name,hub_ip,is_primary"}, timeout=5)
+                         params={"select": "id,hub_name,hub_ip,is_primary"}, timeout=5)
             if hc.ok:
                 for h in hc.json():
                     live[h["hub_ip"]] = h["hub_name"]
+                    hub_id_by_ip[h["hub_ip"]] = h.get("id")
                     if h.get("is_primary"):
                         primary_ips.add(h["hub_ip"])
         except Exception as e:
             logger.debug(f"hub-name live-enrich skipped: {e}")
+
+        # Canonical-device anchor map for the "mapped → db #N" chip (MSG-1035 A).
+        # Batched: ONE fetch of the present canonical registry keyed by the exact
+        # (hub_ip, hubitat_id) composite — the same anchor resolve_node_to_device
+        # uses — instead of an N-per-row resolve. A discovered Matter device is
+        # "mapped" iff its (hub_ip, hubitat_device_id) resolves to a present
+        # canonical devices row; else _canonical_id stays None and the UI chip
+        # stays dormant.
+        canon_by_anchor: Dict[tuple, Any] = {}
+        try:
+            dv = req.get(f"{postgrest_url}/devices",
+                         params={"select": "id,hub_ip,hubitat_id",
+                                 "is_present": "eq.true"}, timeout=5)
+            if dv.ok:
+                for d in dv.json():
+                    canon_by_anchor[(d.get("hub_ip"), str(d.get("hubitat_id")))] = d.get("id")
+        except Exception as e:
+            logger.debug(f"canonical-anchor enrich skipped: {e}")
+
         for r in rows:
             r["hub_name"] = live.get(r.get("hub_ip"), r.get("hub_name"))
+            # D: literal hub number (DB id) alongside the home_N display name.
+            r["hub_config_id"] = hub_id_by_ip.get(r.get("hub_ip"))
+            # A: psql device id WHEN MAPPED (None → chip dormant, nothing breaks).
+            r["_canonical_id"] = canon_by_anchor.get(
+                (r.get("hub_ip"), str(r.get("hubitat_device_id"))))
+            # C: native-Matter ownership flag (defaults False pre-migration/DB).
+            r.setdefault("is_native_matter", False)
 
         # Dedup by MAC. Group only rows that HAVE a mac; null-mac rows pass
         # through individually (keyed by unique_id so they can't merge).
@@ -4324,16 +4367,36 @@ async def set_mode(request: Request):
 # =============================================================================
 
 
+# =============================================================================
+# THE CUTOVER FRONT DOOR (2026-07-14, cutover plan P0/P2 — operator: "full RN
+# now; legacy jQuery behind /legacy").  GET / serves the React Native (Expo web)
+# admin bundle; every legacy Jinja surface lives under /legacy/* (router below)
+# and the old top-level paths 301 there. The canonical /legacy route strings
+# live in apps/legacy_web/router.py — NOT in the RN app, NOT in nginx.
+# =============================================================================
+from apps.legacy_web import build_legacy_router
+
+app.include_router(build_legacy_router(templates))
+
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def dashboard(request: Request):
-    """Main dashboard."""
-    return templates.TemplateResponse(request, "dashboard.html")
+async def rn_admin_home(request: Request):
+    """The RN admin app (Expo web export, committed at static/admin/). Assets
+    resolve through the /static mount; index.html itself is served no-cache so
+    a redeployed bundle is picked up on plain reload (the hashed JS filenames
+    do the long-term caching)."""
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        "static/admin/index.html",
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
 
 
-@app.get("/instance/new", response_class=HTMLResponse, include_in_schema=False)
-async def new_instance(request: Request):
-    """Instance creation wizard."""
-    return templates.TemplateResponse(request, "instance_wizard.html")
+@app.get("/instance/new", include_in_schema=False)
+async def new_instance():
+    """301 -> /legacy/instance/new (strangler-fig; body in apps/legacy_web)."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/legacy/instance/new", status_code=301)
 
 
 @app.get("/api/instances/{instance_id}/events", tags=["instances"])
@@ -4374,36 +4437,30 @@ async def stream_instance_events(instance_id: int):
         return []
 
 
-@app.get("/matter", response_class=HTMLResponse, include_in_schema=False)
-async def matter_page(request: Request):
-    """Matter device management page."""
-    return templates.TemplateResponse(request, "matter.html")
+# Old top-level legacy paths -> 301 to their /legacy twins (bookmarks and the
+# legacy templates' internal navbars keep working; the redirect translates).
+@app.get("/matter", include_in_schema=False)
+async def matter_page():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/legacy/matter", status_code=301)
 
 
 @app.get("/hubs", include_in_schema=False)
-async def hubs_page(request: Request):
-    """
-    DEPRECATED standalone hub page (was a DUPLICATE of Settings -> Hubs, with its
-    own copy of the hub-card template — the source of drift). Redirect to the one
-    canonical hub UI so there's no second page to keep in sync. templates/hubs.html
-    is now unused.
-    """
+async def hubs_page():
     from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/admin/settings", status_code=307)
+    return RedirectResponse(url="/legacy/admin/settings", status_code=301)
 
 
-@app.get("/sonos", response_class=HTMLResponse, include_in_schema=False)
-async def sonos_page(request: Request):
-    """Sonos driver — standalone speaker controller (Drivers section).
-    TTS announce, set/restore/lock volume, play mp3, stop. See services/sonos/."""
-    return templates.TemplateResponse(request, "sonos.html")
+@app.get("/sonos", include_in_schema=False)
+async def sonos_page():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/legacy/sonos", status_code=301)
 
 
-@app.get("/admin/settings", response_class=HTMLResponse, include_in_schema=False)
-async def admin_settings_page(request: Request):
-    """System settings page — edit rows in system_settings table.
-    Reached via the gear icon in the navbar."""
-    return templates.TemplateResponse(request, "admin_settings.html")
+@app.get("/admin/settings", include_in_schema=False)
+async def admin_settings_page():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/legacy/admin/settings", status_code=301)
 
 
 # =============================================================================
@@ -4933,12 +4990,11 @@ async def delete_hub(hub_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/instance/{instance_id}", response_class=HTMLResponse, include_in_schema=False)
-async def instance_detail(request: Request, instance_id: int):
-    """Instance detail/edit page."""
-    return templates.TemplateResponse(
-        request, "instance_detail.html", {"instance_id": instance_id}
-    )
+@app.get("/instance/{instance_id}", include_in_schema=False)
+async def instance_detail(instance_id: int):
+    """301 -> /legacy/instance/{id} (strangler-fig; body in apps/legacy_web)."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=f"/legacy/instance/{instance_id}", status_code=301)
 
 
 # =============================================================================

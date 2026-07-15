@@ -18,7 +18,17 @@ export type FieldKind =
   | 'integer'
   | 'number'
   | 'string'
+  | 'windows'
   | 'opaque';
+
+/** Conditional visibility: the field renders only while the settings value at
+ *  `key` (pending edit first, then saved value) equals `equals`. Emitted by
+ *  the backend schema as `visibleWhen` (e.g. the wake-on-power seconds field
+ *  gated behind its boolean, operator 2026-07-15). */
+export interface VisibleWhen {
+  key: string;
+  equals: unknown;
+}
 
 /** One editable (or read-only) setting derived from the schema. */
 export interface FieldSpec {
@@ -29,8 +39,11 @@ export interface FieldSpec {
   value: unknown;
   defaultValue: unknown;
   enumOptions: string[] | null;
+  /** Display labels parallel to enumOptions (schema `enumNames`), else null. */
+  enumNames: string[] | null;
   minimum: number | null;
   maximum: number | null;
+  visibleWhen: VisibleWhen | null;
 }
 
 /** The subset of JSON Schema this backend actually emits per property. */
@@ -39,11 +52,17 @@ interface SchemaProp {
   title?: string;
   default?: unknown;
   enum?: unknown[];
+  enumNames?: unknown[];
   minimum?: number;
   maximum?: number;
+  visibleWhen?: { key?: unknown; equals?: unknown };
 }
 
-function kindOf(prop: SchemaProp): FieldKind {
+function kindOf(key: string, prop: SchemaProp): FieldKind {
+  // The weekly-windows object gets its dedicated editor (operator 2026-07-15:
+  // the read-only JSON fallback "is not user friendly at all"). Keyed by name:
+  // it is the ONE cross-app windows widget (STP today), same as the legacy UI.
+  if (key === 'weeklyWindows' && prop.type === 'object') return 'windows';
   if (Array.isArray(prop.enum) && prop.enum.length > 0) return 'enum';
   switch (prop.type) {
     case 'boolean':
@@ -72,7 +91,8 @@ export function deriveFields(
   for (const [key, raw] of Object.entries(props as Record<string, unknown>)) {
     if (!raw || typeof raw !== 'object') continue;
     const prop = raw as SchemaProp;
-    const kind = kindOf(prop);
+    const kind = kindOf(key, prop);
+    const vw = prop.visibleWhen;
     out.push({
       key,
       title: prop.title ?? key,
@@ -83,8 +103,19 @@ export function deriveFields(
         kind === 'enum' && Array.isArray(prop.enum)
           ? prop.enum.map((e) => String(e))
           : null,
+      enumNames:
+        kind === 'enum' &&
+        Array.isArray(prop.enumNames) &&
+        Array.isArray(prop.enum) &&
+        prop.enumNames.length === prop.enum.length
+          ? prop.enumNames.map((e) => String(e))
+          : null,
       minimum: typeof prop.minimum === 'number' ? prop.minimum : null,
       maximum: typeof prop.maximum === 'number' ? prop.maximum : null,
+      visibleWhen:
+        vw && typeof vw.key === 'string'
+          ? { key: vw.key, equals: vw.equals }
+          : null,
     });
   }
   return out;

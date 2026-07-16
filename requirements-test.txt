@@ -17,3 +17,4 @@ pytest-asyncio==0.23.8     # `asyncio_mode=auto` — WITHOUT this 24 async tests
 responses==0.24.1          # conftest's mock_postgrest intercepts requests to postgrest
 psycopg2-binary==2.9.9     # integration tests talk to the test-stack DB
 requests==2.31.0
+playwright==1.40.0          # tests/e2e browser tier (Stage 3 of scripts/e2e_gate.sh); browser binary via `playwright install chromium` on the runner
